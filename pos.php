@@ -43,7 +43,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_GET['action'])) {
 
       $placeholders = implode(',', array_fill(0, count($produkIds), '?'));
       $stmtCheck = $pdo->prepare("
-                SELECT id, nama, harga_jual, stok FROM produk
+                SELECT id, kode, nama, harga_jual, stok FROM produk
                 WHERE id IN ($placeholders) AND status = 'aktif'
             ");
       $stmtCheck->execute($produkIds);
@@ -122,7 +122,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_GET['action'])) {
           $stmtDetail->execute([
             ':transaksi_id' => $transaksiId,
             ':produk_id'    => $pid,
-            ':kode'         => $p['id'],
+            ':kode'         => $p['kode'],
             ':nama'         => $p['nama'],
             ':harga'        => $p['harga_jual'],
             ':qty'          => $qty,
@@ -884,7 +884,50 @@ $kategoriList = $stmtKat->fetchAll(PDO::FETCH_COLUMN);
             <p class="text-xs font-bold uppercase">${msg}</p></div>`;
     }
 
-    window.onload = init;
+
+    // ── Barcode Scanner ───────────────────────────────────────────────────────
+    function focusBarcodeInput() {
+      const input = document.getElementById('search-input');
+      if (input) input.focus();
+    }
+
+    function handleBarcodeScan(code) {
+      const cleanCode = String(code || '').trim().toLowerCase();
+      if (!cleanCode) return;
+
+      const found = PRODUCTS.find(p => String(p.kode || '').trim().toLowerCase() === cleanCode);
+
+      if (found) {
+        addToCart(found.id);
+        const input = document.getElementById('search-input');
+        if (input) {
+          input.value = '';
+          filterProducts();
+          input.focus();
+        }
+      } else {
+        alert('Produk dengan barcode/kode "' + code + '" tidak ditemukan.');
+        focusBarcodeInput();
+      }
+    }
+
+    document.addEventListener('DOMContentLoaded', function() {
+      const searchInput = document.getElementById('search-input');
+      if (!searchInput) return;
+
+      searchInput.addEventListener('keydown', function(e) {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          handleBarcodeScan(this.value);
+        }
+      });
+
+      focusBarcodeInput();
+    });
+    window.onload = function() {
+      init();
+      setTimeout(focusBarcodeInput, 300);
+    };
   </script>
 </body>
 
