@@ -408,16 +408,21 @@ $summary = $pdo->query("
                 </button>
             </div>
             <nav class="space-y-8 flex-1">
-                <a href="index.php" class="block text-sm font-medium text-gray-400 hover:text-black uppercase tracking-widest transition-colors">Dashboard</a>
+                <a href="index.php" class="block text-sm font-bold text-black uppercase tracking-widest">Dashboard</a>
                 <a href="pos.php" class="block text-sm font-medium text-blue-600 uppercase tracking-widest">Mesin Kasir (POS)</a>
-                <a href="#" class="block text-sm font-medium text-gray-400 hover:text-black uppercase tracking-widest transition-colors">Laporan Shift</a>
-                <a href="produk.php" class="block text-sm font-bold text-black uppercase tracking-widest">Kelola Produk</a>
-                <a href="#" class="block text-sm font-medium text-gray-400 hover:text-black uppercase tracking-widest transition-colors">Stok Opname</a>
-                <a href="#" class="block text-sm font-medium text-gray-400 hover:text-black uppercase tracking-widest transition-colors">Pengaturan Toko</a>
+                <!-- <a href="#" class="block text-sm font-medium text-gray-400 uppercase tracking-widest">Laporan Shift</a> -->
+                <a href="produk.php" class="block text-sm font-medium text-gray-400 uppercase tracking-widest">Kelola Produk</a>
+
+                <!-- LOGOUT -->
+                <a href="logout.php"
+                    onclick="return confirm('Yakin mau logout?')"
+                    class="block text-sm font-bold text-red-500 uppercase tracking-widest">
+                    Logout
+                </a>
             </nav>
             <div class="pt-8 border-t border-subtle">
                 <p class="text-[10px] text-gray-400 font-medium uppercase">ID Toko: T042 - BOGOR</p>
-                <p class="text-[10px] text-gray-400 font-medium">v 2.4.0</p>
+                <p class="text-[10px] text-gray-400 font-medium">Login: <?= htmlspecialchars($_SESSION['nama']) ?></p>
             </div>
         </div>
     </div>
@@ -433,14 +438,21 @@ $summary = $pdo->query("
                 <span class="w-2 h-2 bg-blue-600 rounded-full"></span>
                 Mesin Kasir (POS)
             </a>
-            <a href="#" class="block text-xs font-medium text-gray-400 hover:text-black uppercase tracking-widest transition-colors">Laporan Shift</a>
+            <!-- <a href="#" class="block text-xs font-medium text-gray-400 hover:text-black uppercase tracking-widest transition-colors">Laporan Shift</a> -->
             <a href="produk.php" class="block text-xs font-semibold text-black uppercase tracking-widest">Kelola Produk</a>
-            <a href="#" class="block text-xs font-medium text-gray-400 hover:text-black uppercase tracking-widest transition-colors">Stok Opname</a>
-            <a href="#" class="block text-xs font-medium text-gray-400 hover:text-black uppercase tracking-widest transition-colors">Pengaturan Toko</a>
+            <!-- <a href="#" class="block text-xs font-medium text-gray-400 hover:text-black uppercase tracking-widest transition-colors">Stok Opname</a>
+            <a href="#" class="block text-xs font-medium text-gray-400 hover:text-black uppercase tracking-widest transition-colors">Pengaturan Toko</a> -->
         </nav>
         <div class="mt-auto">
             <p class="text-[10px] text-gray-400 font-medium uppercase">ID Toko: T042 - BOGOR</p>
             <p class="text-[10px] text-gray-400 font-medium">v 2.4.0</p>
+
+            <!-- LOGOUT -->
+            <a href="logout.php"
+                onclick="return confirm('Yakin mau logout?')"
+                class="block mt-4 text-[10px] text-red-500 hover:text-red-700 uppercase font-bold tracking-widest">
+                Logout
+            </a>
         </div>
     </aside>
 

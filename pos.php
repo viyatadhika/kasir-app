@@ -326,11 +326,17 @@ $kategoriList = $stmtKat->fetchAll(PDO::FETCH_COLUMN);
       </div>
       <nav class="space-y-8 flex-1">
         <a href="index.php" class="block text-sm font-medium text-gray-400 hover:text-black uppercase tracking-widest transition-colors">Dashboard</a>
-        <a href="pos.php" class="block text-sm font-bold text-black uppercase tracking-widest">Mesin Kasir (POS)</a>
-        <a href="#" class="block text-sm font-medium text-gray-400 hover:text-black uppercase tracking-widest transition-colors">Laporan Shift</a>
+        <a href="pos.php" class="block text-sm font-medium text-blue-600 uppercase tracking-widest">Mesin Kasir (POS)</a>
+        <!-- <a href="#" class="block text-sm font-medium text-gray-400 hover:text-black uppercase tracking-widest transition-colors">Laporan Shift</a> -->
         <a href="produk.php" class="block text-sm font-medium text-gray-400 hover:text-black uppercase tracking-widest transition-colors">Kelola Produk</a>
-        <a href="#" class="block text-sm font-medium text-gray-400 hover:text-black uppercase tracking-widest transition-colors">Stok Opname</a>
-        <a href="#" class="block text-sm font-medium text-gray-400 hover:text-black uppercase tracking-widest transition-colors">Pengaturan Toko</a>
+        <!-- <a href="#" class="block text-sm font-medium text-gray-400 hover:text-black uppercase tracking-widest transition-colors">Stok Opname</a>
+        <a href="#" class="block text-sm font-medium text-gray-400 hover:text-black uppercase tracking-widest transition-colors">Pengaturan Toko</a> -->
+        <!-- LOGOUT -->
+        <a href="logout.php"
+          onclick="return confirm('Yakin mau logout?')"
+          class="block text-sm font-bold text-red-500 uppercase tracking-widest">
+          Logout
+        </a>
       </nav>
       <div class="pt-8 border-t border-subtle">
         <p class="text-[10px] text-gray-400 font-medium uppercase">ID Toko: T042 - BOGOR</p>
@@ -350,14 +356,21 @@ $kategoriList = $stmtKat->fetchAll(PDO::FETCH_COLUMN);
         <span class="w-2 h-2 bg-black rounded-full"></span>
         Mesin Kasir (POS)
       </a>
-      <a href="#" class="block text-xs font-medium text-gray-400 hover:text-black uppercase tracking-widest transition-colors">Laporan Shift</a>
+      <!-- <a href="#" class="block text-xs font-medium text-gray-400 hover:text-black uppercase tracking-widest transition-colors">Laporan Shift</a> -->
       <a href="produk.php" class="block text-xs font-medium text-gray-400 hover:text-black uppercase tracking-widest transition-colors">Kelola Produk</a>
-      <a href="#" class="block text-xs font-medium text-gray-400 hover:text-black uppercase tracking-widest transition-colors">Stok Opname</a>
-      <a href="#" class="block text-xs font-medium text-gray-400 hover:text-black uppercase tracking-widest transition-colors">Pengaturan Toko</a>
+      <!-- <a href="#" class="block text-xs font-medium text-gray-400 hover:text-black uppercase tracking-widest transition-colors">Stok Opname</a>
+      <a href="#" class="block text-xs font-medium text-gray-400 hover:text-black uppercase tracking-widest transition-colors">Pengaturan Toko</a> -->
     </nav>
     <div class="mt-auto">
       <p class="text-[10px] text-gray-400 font-medium uppercase">ID Toko: T042 - BOGOR</p>
       <p class="text-[10px] text-gray-400 font-medium">v 2.4.0</p>
+
+      <!-- LOGOUT -->
+      <a href="logout.php"
+        onclick="return confirm('Yakin mau logout?')"
+        class="block mt-4 text-[10px] text-red-500 hover:text-red-700 uppercase font-bold tracking-widest">
+        Logout
+      </a>
     </div>
   </aside>
 
@@ -493,6 +506,36 @@ $kategoriList = $stmtKat->fetchAll(PDO::FETCH_COLUMN);
             <span class="text-gray-400 font-medium">Kembalian</span>
             <span id="kembalian-display" class="font-black text-green-600">Rp 0</span>
           </div>
+        </div>
+
+        <!-- QRIS Test Mode (Gratis / Dummy) -->
+        <div id="qris-box" class="hidden mt-4 border border-subtle bg-gray-50/60 p-5 text-center">
+          <p class="text-[10px] font-black uppercase tracking-widest text-gray-400 mb-2">
+            QRIS Test Mode
+          </p>
+          <p class="text-xs text-gray-500 mb-4">
+            Scan QR dummy ini untuk simulasi. Klik tombol di bawah jika pembayaran sudah diterima.
+          </p>
+
+          <div class="bg-white border border-subtle inline-block p-3 rounded-sm shadow-sm">
+            <img src="assets/qr_code_kasir.png" class="mx-auto border p-2 rounded-sm">
+          </div>
+
+          <div class="mt-4 text-left bg-white border border-subtle p-3 rounded-sm">
+            <div class="flex justify-between text-[10px] font-bold uppercase tracking-widest text-gray-400">
+              <span>Status</span>
+              <span class="text-yellow-600">Testing</span>
+            </div>
+            <div class="flex justify-between text-[10px] font-bold uppercase tracking-widest text-gray-400 mt-2">
+              <span>Total</span>
+              <span id="qris-total-label" class="text-black">Rp 0</span>
+            </div>
+          </div>
+
+          <button onclick="confirmQrisPayment()"
+            class="mt-4 w-full bg-blue-600 text-white py-3 text-[10px] font-black uppercase tracking-widest rounded-sm hover:bg-blue-700 transition-all">
+            Sudah Dibayar
+          </button>
         </div>
       </div>
       <div class="p-6 sm:p-8 bg-gray-50 flex gap-3 sm:gap-4">
@@ -760,6 +803,10 @@ $kategoriList = $stmtKat->fetchAll(PDO::FETCH_COLUMN);
         `Subtotal ${formatRp(sub)} + Pajak ${formatRp(tax)}`;
 
       hitungKembalian();
+
+      if (selectedMethod === 'qris') {
+        updateQrisTestQR();
+      }
     }
 
     // ── Payment Modal ──────────────────────────────────────────────────────────
@@ -775,7 +822,11 @@ $kategoriList = $stmtKat->fetchAll(PDO::FETCH_COLUMN);
 
     function selectMethod(method) {
       selectedMethod = method;
+
       const tunaiInput = document.getElementById('tunai-input');
+      const qrisBox = document.getElementById('qris-box');
+      const bayarInput = document.getElementById('bayar-input');
+      const btnKonfirmasi = document.getElementById('btn-konfirmasi');
 
       document.getElementById('btn-tunai').className =
         method === 'tunai' ?
@@ -788,11 +839,42 @@ $kategoriList = $stmtKat->fetchAll(PDO::FETCH_COLUMN);
         'p-4 border border-subtle rounded-sm flex flex-col items-center gap-2 hover:border-blue-600 hover:text-blue-600 transition-all';
 
       if (method === 'tunai') {
-        tunaiInput.classList.remove('hidden');
-        document.getElementById('bayar-input').focus();
+        if (tunaiInput) tunaiInput.classList.remove('hidden');
+        if (qrisBox) qrisBox.classList.add('hidden');
+        if (btnKonfirmasi) btnKonfirmasi.innerText = 'Konfirmasi';
+        if (bayarInput) bayarInput.focus();
       } else {
-        tunaiInput.classList.add('hidden');
+        if (tunaiInput) tunaiInput.classList.add('hidden');
+        if (qrisBox) qrisBox.classList.remove('hidden');
+        if (btnKonfirmasi) btnKonfirmasi.innerText = 'Konfirmasi QRIS';
+        updateQrisTestQR();
       }
+    }
+
+    function updateQrisTestQR() {
+      const img = document.getElementById('qris-dummy-img');
+      const label = document.getElementById('qris-total-label');
+
+      const sub = cart.reduce((acc, i) => acc + (Number(i.harga_jual) * Number(i.qty)), 0);
+      const total = sub + Math.round(sub * 0.11);
+
+      if (label) label.innerText = formatRp(total);
+
+      if (img) {
+        const payload = encodeURIComponent('QRIS-TEST|BSDK-SEJAHTERA|TOTAL:' + total + '|TIME:' + Date.now());
+        img.src = 'https://api.qrserver.com/v1/create-qr-code/?size=220x220&data=' + payload;
+      }
+    }
+
+    function confirmQrisPayment() {
+      if (selectedMethod !== 'qris') {
+        selectMethod('qris');
+      }
+
+      const ok = confirm('Konfirmasi pembayaran QRIS test sudah diterima?');
+      if (!ok) return;
+
+      processPayment();
     }
 
     function hitungKembalian() {

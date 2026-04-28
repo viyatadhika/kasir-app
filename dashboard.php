@@ -162,7 +162,7 @@ for ($h = 6; $h <= 22; $h++) {
             <nav class="space-y-8 flex-1">
                 <a href="index.php" class="block text-sm font-bold text-black uppercase tracking-widest">Dashboard</a>
                 <a href="pos.php" class="block text-sm font-medium text-blue-600 uppercase tracking-widest">Mesin Kasir (POS)</a>
-                <a href="#" class="block text-sm font-medium text-gray-400 uppercase tracking-widest">Laporan Shift</a>
+                <!-- <a href="#" class="block text-sm font-medium text-gray-400 uppercase tracking-widest">Laporan Shift</a> -->
                 <a href="produk.php" class="block text-sm font-medium text-gray-400 uppercase tracking-widest">Kelola Produk</a>
 
                 <!-- LOGOUT -->
@@ -190,10 +190,10 @@ for ($h = 6; $h <= 22; $h++) {
                 <span class="w-2 h-2 bg-blue-600 rounded-full"></span>
                 Mesin Kasir (POS)
             </a>
-            <a href="#" class="block text-xs font-medium text-gray-400 hover:text-black uppercase tracking-widest transition-colors">Laporan Shift</a>
+            <!-- <a href="#" class="block text-xs font-medium text-gray-400 hover:text-black uppercase tracking-widest transition-colors">Laporan Shift</a> -->
             <a href="produk.php" class="block text-xs font-medium text-gray-400 hover:text-black uppercase tracking-widest transition-colors">Kelola Produk</a>
-            <a href="#" class="block text-xs font-medium text-gray-400 hover:text-black uppercase tracking-widest transition-colors">Stok Opname</a>
-            <a href="#" class="block text-xs font-medium text-gray-400 hover:text-black uppercase tracking-widest transition-colors">Pengaturan Toko</a>
+            <!-- <a href="#" class="block text-xs font-medium text-gray-400 hover:text-black uppercase tracking-widest transition-colors">Stok Opname</a>
+            <a href="#" class="block text-xs font-medium text-gray-400 hover:text-black uppercase tracking-widest transition-colors">Pengaturan Toko</a> -->
         </nav>
         <div class="mt-auto">
             <p class="text-[10px] text-gray-400 font-medium uppercase">ID Toko: T042 - BOGOR</p>
