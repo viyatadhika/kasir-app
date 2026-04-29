@@ -1,5 +1,225 @@
 <?php
+ini_set('display_errors', 1);
+error_reporting(E_ALL);
 require_once 'config.php';
+
+// ── Helper Promo Diskon Aman ──────────────────────────────────────────
+function diskonColumns(PDO $pdo): array
+{
+    static $cols = null;
+    if ($cols !== null) return $cols;
+    try {
+        $cols = $pdo->query("SHOW COLUMNS FROM diskon")->fetchAll(PDO::FETCH_COLUMN);
+    } catch (Throwable $e) {
+        $cols = [];
+    }
+    return $cols;
+}
+
+function diskonHasColumn(PDO $pdo, string $column): bool
+{
+    return in_array($column, diskonColumns($pdo), true);
+}
+
+function hitungPotonganDiskon(int $base, string $jenis, int $nilai): int
+{
+    if ($base <= 0 || $nilai <= 0) return 0;
+    $potongan = $jenis === 'persen' ? (int)floor($base * $nilai / 100) : $nilai;
+    return max(0, min($base, $potongan));
+}
+
+function getActiveDiscountRows(PDO $pdo, int $subtotal): array
+{
+    if ($subtotal <= 0) return [];
+
+    try {
+        $select = "id, nama, target, jenis, nilai, minimal_belanja, tanggal_mulai, tanggal_selesai";
+        $select .= diskonHasColumn($pdo, 'cakupan') ? ", cakupan" : ", 'transaksi' AS cakupan";
+        $select .= diskonHasColumn($pdo, 'produk_id') ? ", produk_id" : ", NULL AS produk_id";
+        $select .= diskonHasColumn($pdo, 'kategori') ? ", kategori" : ", NULL AS kategori";
+
+        // Member tidak mendapatkan diskon. Member hanya mendapatkan point.
+        // Jadi promo yang dipakai POS hanya target='semua'.
+        $stmt = $pdo->prepare("\n            SELECT $select\n            FROM diskon\n            WHERE status='aktif'\n              AND target='semua'\n              AND minimal_belanja <= :subtotal\n              AND (tanggal_mulai IS NULL OR tanggal_mulai <= CURDATE())\n              AND (tanggal_selesai IS NULL OR tanggal_selesai >= CURDATE())\n            ORDER BY minimal_belanja DESC, id DESC\n        ");
+        $stmt->execute([':subtotal' => $subtotal]);
+        return $stmt->fetchAll(PDO::FETCH_ASSOC);
+    } catch (Throwable $e) {
+        return [];
+    }
+}
+
+function calculateCartDiscounts(PDO $pdo, array $items, array $produkMap, ?int $memberId): array
+{
+    $subtotal = 0;
+    foreach ($items as $item) {
+        $pid = (int)($item['id'] ?? 0);
+        $qty = (int)($item['qty'] ?? 0);
+        if (isset($produkMap[$pid])) {
+            $subtotal += (int)$produkMap[$pid]['harga_jual'] * $qty;
+        }
+    }
+
+    $rows = getActiveDiscountRows($pdo, $subtotal);
+    $candidates = [];
+
+    foreach ($rows as $d) {
+        $cakupan = $d['cakupan'] ?? 'transaksi';
+        $discountAmount = 0;
+        $affectedLines = [];
+
+        if ($cakupan === 'transaksi') {
+            $discountAmount = hitungPotonganDiskon($subtotal, (string)$d['jenis'], (int)$d['nilai']);
+        } elseif ($cakupan === 'produk' || $cakupan === 'kategori') {
+            foreach ($items as $item) {
+                $pid = (int)($item['id'] ?? 0);
+                $qty = (int)($item['qty'] ?? 0);
+                if (!isset($produkMap[$pid]) || $qty <= 0) continue;
+
+                $p = $produkMap[$pid];
+                if ($cakupan === 'produk' && (int)($d['produk_id'] ?? 0) !== $pid) continue;
+                if ($cakupan === 'kategori' && (string)($d['kategori'] ?? '') !== (string)($p['kategori'] ?? '')) continue;
+
+                $lineBase = (int)$p['harga_jual'] * $qty;
+                if ((string)$d['jenis'] === 'persen') {
+                    $lineDiscount = hitungPotonganDiskon($lineBase, 'persen', (int)$d['nilai']);
+                } else {
+                    // Diskon nominal produk/kategori adalah potongan per pcs, lalu dikalikan qty.
+                    $diskonSatuan = hitungPotonganDiskon((int)$p['harga_jual'], 'nominal', (int)$d['nilai']);
+                    $lineDiscount = $diskonSatuan * $qty;
+                }
+
+                if ($lineDiscount > 0) {
+                    $discountAmount += $lineDiscount;
+                    $affectedLines[$pid] = $lineDiscount;
+                }
+            }
+        }
+
+        if ($discountAmount > 0) {
+            $candidates[] = [
+                'id' => (int)$d['id'],
+                'nama' => $d['nama'],
+                'cakupan' => $cakupan,
+                'jenis' => $d['jenis'],
+                'nilai' => (int)$d['nilai'],
+                'diskon' => (int)$discountAmount,
+                'affected_lines' => $affectedLines,
+            ];
+        }
+    }
+
+    // Aturan aman: promo/diskon TIDAK bisa digabung.
+    // Jika ada beberapa promo aktif, POS memilih potongan PALING KECIL agar paling aman untuk toko.
+    $selected = null;
+    foreach ($candidates as $candidate) {
+        if ($selected === null || $candidate['diskon'] < $selected['diskon']) {
+            $selected = $candidate;
+        }
+    }
+
+    $lines = [];
+    foreach ($items as $item) {
+        $pid = (int)$item['id'];
+        $qty = (int)$item['qty'];
+        $p = $produkMap[$pid];
+        $lineBase = (int)$p['harga_jual'] * $qty;
+        $diskonItem = 0;
+        $diskonItemId = null;
+        $diskonItemNama = null;
+
+        if ($selected && ($selected['cakupan'] === 'produk' || $selected['cakupan'] === 'kategori')) {
+            $diskonItem = (int)($selected['affected_lines'][$pid] ?? 0);
+            if ($diskonItem > 0) {
+                $diskonItemId = $selected['id'];
+                $diskonItemNama = $selected['nama'];
+            }
+        }
+
+        $lineNet = max(0, $lineBase - $diskonItem);
+        $hargaFinal = $qty > 0 ? (int)floor($lineNet / $qty) : (int)$p['harga_jual'];
+
+        $lines[] = [
+            'produk_id' => $pid,
+            'kode' => $p['kode'],
+            'nama' => $p['nama'],
+            'harga_normal' => (int)$p['harga_jual'],
+            'qty' => $qty,
+            'subtotal_normal' => $lineBase,
+            'diskon_item' => $diskonItem,
+            'diskon_item_id' => $diskonItemId,
+            'diskon_item_nama' => $diskonItemNama,
+            'harga_final' => $hargaFinal,
+            'subtotal_final' => $lineNet,
+        ];
+    }
+
+    $itemDiskonTotal = ($selected && ($selected['cakupan'] === 'produk' || $selected['cakupan'] === 'kategori')) ? (int)$selected['diskon'] : 0;
+    $transaksiDiskon = ($selected && $selected['cakupan'] === 'transaksi') ? (int)$selected['diskon'] : 0;
+    $totalDiskon = $itemDiskonTotal + $transaksiDiskon;
+
+    return [
+        'subtotal' => $subtotal,
+        'item_diskon' => $itemDiskonTotal,
+        'subtotal_setelah_diskon_item' => max(0, $subtotal - $itemDiskonTotal),
+        'transaksi_diskon' => $transaksiDiskon,
+        'transaksi_diskon_id' => $selected ? $selected['id'] : null,
+        'transaksi_diskon_nama' => $selected ? $selected['nama'] : null,
+        'diskon_terpilih_id' => $selected ? $selected['id'] : null,
+        'diskon_terpilih_nama' => $selected ? $selected['nama'] : null,
+        'diskon_terpilih_cakupan' => $selected ? $selected['cakupan'] : null,
+        'diskon_total' => $totalDiskon,
+        'total' => max(0, $subtotal - $totalDiskon),
+        'lines' => $lines,
+        'aturan_diskon' => 'Promo tidak digabung. Member hanya mendapatkan point. Jika beberapa promo aktif, POS memilih potongan paling kecil agar aman untuk toko.',
+    ];
+}
+
+function transaksiHasDiscountColumns(PDO $pdo): bool
+{
+    static $hasColumns = null;
+    if ($hasColumns !== null) return $hasColumns;
+
+    try {
+        $cols = $pdo->query("SHOW COLUMNS FROM transaksi")->fetchAll(PDO::FETCH_COLUMN);
+        $hasColumns = in_array('diskon', $cols, true) && in_array('diskon_id', $cols, true);
+    } catch (Throwable $e) {
+        $hasColumns = false;
+    }
+
+    return $hasColumns;
+}
+
+function transaksiDetailHasDiscountColumns(PDO $pdo): bool
+{
+    static $hasColumns = null;
+    if ($hasColumns !== null) return $hasColumns;
+
+    try {
+        $cols = $pdo->query("SHOW COLUMNS FROM transaksi_detail")->fetchAll(PDO::FETCH_COLUMN);
+        $hasColumns = in_array('harga_normal', $cols, true) && in_array('diskon', $cols, true) && in_array('diskon_id', $cols, true);
+    } catch (Throwable $e) {
+        $hasColumns = false;
+    }
+
+    return $hasColumns;
+}
+
+
+/*
+SQL tambahan yang disarankan agar rincian transaksi menyimpan harga normal dan diskon barang:
+
+ALTER TABLE transaksi
+ADD COLUMN diskon INT DEFAULT 0 AFTER total,
+ADD COLUMN diskon_id INT NULL AFTER diskon;
+
+ALTER TABLE transaksi_detail
+ADD COLUMN harga_normal INT NULL AFTER nama,
+ADD COLUMN diskon INT DEFAULT 0 AFTER harga,
+ADD COLUMN diskon_id INT NULL AFTER diskon;
+
+Jika kolom transaksi_detail di atas belum ditambahkan, POS tetap jalan,
+tetapi harga detail akan disimpan sebagai harga setelah diskon.
+*/
 
 // ── API Handler ───────────────────────────────────────────────────────────────
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_GET['action'])) {
@@ -59,6 +279,55 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_GET['action'])) {
             else         echo json_encode(['success' => false, 'message' => 'Member tidak ditemukan.']);
             exit;
 
+
+            // Hitung diskon aktif untuk preview POS, termasuk diskon barang
+        case 'hitung_diskon':
+            $input    = json_decode(file_get_contents('php://input'), true);
+            $items    = !empty($input['items']) && is_array($input['items']) ? $input['items'] : [];
+            $memberId = !empty($input['member_id']) ? (int)$input['member_id'] : null;
+
+            if (empty($items)) {
+                echo json_encode([
+                    'success' => true,
+                    'data' => ['subtotal' => 0, 'item_diskon' => 0, 'transaksi_diskon' => 0, 'diskon_total' => 0, 'total' => 0, 'lines' => []],
+                    'total' => 0
+                ], JSON_UNESCAPED_UNICODE);
+                exit;
+            }
+
+            $produkIds = array_values(array_unique(array_map(function ($x) {
+                return (int)($x['id'] ?? 0);
+            }, $items)));
+            $produkIds = array_filter($produkIds);
+
+            if (!$produkIds) {
+                echo json_encode([
+                    'success' => true,
+                    'data' => ['subtotal' => 0, 'item_diskon' => 0, 'transaksi_diskon' => 0, 'diskon_total' => 0, 'total' => 0, 'lines' => []],
+                    'total' => 0
+                ], JSON_UNESCAPED_UNICODE);
+                exit;
+            }
+
+            $placeholders = implode(',', array_fill(0, count($produkIds), '?'));
+            $stmtCheck = $pdo->prepare("SELECT id, kode, nama, kategori, harga_jual, stok FROM produk WHERE id IN ($placeholders) AND status='aktif'");
+            $stmtCheck->execute($produkIds);
+
+            $produkMap = [];
+            foreach ($stmtCheck->fetchAll(PDO::FETCH_ASSOC) as $p) {
+                $produkMap[(int)$p['id']] = $p;
+            }
+
+            $diskonData = calculateCartDiscounts($pdo, $items, $produkMap, $memberId);
+
+            echo json_encode([
+                'success' => true,
+                'data'    => $diskonData,
+                'total'   => $diskonData['total'],
+            ], JSON_UNESCAPED_UNICODE);
+            exit;
+
+
             // Simpan transaksi
         case 'simpan_transaksi':
             $input = json_decode(file_get_contents('php://input'), true);
@@ -73,35 +342,43 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_GET['action'])) {
             $bayar    = (int)($input['bayar'] ?? 0);
             $memberId = !empty($input['member_id']) ? (int)$input['member_id'] : null;
 
-            $produkIds    = array_column($items, 'id');
+            $produkIds = array_values(array_unique(array_column($items, 'id')));
             $placeholders = implode(',', array_fill(0, count($produkIds), '?'));
-            $stmtCheck    = $pdo->prepare("SELECT id, kode, nama, harga_jual, stok FROM produk WHERE id IN ($placeholders) AND status = 'aktif'");
+            $stmtCheck = $pdo->prepare("SELECT id, kode, nama, kategori, harga_jual, stok FROM produk WHERE id IN ($placeholders) AND status = 'aktif'");
             $stmtCheck->execute($produkIds);
-            $produkMap = [];
-            foreach ($stmtCheck->fetchAll() as $p) $produkMap[$p['id']] = $p;
 
-            $subtotal = 0;
+            $produkMap = [];
+            foreach ($stmtCheck->fetchAll(PDO::FETCH_ASSOC) as $p) {
+                $produkMap[(int)$p['id']] = $p;
+            }
+
             foreach ($items as $item) {
                 $pid = (int)$item['id'];
                 $qty = (int)$item['qty'];
+
                 if (!isset($produkMap[$pid])) {
                     echo json_encode(['success' => false, 'message' => "Produk ID $pid tidak ditemukan."]);
                     exit;
                 }
+
                 if ($qty <= 0) {
                     echo json_encode(['success' => false, 'message' => "Qty tidak valid untuk {$produkMap[$pid]['nama']}."]);
                     exit;
                 }
-                if ($produkMap[$pid]['stok'] < $qty) {
+
+                if ((int)$produkMap[$pid]['stok'] < $qty) {
                     echo json_encode(['success' => false, 'message' => "Stok {$produkMap[$pid]['nama']} tidak cukup (sisa: {$produkMap[$pid]['stok']})."]);
                     exit;
                 }
-                $subtotal += $produkMap[$pid]['harga_jual'] * $qty;
             }
 
-            // Tanpa pajak
-            $total     = $subtotal;
-            $kembalian = max(0, $bayar - $total);
+            // Hitung 1 promo diskon yang dipakai. Promo tidak digabung; member hanya point.
+            $diskonData = calculateCartDiscounts($pdo, $items, $produkMap, $memberId);
+            $subtotal   = (int)$diskonData['subtotal'];
+            $diskon     = (int)$diskonData['diskon_total'];
+            $diskonId   = !empty($diskonData['diskon_terpilih_id']) ? (int)$diskonData['diskon_terpilih_id'] : null;
+            $total      = (int)$diskonData['total'];
+            $kembalian  = max(0, $bayar - $total);
 
             if ($bayar > 0 && $bayar < $total) {
                 echo json_encode(['success' => false, 'message' => 'Uang bayar kurang dari total tagihan.']);
@@ -114,31 +391,84 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_GET['action'])) {
             try {
                 $pdo->beginTransaction();
 
-                $stmtTrans = $pdo->prepare("
-                    INSERT INTO transaksi (invoice, user_id, member_id, total, bayar, kembalian, point_dapat, catatan)
-                    VALUES (:invoice,:user_id,:member_id,:total,:bayar,:kembalian,:point_dapat,:catatan)
-                ");
-                $stmtTrans->execute([
-                    ':invoice'     => $invoice,
-                    ':user_id'     => $userId,
-                    ':member_id'   => $memberId,
-                    ':total'       => $total,
-                    ':bayar'       => $bayar,
-                    ':kembalian'   => $kembalian,
-                    ':point_dapat' => $pointDapat,
-                    ':catatan'     => $input['catatan'] ?? null,
-                ]);
+                if (transaksiHasDiscountColumns($pdo)) {
+                    $stmtTrans = $pdo->prepare("
+                        INSERT INTO transaksi (invoice, user_id, member_id, total, diskon, diskon_id, bayar, kembalian, point_dapat, catatan)
+                        VALUES (:invoice,:user_id,:member_id,:total,:diskon,:diskon_id,:bayar,:kembalian,:point_dapat,:catatan)
+                    ");
+                    $stmtTrans->execute([
+                        ':invoice'     => $invoice,
+                        ':user_id'     => $userId,
+                        ':member_id'   => $memberId,
+                        ':total'       => $total,
+                        ':diskon'      => $diskon,
+                        ':diskon_id'   => $diskonId,
+                        ':bayar'       => $bayar,
+                        ':kembalian'   => $kembalian,
+                        ':point_dapat' => $pointDapat,
+                        ':catatan'     => $input['catatan'] ?? null,
+                    ]);
+                } else {
+                    $stmtTrans = $pdo->prepare("
+                        INSERT INTO transaksi (invoice, user_id, member_id, total, bayar, kembalian, point_dapat, catatan)
+                        VALUES (:invoice,:user_id,:member_id,:total,:bayar,:kembalian,:point_dapat,:catatan)
+                    ");
+                    $stmtTrans->execute([
+                        ':invoice'     => $invoice,
+                        ':user_id'     => $userId,
+                        ':member_id'   => $memberId,
+                        ':total'       => $total,
+                        ':bayar'       => $bayar,
+                        ':kembalian'   => $kembalian,
+                        ':point_dapat' => $pointDapat,
+                        ':catatan'     => $input['catatan'] ?? null,
+                    ]);
+                }
                 $transaksiId = $pdo->lastInsertId();
 
-                $stmtDetail = $pdo->prepare("INSERT INTO transaksi_detail (transaksi_id,produk_id,kode,nama,harga,qty,subtotal) VALUES (:tid,:pid,:kode,:nama,:harga,:qty,:sub)");
-                $stmtStok   = $pdo->prepare("UPDATE produk SET stok=stok-:qty, updated_at=NOW() WHERE id=:id");
+                if (transaksiDetailHasDiscountColumns($pdo)) {
+                    $stmtDetail = $pdo->prepare("
+                        INSERT INTO transaksi_detail (transaksi_id,produk_id,kode,nama,harga_normal,harga,diskon,diskon_id,qty,subtotal)
+                        VALUES (:tid,:pid,:kode,:nama,:harga_normal,:harga,:diskon,:diskon_id,:qty,:sub)
+                    ");
+                } else {
+                    $stmtDetail = $pdo->prepare("
+                        INSERT INTO transaksi_detail (transaksi_id,produk_id,kode,nama,harga,qty,subtotal)
+                        VALUES (:tid,:pid,:kode,:nama,:harga,:qty,:sub)
+                    ");
+                }
 
-                foreach ($items as $item) {
-                    $pid = $item['id'];
-                    $qty = $item['qty'];
-                    $p   = $produkMap[$pid];
-                    $sub = $p['harga_jual'] * $qty;
-                    $stmtDetail->execute([':tid' => $transaksiId, ':pid' => $pid, ':kode' => $p['kode'], ':nama' => $p['nama'], ':harga' => $p['harga_jual'], ':qty' => $qty, ':sub' => $sub]);
+                $stmtStok = $pdo->prepare("UPDATE produk SET stok=stok-:qty, updated_at=NOW() WHERE id=:id");
+
+                foreach ($diskonData['lines'] as $line) {
+                    $pid = (int)$line['produk_id'];
+                    $qty = (int)$line['qty'];
+
+                    if (transaksiDetailHasDiscountColumns($pdo)) {
+                        $stmtDetail->execute([
+                            ':tid' => $transaksiId,
+                            ':pid' => $pid,
+                            ':kode' => $line['kode'],
+                            ':nama' => $line['nama'],
+                            ':harga_normal' => $line['harga_normal'],
+                            ':harga' => $line['harga_final'],
+                            ':diskon' => $line['diskon_item'],
+                            ':diskon_id' => $line['diskon_item_id'],
+                            ':qty' => $qty,
+                            ':sub' => $line['subtotal_final'],
+                        ]);
+                    } else {
+                        $stmtDetail->execute([
+                            ':tid' => $transaksiId,
+                            ':pid' => $pid,
+                            ':kode' => $line['kode'],
+                            ':nama' => $line['nama'],
+                            ':harga' => $line['harga_final'],
+                            ':qty' => $qty,
+                            ':sub' => $line['subtotal_final'],
+                        ]);
+                    }
+
                     $stmtStok->execute([':qty' => $qty, ':id' => $pid]);
                 }
 
@@ -164,6 +494,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_GET['action'])) {
                 echo json_encode([
                     'success'     => true,
                     'invoice'     => $invoice,
+                    'subtotal'    => $subtotal,
+                    'diskon'      => $diskon,
+                    'diskon_id'   => $diskonId,
+                    'diskon_nama' => $diskonData['diskon_terpilih_nama'],
+                    'diskon_item' => $diskonData['item_diskon'],
+                    'diskon_transaksi' => $diskonData['transaksi_diskon'],
                     'total'       => $total,
                     'bayar'       => $bayar,
                     'kembalian'   => $kembalian,
@@ -359,6 +695,7 @@ $qrisImage    = 'assets/qr_code_kasir.png';
                 <a href="index.php" class="block text-sm font-medium text-gray-400 hover:text-black uppercase tracking-widest transition-colors">Dashboard</a>
                 <a href="pos.php" class="block text-sm font-bold text-black uppercase tracking-widest">Mesin Kasir (POS)</a>
                 <a href="produk.php" class="block text-sm font-medium text-gray-400 hover:text-black uppercase tracking-widest transition-colors">Kelola Produk</a>
+                <a href="diskon.php" class="block text-sm font-medium text-gray-400 hover:text-black uppercase tracking-widest transition-colors">Kelola Diskon</a>
                 <a href="logout.php" onclick="return confirm('Yakin mau logout?')" class="block text-sm font-bold text-red-500 uppercase tracking-widest">Logout</a>
             </nav>
             <div class="pt-8 border-t border-subtle">
@@ -375,6 +712,7 @@ $qrisImage    = 'assets/qr_code_kasir.png';
             <a href="index.php" class="block text-xs font-medium text-gray-400 hover:text-black uppercase tracking-widest transition-colors">Dashboard</a>
             <a href="pos.php" class="block text-xs font-semibold text-black uppercase tracking-widest flex items-center gap-2"><span class="w-2 h-2 bg-black rounded-full"></span>Mesin Kasir (POS)</a>
             <a href="produk.php" class="block text-xs font-medium text-gray-400 hover:text-black uppercase tracking-widest transition-colors">Kelola Produk</a>
+            <a href="diskon.php" class="block text-xs font-medium text-gray-400 hover:text-black uppercase tracking-widest transition-colors">Kelola Diskon</a>
         </nav>
         <div class="mt-auto">
             <p class="text-[10px] text-gray-400 font-medium uppercase">ID Toko: T042 - BOGOR</p>
@@ -440,7 +778,7 @@ $qrisImage    = 'assets/qr_code_kasir.png';
         <div class="w-full lg:w-[420px] bg-white flex flex-col shadow-none lg:shadow-2xl z-20">
             <div class="p-4 sm:p-6 border-b border-subtle flex justify-between items-center bg-gray-50/30">
                 <h2 class="text-xs font-black uppercase tracking-[0.2em]">Daftar Belanja</h2>
-                <button onclick="clearCart()" class="text-[10px] text-red-500 font-bold uppercase tracking-widest hover:underline">Reset</button>
+                <button onclick="clearCart(true)" class="text-[10px] text-red-500 font-bold uppercase tracking-widest hover:underline">Reset</button>
             </div>
 
             <!-- Input Member -->
@@ -494,6 +832,10 @@ $qrisImage    = 'assets/qr_code_kasir.png';
             <div class="p-4 sm:p-6 border-t border-subtle bg-white space-y-3 sticky bottom-20 lg:static shadow-[0_-8px_24px_rgba(0,0,0,0.04)] lg:shadow-none">
                 <div class="flex justify-between text-[11px] font-medium text-gray-400 uppercase tracking-widest">
                     <span>Subtotal</span><span id="subtotal">Rp 0</span>
+                </div>
+                <!-- Preview diskon -->
+                <div id="diskon-preview" class="hidden flex justify-between text-[11px] font-bold text-red-600 uppercase tracking-widest">
+                    <span id="diskon-preview-label">Diskon</span><span id="diskon-preview-val">-Rp 0</span>
                 </div>
                 <!-- Preview point -->
                 <div id="point-preview" class="hidden flex justify-between text-[11px] font-bold text-blue-600 uppercase tracking-widest">
@@ -589,6 +931,7 @@ $qrisImage    = 'assets/qr_code_kasir.png';
             <h3 class="text-xl font-black mb-2">Transaksi Berhasil!</h3>
             <p class="text-xs text-gray-400 uppercase tracking-widest mb-1" id="success-invoice"></p>
             <p class="text-2xl font-black text-blue-600 my-2" id="success-total"></p>
+            <p class="text-xs text-red-500 font-bold hidden" id="success-diskon"></p>
             <p class="text-sm text-gray-500 font-medium" id="success-kembalian"></p>
             <div id="success-point-wrap" class="hidden mt-3 bg-blue-50 border border-blue-200 px-4 py-3">
                 <p class="text-[10px] font-bold uppercase tracking-widest text-blue-400 mb-1">Point Member</p>
@@ -647,6 +990,8 @@ $qrisImage    = 'assets/qr_code_kasir.png';
         let currentCat = 'Semua';
         let selectedMethod = 'tunai';
         let activeMember = null;
+        let activeDiskon = null; // ringkasan 1 promo diskon yang dipakai
+        let diskonPreviewTimeout = null;
 
         // ── Member Autocomplete State ─────────────────────────────────────────────
         let memberSuggestTimeout = null;
@@ -873,6 +1218,7 @@ $qrisImage    = 'assets/qr_code_kasir.png';
 
         function clearMember() {
             activeMember = null;
+            activeDiskon = null;
             document.getElementById('member-input').value = '';
             document.getElementById('member-found').style.display = 'none';
             document.getElementById('member-notfound').style.display = 'none';
@@ -967,13 +1313,131 @@ $qrisImage    = 'assets/qr_code_kasir.png';
             updateUI();
         }
 
-        function clearCart() {
+        function clearCart(resetMember = false) {
             cart = [];
-            clearMember(); // ⬅️ ini yang penting
+            activeDiskon = null;
+            if (resetMember) {
+                activeMember = null;
+                const memberInput = document.getElementById('member-input');
+                if (memberInput) memberInput.value = '';
+                document.getElementById('member-found').style.display = 'none';
+                document.getElementById('member-notfound').style.display = 'none';
+                hideMemberSuggest();
+            }
             updateUI();
         }
 
-        function updateUI() {
+
+        function getSubtotal() {
+            return cart.reduce((a, i) => a + i.harga_jual * i.qty, 0);
+        }
+
+        function getDiskonAmount() {
+            return activeDiskon ? parseInt(activeDiskon.diskon_total || 0) : 0;
+        }
+
+        function getGrandTotal() {
+            return activeDiskon ? parseInt(activeDiskon.total || 0) : Math.max(0, getSubtotal() - getDiskonAmount());
+        }
+
+        function applyTotalsToUI() {
+            const subtotal = getSubtotal();
+            const diskon = getDiskonAmount();
+            const total = activeDiskon ? parseInt(activeDiskon.total || 0) : Math.max(0, subtotal - diskon);
+
+            document.getElementById('subtotal').innerText = formatRp(subtotal);
+            document.getElementById('total-price').innerText = formatRp(total);
+            document.getElementById('modal-total').innerText = formatRp(total);
+            document.getElementById('qris-total-label').innerText = formatRp(total);
+
+            const diskonWrap = document.getElementById('diskon-preview');
+            const diskonLabel = document.getElementById('diskon-preview-label');
+            const diskonVal = document.getElementById('diskon-preview-val');
+            if (diskon > 0 && activeDiskon) {
+                diskonLabel.innerText = activeDiskon.label || 'Diskon';
+                diskonVal.innerText = '-' + formatRp(diskon);
+                diskonWrap.classList.remove('hidden');
+                diskonWrap.style.display = 'flex';
+            } else {
+                diskonWrap.classList.add('hidden');
+                diskonWrap.style.display = 'none';
+            }
+
+            return {
+                subtotal,
+                diskon,
+                total
+            };
+        }
+
+        async function refreshDiskonPreview() {
+            const subtotal = getSubtotal();
+            if (subtotal <= 0) {
+                activeDiskon = null;
+                applyTotalsToUI();
+                return;
+            }
+
+            try {
+                const res = await fetch('pos.php?action=hitung_diskon', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        items: cart.map(i => ({
+                            id: parseInt(i.id),
+                            qty: parseInt(i.qty)
+                        })),
+                        member_id: activeMember?.id || null
+                    })
+                });
+                const d = await res.json();
+                if (d.success && d.data && parseInt(d.data.diskon_total || 0) > 0) {
+                    activeDiskon = d.data;
+                    const parts = [];
+                    if (activeDiskon.diskon_terpilih_nama) {
+                        parts.push(activeDiskon.diskon_terpilih_nama);
+                    } else if (parseInt(activeDiskon.item_diskon || 0) > 0) {
+                        parts.push('Diskon Barang');
+                    } else if (parseInt(activeDiskon.transaksi_diskon || 0) > 0) {
+                        parts.push('Diskon Transaksi');
+                    }
+                    activeDiskon.label = parts.join('') || 'Diskon';
+
+                    if (Array.isArray(activeDiskon.lines)) {
+                        cart = cart.map(item => {
+                            const line = activeDiskon.lines.find(l => parseInt(l.produk_id) === parseInt(item.id));
+                            return line ? {
+                                ...item,
+                                diskon_item: parseInt(line.diskon_item || 0),
+                                harga_final: parseInt(line.harga_final || item.harga_jual),
+                                diskon_item_nama: line.diskon_item_nama || null
+                            } : item;
+                        });
+                    }
+                } else {
+                    activeDiskon = null;
+                    cart = cart.map(item => ({
+                        ...item,
+                        diskon_item: 0,
+                        harga_final: item.harga_jual,
+                        diskon_item_nama: null
+                    }));
+                }
+            } catch (e) {
+                activeDiskon = null;
+            }
+
+            updateUI(false);
+        }
+
+        function scheduleDiskonPreview() {
+            clearTimeout(diskonPreviewTimeout);
+            diskonPreviewTimeout = setTimeout(refreshDiskonPreview, 150);
+        }
+
+        function updateUI(refreshDiskon = true) {
             const container = document.getElementById('cart-container');
             if (!container) return;
 
@@ -986,7 +1450,12 @@ $qrisImage    = 'assets/qr_code_kasir.png';
                 <div class="cart-item-anim flex justify-between items-center bg-gray-50/30 p-4 rounded-2xl border border-subtle">
                     <div class="flex-1 pr-2">
                         <h5 class="text-[10px] font-bold uppercase leading-tight tracking-tight">${item.nama}</h5>
-                        <p class="text-[9px] text-gray-400 mt-1">${formatRp(item.harga_jual)}</p>
+                        <p class="text-[9px] text-gray-400 mt-1">
+                            ${item.diskon_item > 0
+                                ? `<span class="line-through">${formatRp(item.harga_jual)}</span> <span class="text-red-500 font-black">${formatRp(item.harga_final || item.harga_jual)}</span>`
+                                : formatRp(item.harga_jual)}
+                        </p>
+                        ${item.diskon_item > 0 ? `<p class="text-[8px] text-red-500 font-black uppercase mt-0.5">-${formatRp(item.diskon_item)} ${item.diskon_item_nama ? '· ' + item.diskon_item_nama : ''}</p>` : ''}
                     </div>
                     <div class="flex items-center gap-3">
                         <div class="flex items-center gap-2 bg-white rounded-lg border border-subtle p-1">
@@ -994,18 +1463,15 @@ $qrisImage    = 'assets/qr_code_kasir.png';
                             <span class="text-[10px] font-black w-4 text-center">${item.qty}</span>
                             <button onclick="updateQty(${item.id}, 1)" class="w-5 h-5 flex items-center justify-center text-[10px] hover:bg-gray-100">+</button>
                         </div>
-                        <p class="text-[11px] font-black w-20 text-right">${formatRp(item.harga_jual * item.qty)}</p>
+                        <p class="text-[11px] font-black w-20 text-right">${formatRp((item.harga_final || item.harga_jual) * item.qty)}</p>
                     </div>
                 </div>`).join('');
             }
 
-            const total = cart.reduce((a, i) => a + i.harga_jual * i.qty, 0);
-            document.getElementById('subtotal').innerText = formatRp(total);
-            document.getElementById('total-price').innerText = formatRp(total);
-            document.getElementById('modal-total').innerText = formatRp(total);
-            document.getElementById('qris-total-label').innerText = formatRp(total);
+            const totals = applyTotalsToUI();
+            const total = totals.total;
 
-            // Preview point
+            // Preview point dihitung dari total setelah diskon
             const pointDapat = activeMember ? Math.floor(total / 10000) : 0;
             const ppWrap = document.getElementById('point-preview');
             if (activeMember && pointDapat > 0) {
@@ -1028,6 +1494,7 @@ $qrisImage    = 'assets/qr_code_kasir.png';
 
             hitungKembalian();
             renderNominalCepat(total);
+            if (refreshDiskon) scheduleDiskonPreview();
         }
 
         function renderNominalCepat(total) {
@@ -1080,7 +1547,7 @@ $qrisImage    = 'assets/qr_code_kasir.png';
         }
 
         function hitungKembalian() {
-            const total = cart.reduce((a, i) => a + i.harga_jual * i.qty, 0);
+            const total = getGrandTotal();
             const bayar = parseInt(document.getElementById('bayar-input')?.value || 0);
             const kem = Math.max(0, bayar - total);
             const el = document.getElementById('kembalian-display');
@@ -1096,7 +1563,8 @@ $qrisImage    = 'assets/qr_code_kasir.png';
 
         async function processPayment() {
             if (!cart.length) return;
-            const total = cart.reduce((a, i) => a + i.harga_jual * i.qty, 0);
+            await refreshDiskonPreview();
+            const total = getGrandTotal();
             let bayar = 0;
             if (selectedMethod === 'tunai') {
                 bayar = parseInt(document.getElementById('bayar-input').value || 0);
@@ -1132,6 +1600,14 @@ $qrisImage    = 'assets/qr_code_kasir.png';
                     closePayment();
                     document.getElementById('success-invoice').innerText = d.invoice;
                     document.getElementById('success-total').innerText = formatRp(d.total);
+                    const sd = document.getElementById('success-diskon');
+                    if (sd && parseInt(d.diskon || 0) > 0) {
+                        sd.innerText = `Diskon barang: -${formatRp(d.diskon_item || 0)} · Diskon transaksi: -${formatRp(d.diskon_transaksi || 0)} · Total diskon: -${formatRp(d.diskon || 0)}`;
+                        sd.classList.remove('hidden');
+                    } else if (sd) {
+                        sd.classList.add('hidden');
+                        sd.innerText = '';
+                    }
                     document.getElementById('success-kembalian').innerText = selectedMethod === 'tunai' ?
                         'Kembalian: ' + formatRp(d.kembalian) :
                         'QRIS – Lunas ✓';
@@ -1167,26 +1643,11 @@ $qrisImage    = 'assets/qr_code_kasir.png';
         }
 
         function resetTransaksiBaru() {
-            clearCart();
-            clearMember();
-
+            clearCart(true);
             const bayarInput = document.getElementById('bayar-input');
             if (bayarInput) bayarInput.value = '';
-
-            const kembalianDisplay = document.getElementById('kembalian-display');
-            if (kembalianDisplay) {
-                kembalianDisplay.innerText = formatRp(0);
-                kembalianDisplay.className = 'text-sm font-black text-gray-400';
-            }
-
-            selectedMethod = 'tunai';
-            closePayment();
             closeSuccess();
-            updateUI();
-
-            setTimeout(() => {
-                document.getElementById('search-input')?.focus();
-            }, 100);
+            setTimeout(() => document.getElementById('search-input')?.focus(), 100);
         }
 
         // ── Barcode Scanner ──────────────────────────────────────────────────────────
