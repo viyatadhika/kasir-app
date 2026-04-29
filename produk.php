@@ -415,6 +415,9 @@ $summary = $pdo->query("
                 <a href="diskon.php" class="block text-xs font-medium text-gray-400 hover:text-black uppercase tracking-widest transition-colors">
                     Kelola Diskon
                 </a>
+                <a href="laporan.php" class="block text-xs font-medium text-gray-400 hover:text-black uppercase tracking-widest transition-colors">
+                    Laporan Keuangan
+                </a>
 
                 <!-- LOGOUT -->
                 <a href="logout.php"
@@ -446,7 +449,11 @@ $summary = $pdo->query("
 
             <a href="diskon.php" class="block text-xs font-medium text-gray-400 hover:text-black uppercase tracking-widest transition-colors">
                 Kelola Diskon
-            </a><!-- <a href="#" class="block text-xs font-medium text-gray-400 hover:text-black uppercase tracking-widest transition-colors">Stok Opname</a>
+            </a>
+            <a href="laporan.php" class="block text-xs font-medium text-gray-400 hover:text-black uppercase tracking-widest transition-colors">
+                Laporan Keuangan
+            </a>
+            <!-- <a href="#" class="block text-xs font-medium text-gray-400 hover:text-black uppercase tracking-widest transition-colors">Stok Opname</a>
             <a href="#" class="block text-xs font-medium text-gray-400 hover:text-black uppercase tracking-widest transition-colors">Pengaturan Toko</a> -->
         </nav>
         <div class="mt-auto">

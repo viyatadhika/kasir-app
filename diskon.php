@@ -376,6 +376,9 @@ try {
                 <a href="pos.php" class="block text-sm font-medium text-blue-600 uppercase tracking-widest">Mesin Kasir (POS)</a>
                 <a href="produk.php" class="block text-sm font-medium text-gray-400 uppercase tracking-widest">Kelola Produk</a>
                 <a href="diskon.php" class="block text-sm font-semibold text-black uppercase tracking-widest">Kelola Diskon</a>
+                <a href="laporan.php" class="block text-xs font-medium text-gray-400 hover:text-black uppercase tracking-widest transition-colors">
+                    Laporan Keuangan
+                </a>
                 <a href="logout.php" onclick="return confirm('Yakin mau logout?')" class="block text-sm font-bold text-red-500 uppercase tracking-widest">Logout</a>
             </nav>
             <div class="pt-8 border-t border-subtle">
@@ -400,6 +403,9 @@ try {
             <a href="diskon.php" class="block text-xs font-semibold text-black uppercase tracking-widest flex items-center gap-2">
                 <span class="w-2 h-2 bg-black rounded-full"></span>
                 Kelola Diskon
+            </a>
+            <a href="laporan.php" class="block text-xs font-medium text-gray-400 hover:text-black uppercase tracking-widest transition-colors">
+                Laporan Keuangan
             </a>
         </nav>
         <div class="mt-auto">
