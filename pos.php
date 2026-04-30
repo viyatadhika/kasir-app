@@ -997,6 +997,9 @@ $qrisImage    = 'assets/qr_code_kasir.png';
         let activeDiskon = null; // ringkasan 1 promo diskon yang dipakai
         let diskonPreviewTimeout = null;
 
+        // Saat transaksi sukses, display dikunci agar heartbeat tidak menimpa layar "Terima Kasih"
+        let customerDisplayLockedUntil = 0;
+
         // ── Member Autocomplete State ─────────────────────────────────────────────
         let memberSuggestTimeout = null;
         let memberSuggestIndex = -1;
@@ -1499,6 +1502,9 @@ $qrisImage    = 'assets/qr_code_kasir.png';
             hitungKembalian();
             renderNominalCepat(total);
             if (refreshDiskon) scheduleDiskonPreview();
+
+            // Update layar pembeli setiap kali tampilan kasir berubah
+            updateCustomerDisplay();
         }
 
         function renderNominalCepat(total) {
@@ -1629,7 +1635,21 @@ $qrisImage    = 'assets/qr_code_kasir.png';
 
                     document.getElementById('btn-struk').href = 'struk.php?invoice=' + encodeURIComponent(d.invoice);
                     document.getElementById('success-modal').style.display = 'flex';
-                    clearCart();
+
+                    // Tampilkan ucapan terima kasih di layar pembeli.
+                    // Jangan langsung clearCart(), karena updateUI akan menimpa layar thank_you.
+                    showThankYouDisplay(d);
+
+                    // Setelah 10 detik, reset semua display termasuk member.
+                    setTimeout(() => {
+                        clearCart(true);
+                        resetCustomerDisplay();
+                        customerDisplayLockedUntil = 0;
+
+                        const bayarInput = document.getElementById('bayar-input');
+                        if (bayarInput) bayarInput.value = '';
+                    }, 10000);
+
                     await loadProducts();
                 } else {
                     alert('Gagal: ' + d.message);
@@ -1724,7 +1744,128 @@ $qrisImage    = 'assets/qr_code_kasir.png';
         window.onload = () => {
             init();
             setTimeout(() => document.getElementById('search-input')?.focus(), 300);
+
+            // Kondisi awal layar pembeli
+            updateCustomerDisplay();
+
+            // Heartbeat supaya display tahu POS masih aktif
+            setInterval(updateCustomerDisplay, 2000);
         };
+
+        function getCustomerDisplayPayload() {
+            return {
+                mode: 'cart',
+                items: cart.map(i => ({
+                    nama: i.nama,
+                    qty: i.qty,
+                    harga: i.harga_final || i.harga_jual,
+                    subtotal: (i.harga_final || i.harga_jual) * i.qty,
+                    // diskon_item sudah total diskon per baris
+                    diskon: (i.diskon_item || 0)
+                })),
+                subtotal: getSubtotal(),
+                diskon: getDiskonAmount(),
+                total: getGrandTotal(),
+                member: activeMember ? {
+                    nama: activeMember.nama,
+                    point: Math.floor(getGrandTotal() / 10000)
+                } : null
+            };
+        }
+
+        function updateCustomerDisplay() {
+            // Jangan kirim mode cart saat layar pembeli sedang menampilkan "Terima Kasih"
+            if (Date.now() < customerDisplayLockedUntil) {
+                return;
+            }
+
+            const data = getCustomerDisplayPayload();
+
+            fetch('update_display.php', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify(data),
+                keepalive: true
+            }).catch(() => {});
+        }
+
+        function showThankYouDisplay(dataTransaksi) {
+            // Kunci update cart selama 10 detik agar ucapan terima kasih tidak langsung hilang
+            customerDisplayLockedUntil = Date.now() + 10000;
+
+            const data = {
+                mode: 'thank_you',
+                items: cart.map(i => ({
+                    nama: i.nama,
+                    qty: i.qty,
+                    harga: i.harga_final || i.harga_jual,
+                    subtotal: (i.harga_final || i.harga_jual) * i.qty,
+                    diskon: (i.diskon_item || 0)
+                })),
+                subtotal: parseInt(dataTransaksi.subtotal || getSubtotal()),
+                diskon: parseInt(dataTransaksi.diskon || getDiskonAmount()),
+                total: parseInt(dataTransaksi.total || getGrandTotal()),
+                bayar: parseInt(dataTransaksi.bayar || 0),
+                kembalian: parseInt(dataTransaksi.kembalian || 0),
+                invoice: dataTransaksi.invoice || '',
+                metode: selectedMethod === 'qris' ? 'QRIS / EDC' : 'TUNAI',
+                member: activeMember ? {
+                    nama: activeMember.nama,
+                    point: parseInt(dataTransaksi.point_dapat || 0),
+                    point_total: parseInt(dataTransaksi.point_total || activeMember.point || 0)
+                } : null
+            };
+
+            fetch('update_display.php', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify(data),
+                keepalive: true
+            }).catch(() => {});
+        }
+
+        function resetCustomerDisplay() {
+            const data = {
+                mode: 'cart',
+                items: [],
+                subtotal: 0,
+                diskon: 0,
+                total: 0,
+                member: null
+            };
+
+            fetch('update_display.php', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify(data),
+                keepalive: true
+            }).catch(() => {});
+        }
+
+        function resetCustomerDisplayBeacon() {
+            const data = {
+                mode: 'cart',
+                items: [],
+                subtotal: 0,
+                diskon: 0,
+                total: 0,
+                member: null
+            };
+
+            const blob = new Blob([JSON.stringify(data)], {
+                type: 'application/json'
+            });
+
+            navigator.sendBeacon('update_display.php', blob);
+        }
+
+        window.addEventListener('beforeunload', resetCustomerDisplayBeacon);
     </script>
 </body>
 

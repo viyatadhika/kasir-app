@@ -6,5 +6,5 @@ require 'auth.php';
 session_destroy();
 
 // Kembali ke login
-header('Location: login.php');
+header('Location: index.php');
 exit;
