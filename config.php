@@ -4,6 +4,8 @@
 if (session_status() === PHP_SESSION_NONE) {
     session_start();
 }
+
+// Set timezone PHP ke WIB
 date_default_timezone_set('Asia/Jakarta');
 
 // ── Konfigurasi Database ─────────────────────────────────────────────────────
@@ -22,45 +24,60 @@ try {
         [
             PDO::ATTR_ERRMODE            => PDO::ERRMODE_EXCEPTION,
             PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
-            PDO::ATTR_EMULATE_PREPARES   => false, // lebih aman dari SQL injection
+            PDO::ATTR_EMULATE_PREPARES   => false,
         ]
     );
+
+    // Paksa MySQL pakai WIB (+07:00)
+    $pdo->exec("SET time_zone = '+07:00'");
 } catch (PDOException $e) {
     http_response_code(500);
-    // Pada production: jangan tampilkan pesan error ke user
-    die("Koneksi database gagal: " . $e->getMessage());
+    die("Koneksi database gagal");
 }
 
 // ── Helper Functions ─────────────────────────────────────────────────────────
 
-// Buat URL dari base
+/**
+ * Buat URL dari base
+ */
 function base_url(string $path = ''): string
 {
     return BASE_URL . ltrim($path, '/');
 }
 
-// Escape output HTML (cegah XSS)
+/**
+ * Escape HTML (anti XSS)
+ * @param mixed $value
+ */
 function e($value): string
 {
-    return htmlspecialchars($value ?? '', ENT_QUOTES, 'UTF-8');
+    return htmlspecialchars((string)($value ?? ''), ENT_QUOTES, 'UTF-8');
 }
 
-// Format angka ke Rupiah
+/**
+ * Format Rupiah
+ * @param mixed $angka
+ */
 function rupiah($angka): string
 {
-    return 'Rp ' . number_format((int)$angka, 0, ',', '.');
+    return 'Rp ' . number_format((int)($angka ?? 0), 0, ',', '.');
 }
 
-// Alias rupiah (dipakai di index.php & pos.php)
+/**
+ * Alias rupiah
+ * @param mixed $angka
+ */
 function formatRp($angka): string
 {
     return rupiah($angka);
 }
 
-// Generate nomor invoice unik
+/**
+ * Generate invoice unik
+ */
 function generateInvoice(): string
 {
-    return 'INV-' . date('Ymd') . date('His') . '-' . rand(100, 999);
+    return 'INV-' . date('YmdHis') . '-' . rand(100, 999);
 }
 
 // ── Sinkronisasi Auth Session ────────────────────────────────────────────────

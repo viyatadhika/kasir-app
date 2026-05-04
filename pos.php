@@ -3,6 +3,23 @@ ini_set('display_errors', 1);
 error_reporting(E_ALL);
 require_once 'config.php';
 
+if (!function_exists('e')) {
+    /**
+     * Escape helper
+     * @param mixed $v
+     * @return string
+     */
+    function e($v): string
+    {
+        return htmlspecialchars((string)($v ?? ''), ENT_QUOTES, 'UTF-8');
+    }
+}
+
+
+// ── Aturan Tukar Point ───────────────────────────────────────────────────────
+// 1 point = Rp 1.000. Ubah nilai ini jika aturan koperasi berubah.
+define('POINT_RUPIAH', 1000);
+
 // ── Helper Promo Diskon Aman ──────────────────────────────────────────
 function diskonColumns(PDO $pdo): array
 {
@@ -48,7 +65,7 @@ function getActiveDiscountRows(PDO $pdo, int $subtotal): array
     }
 }
 
-function calculateCartDiscounts(PDO $pdo, array $items, array $produkMap, ?int $memberId): array
+function calculateCartDiscounts(PDO $pdo, array $items, array $produkMap, $memberId = null): array
 {
     $subtotal = 0;
     foreach ($items as $item) {
@@ -189,6 +206,22 @@ function transaksiHasDiscountColumns(PDO $pdo): bool
     return $hasColumns;
 }
 
+
+function transaksiHasPointRedeemColumns(PDO $pdo): bool
+{
+    static $hasColumns = null;
+    if ($hasColumns !== null) return $hasColumns;
+
+    try {
+        $cols = $pdo->query("SHOW COLUMNS FROM transaksi")->fetchAll(PDO::FETCH_COLUMN);
+        $hasColumns = in_array('point_pakai', $cols, true) && in_array('nilai_point_pakai', $cols, true);
+    } catch (Throwable $e) {
+        $hasColumns = false;
+    }
+
+    return $hasColumns;
+}
+
 function transaksiDetailHasDiscountColumns(PDO $pdo): bool
 {
     static $hasColumns = null;
@@ -238,45 +271,120 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_GET['action'])) {
 
             // Suggest member (autocomplete)
         case 'suggest_member':
-            $input = json_decode(file_get_contents('php://input'), true);
-            $q = trim($input['q'] ?? '');
+            $input = json_decode(file_get_contents('php://input'), true) ?: [];
+            $q = trim((string)($input['q'] ?? ''));
 
-            if (strlen($q) < 1) {
-                echo json_encode([]);
+            if ($q === '') {
+                echo json_encode([], JSON_UNESCAPED_UNICODE);
                 exit;
             }
 
-            $like = '%' . $q . '%';
+            $qDigits = preg_replace('/\D+/', '', $q);
+            $hpExpr = "REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(COALESCE(no_hp, ''), ' ', ''), '-', ''), '+', ''), '.', ''), '(', ''), ')', '')";
 
             $stmt = $pdo->prepare("
-        SELECT id, kode, nama, no_hp, point
-        FROM member
-        WHERE (kode LIKE :q_kode OR nama LIKE :q_nama)
-          AND status = 'aktif'
-        LIMIT 5
-    ");
+                SELECT id, kode, nama, no_hp, point
+                FROM member
+                WHERE status = 'aktif'
+                  AND (
+                        kode LIKE :kode_like
+                     OR nama LIKE :nama_like
+                     OR COALESCE(no_hp, '') LIKE :hp_like
+                     OR $hpExpr LIKE :hp_digits_like
+                  )
+                ORDER BY
+                  CASE
+                    WHEN kode = :kode_exact THEN 1
+                    WHEN COALESCE(no_hp, '') = :hp_exact THEN 2
+                    WHEN $hpExpr = :hp_digits_exact THEN 3
+                    WHEN nama LIKE :nama_prefix THEN 4
+                    WHEN kode LIKE :kode_prefix THEN 5
+                    WHEN COALESCE(no_hp, '') LIKE :hp_prefix THEN 6
+                    ELSE 7
+                  END, nama ASC
+                LIMIT 8
+            ");
 
             $stmt->execute([
-                ':q_kode' => $like,
-                ':q_nama' => $like
+                ':kode_like' => '%' . $q . '%',
+                ':nama_like' => '%' . $q . '%',
+                ':hp_like' => '%' . $q . '%',
+                ':hp_digits_like' => $qDigits !== '' ? '%' . $qDigits . '%' : '%' . $q . '%',
+                ':kode_exact' => $q,
+                ':hp_exact' => $q,
+                ':hp_digits_exact' => $qDigits,
+                ':nama_prefix' => $q . '%',
+                ':kode_prefix' => $q . '%',
+                ':hp_prefix' => $q . '%',
             ]);
 
-            echo json_encode($stmt->fetchAll(PDO::FETCH_ASSOC));
+            echo json_encode($stmt->fetchAll(PDO::FETCH_ASSOC), JSON_UNESCAPED_UNICODE);
             exit;
 
-            // Cari member berdasarkan kode (exact)
+            // Cari member berdasarkan kode, nama, atau nomor HP
         case 'cari_member':
-            $input = json_decode(file_get_contents('php://input'), true);
-            $kode  = trim($input['kode'] ?? '');
-            if (!$kode) {
-                echo json_encode(['success' => false, 'message' => 'Kode member kosong.']);
+            $input = json_decode(file_get_contents('php://input'), true) ?: [];
+            $keyword = trim((string)($input['keyword'] ?? ($input['kode'] ?? '')));
+            if ($keyword === '') {
+                echo json_encode(['success' => false, 'message' => 'Input member kosong.'], JSON_UNESCAPED_UNICODE);
                 exit;
             }
-            $stmt = $pdo->prepare("SELECT id, kode, nama, no_hp, point FROM member WHERE kode = :kode AND status = 'aktif'");
-            $stmt->execute([':kode' => $kode]);
-            $member = $stmt->fetch();
-            if ($member) echo json_encode(['success' => true,  'data'    => $member]);
-            else         echo json_encode(['success' => false, 'message' => 'Member tidak ditemukan.']);
+
+            $keywordDigits = preg_replace('/\D+/', '', $keyword);
+            $hpExpr = "REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(COALESCE(no_hp, ''), ' ', ''), '-', ''), '+', ''), '.', ''), '(', ''), ')', '')";
+
+            $stmt = $pdo->prepare("
+                SELECT id, kode, nama, no_hp, point
+                FROM member
+                WHERE status = 'aktif'
+                  AND (
+                        kode = :kode_exact
+                     OR nama = :nama_exact
+                     OR COALESCE(no_hp, '') = :hp_exact
+                     OR $hpExpr = :hp_digits_exact
+                     OR kode LIKE :kode_like
+                     OR nama LIKE :nama_like
+                     OR COALESCE(no_hp, '') LIKE :hp_like
+                     OR $hpExpr LIKE :hp_digits_like
+                  )
+                ORDER BY
+                  CASE
+                    WHEN kode = :kode_exact_order THEN 1
+                    WHEN COALESCE(no_hp, '') = :hp_exact_order THEN 2
+                    WHEN $hpExpr = :hp_digits_exact_order THEN 3
+                    WHEN nama = :nama_exact_order THEN 4
+                    WHEN kode LIKE :kode_prefix THEN 5
+                    WHEN nama LIKE :nama_prefix THEN 6
+                    WHEN COALESCE(no_hp, '') LIKE :hp_prefix THEN 7
+                    ELSE 8
+                  END, nama ASC
+                LIMIT 1
+            ");
+
+            $stmt->execute([
+                ':kode_exact' => $keyword,
+                ':nama_exact' => $keyword,
+                ':hp_exact' => $keyword,
+                ':hp_digits_exact' => $keywordDigits,
+                ':kode_like' => '%' . $keyword . '%',
+                ':nama_like' => '%' . $keyword . '%',
+                ':hp_like' => '%' . $keyword . '%',
+                ':hp_digits_like' => $keywordDigits !== '' ? '%' . $keywordDigits . '%' : '%' . $keyword . '%',
+                ':kode_exact_order' => $keyword,
+                ':hp_exact_order' => $keyword,
+                ':hp_digits_exact_order' => $keywordDigits,
+                ':nama_exact_order' => $keyword,
+                ':kode_prefix' => $keyword . '%',
+                ':nama_prefix' => $keyword . '%',
+                ':hp_prefix' => $keyword . '%',
+            ]);
+
+            $member = $stmt->fetch(PDO::FETCH_ASSOC);
+            if ($member) {
+                echo json_encode(['success' => true, 'data' => $member], JSON_UNESCAPED_UNICODE);
+            } else {
+                echo json_encode(['success' => false, 'message' => 'Member tidak ditemukan.'], JSON_UNESCAPED_UNICODE);
+            }
             exit;
 
 
@@ -377,36 +485,101 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_GET['action'])) {
             $subtotal   = (int)$diskonData['subtotal'];
             $diskon     = (int)$diskonData['diskon_total'];
             $diskonId   = !empty($diskonData['diskon_terpilih_id']) ? (int)$diskonData['diskon_terpilih_id'] : null;
-            $total      = (int)$diskonData['total'];
-            $kembalian  = max(0, $bayar - $total);
 
-            if ($bayar > 0 && $bayar < $total) {
-                echo json_encode(['success' => false, 'message' => 'Uang bayar kurang dari total tagihan.']);
-                exit;
-            }
-
-            // Hitung point: setiap kelipatan Rp 10.000 = 1 point
-            $pointDapat = $memberId ? (int)floor($total / 10000) : 0;
+            // Tukar point dihitung setelah promo/diskon.
+            // point_pakai = jumlah point yang ditukar, nilai_point_pakai = nominal rupiah potongannya.
+            $totalSebelumPoint = (int)$diskonData['total'];
+            $pointPakaiInput   = !empty($input['point_pakai']) ? max(0, (int)$input['point_pakai']) : 0;
+            $pointPakai        = 0;
+            $nilaiPointPakai   = 0;
+            $total             = $totalSebelumPoint;
+            $kembalian         = 0;
+            $pointDapat        = 0;
 
             try {
                 $pdo->beginTransaction();
 
-                if (transaksiHasDiscountColumns($pdo)) {
+                if ($memberId && $pointPakaiInput > 0) {
+                    $stmtPoint = $pdo->prepare("SELECT point FROM member WHERE id=:id AND status='aktif' FOR UPDATE");
+                    $stmtPoint->execute([':id' => $memberId]);
+                    $saldoPoint = (int)$stmtPoint->fetchColumn();
+
+                    if ($saldoPoint <= 0) {
+                        throw new Exception('Saldo point member kosong.');
+                    }
+
+                    $maxPointByTotal = (int)floor($totalSebelumPoint / POINT_RUPIAH);
+                    $pointPakai = min($pointPakaiInput, $saldoPoint, $maxPointByTotal);
+                    $nilaiPointPakai = $pointPakai * POINT_RUPIAH;
+                    $total = max(0, (int)$totalSebelumPoint - (int)$nilaiPointPakai);
+                } elseif (!$memberId && $pointPakaiInput > 0) {
+                    throw new Exception('Pilih member terlebih dahulu untuk tukar point.');
+                }
+
+                $kembalian = max(0, $bayar - $total);
+
+                if ($bayar > 0 && $bayar < $total) {
+                    throw new Exception('Uang bayar kurang dari total tagihan.');
+                }
+
+                // Hitung point: setiap kelipatan Rp 10.000 = 1 point, dari total setelah tukar point.
+                $pointDapat = $memberId ? (int)floor($total / 10000) : 0;
+
+                $hasTrxDiscount = transaksiHasDiscountColumns($pdo);
+                $hasTrxPointRedeem = transaksiHasPointRedeemColumns($pdo);
+
+                if ($hasTrxDiscount && $hasTrxPointRedeem) {
+                    $stmtTrans = $pdo->prepare("
+                        INSERT INTO transaksi (invoice, user_id, member_id, total, diskon, diskon_id, bayar, kembalian, point_dapat, point_pakai, nilai_point_pakai, catatan)
+                        VALUES (:invoice,:user_id,:member_id,:total,:diskon,:diskon_id,:bayar,:kembalian,:point_dapat,:point_pakai,:nilai_point_pakai,:catatan)
+                    ");
+                    $stmtTrans->execute([
+                        ':invoice' => $invoice,
+                        ':user_id' => $userId,
+                        ':member_id' => $memberId,
+                        ':total' => $total,
+                        ':diskon' => $diskon,
+                        ':diskon_id' => $diskonId,
+                        ':bayar' => $bayar,
+                        ':kembalian' => $kembalian,
+                        ':point_dapat' => $pointDapat,
+                        ':point_pakai' => $pointPakai,
+                        ':nilai_point_pakai' => $nilaiPointPakai,
+                        ':catatan' => $input['catatan'] ?? null,
+                    ]);
+                } elseif ($hasTrxDiscount) {
                     $stmtTrans = $pdo->prepare("
                         INSERT INTO transaksi (invoice, user_id, member_id, total, diskon, diskon_id, bayar, kembalian, point_dapat, catatan)
                         VALUES (:invoice,:user_id,:member_id,:total,:diskon,:diskon_id,:bayar,:kembalian,:point_dapat,:catatan)
                     ");
                     $stmtTrans->execute([
-                        ':invoice'     => $invoice,
-                        ':user_id'     => $userId,
-                        ':member_id'   => $memberId,
-                        ':total'       => $total,
-                        ':diskon'      => $diskon,
-                        ':diskon_id'   => $diskonId,
-                        ':bayar'       => $bayar,
-                        ':kembalian'   => $kembalian,
+                        ':invoice' => $invoice,
+                        ':user_id' => $userId,
+                        ':member_id' => $memberId,
+                        ':total' => $total,
+                        ':diskon' => $diskon,
+                        ':diskon_id' => $diskonId,
+                        ':bayar' => $bayar,
+                        ':kembalian' => $kembalian,
                         ':point_dapat' => $pointDapat,
-                        ':catatan'     => $input['catatan'] ?? null,
+                        ':catatan' => $input['catatan'] ?? null,
+                    ]);
+                } elseif ($hasTrxPointRedeem) {
+                    $stmtTrans = $pdo->prepare("
+                        INSERT INTO transaksi (invoice, user_id, member_id, total, bayar, kembalian, point_dapat, point_pakai, nilai_point_pakai, catatan)
+                        VALUES (:invoice,:user_id,:member_id,:total,:bayar,:kembalian,:point_dapat,:point_pakai,:nilai_point_pakai,:catatan)
+                    ");
+                    $stmtTrans->execute([
+                        ':invoice' => $invoice,
+                        ':user_id' => $userId,
+                        ':member_id' => $memberId,
+                        ':total' => $total,
+                        ':bayar' => $bayar,
+                        ':kembalian' => $kembalian,
+                        ':point_dapat' => $pointDapat,
+                        ':point_pakai' => $pointPakai,
+                        ':nilai_point_pakai' => $nilaiPointPakai,
+                        ':catatan' => $input['catatan'] ?? null,
                     ]);
                 } else {
                     $stmtTrans = $pdo->prepare("
@@ -414,14 +587,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_GET['action'])) {
                         VALUES (:invoice,:user_id,:member_id,:total,:bayar,:kembalian,:point_dapat,:catatan)
                     ");
                     $stmtTrans->execute([
-                        ':invoice'     => $invoice,
-                        ':user_id'     => $userId,
-                        ':member_id'   => $memberId,
-                        ':total'       => $total,
-                        ':bayar'       => $bayar,
-                        ':kembalian'   => $kembalian,
+                        ':invoice' => $invoice,
+                        ':user_id' => $userId,
+                        ':member_id' => $memberId,
+                        ':total' => $total,
+                        ':bayar' => $bayar,
+                        ':kembalian' => $kembalian,
                         ':point_dapat' => $pointDapat,
-                        ':catatan'     => $input['catatan'] ?? null,
+                        ':catatan' => $input['catatan'] ?? null,
                     ]);
                 }
                 $transaksiId = $pdo->lastInsertId();
@@ -472,13 +645,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_GET['action'])) {
                     $stmtStok->execute([':qty' => $qty, ':id' => $pid]);
                 }
 
-                // Update point & total belanja member
-                if ($memberId && $pointDapat > 0) {
-                    $pdo->prepare("UPDATE member SET point=point+:pt, total_belanja=total_belanja+:total, updated_at=NOW() WHERE id=:id")
-                        ->execute([':pt' => $pointDapat, ':total' => $total, ':id' => $memberId]);
-                } elseif ($memberId) {
-                    $pdo->prepare("UPDATE member SET total_belanja=total_belanja+:total, updated_at=NOW() WHERE id=:id")
-                        ->execute([':total' => $total, ':id' => $memberId]);
+                // Update point & total belanja member.
+                // Saldo point dikurangi point yang ditukar, lalu ditambah point yang didapat dari transaksi ini.
+                if ($memberId) {
+                    $pdo->prepare("UPDATE member SET point=point-:pakai+:pt, total_belanja=total_belanja+:total, updated_at=NOW() WHERE id=:id")
+                        ->execute([':pakai' => $pointPakai, ':pt' => $pointDapat, ':total' => $total, ':id' => $memberId]);
                 }
 
                 $pdo->commit();
@@ -500,6 +671,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_GET['action'])) {
                     'diskon_nama' => $diskonData['diskon_terpilih_nama'],
                     'diskon_item' => $diskonData['item_diskon'],
                     'diskon_transaksi' => $diskonData['transaksi_diskon'],
+                    'total_sebelum_point' => $totalSebelumPoint,
+                    'point_pakai' => $pointPakai,
+                    'nilai_point_pakai' => $nilaiPointPakai,
                     'total'       => $total,
                     'bayar'       => $bayar,
                     'kembalian'   => $kembalian,
@@ -507,8 +681,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_GET['action'])) {
                     'point_total' => $pointTotal,
                     'message'     => 'Transaksi berhasil disimpan.',
                 ]);
-            } catch (PDOException $e) {
-                $pdo->rollBack();
+            } catch (Throwable $e) {
+                if ($pdo->inTransaction()) {
+                    $pdo->rollBack();
+                }
                 echo json_encode(['success' => false, 'message' => 'Gagal: ' . $e->getMessage()]);
             }
             exit;
@@ -787,7 +963,7 @@ $qrisImage    = 'assets/qr_code_kasir.png';
 
             <!-- Input Member -->
             <div class="px-4 sm:px-6 pt-4 pb-3 border-b border-subtle bg-white">
-                <p class="text-[10px] font-bold uppercase tracking-widest text-gray-400 mb-2">Kode Member (Opsional)</p>
+                <p class="text-[10px] font-bold uppercase tracking-widest text-gray-400 mb-2">Member (Kode / Nama / No HP)</p>
                 <div class="flex gap-2">
                     <div class="relative flex-1">
                         <span class="absolute inset-y-0 left-3 flex items-center text-gray-400 pointer-events-none z-10">
@@ -796,7 +972,7 @@ $qrisImage    = 'assets/qr_code_kasir.png';
                             </svg>
                         </span>
                         <input type="text" id="member-input"
-                            placeholder="Ketik kode / nama member..."
+                            placeholder="Ketik kode, nama, atau no HP member..."
                             oninput="onMemberInput()"
                             onkeydown="onMemberKeydown(event)"
                             autocomplete="off"
@@ -817,6 +993,23 @@ $qrisImage    = 'assets/qr_code_kasir.png';
                     </div>
                     <span class="text-[9px] font-black uppercase tracking-widest text-green-600 bg-green-100 px-2 py-1">Member Aktif</span>
                 </div>
+                <!-- Tukar point -->
+                <div id="point-redeem-box" class="hidden mt-2 bg-blue-50 border border-blue-200 px-3 py-3">
+                    <div class="flex items-center justify-between gap-3 mb-2">
+                        <div>
+                            <p class="text-[10px] font-black text-blue-700 uppercase tracking-widest">Tukar Point</p>
+                            <p class="text-[9px] text-blue-500 font-bold" id="point-redeem-info">1 point = Rp 1.000</p>
+                        </div>
+                        <button type="button" onclick="setPointRedeemMax()" class="px-2 py-1 bg-blue-600 text-white text-[9px] font-black uppercase">Max</button>
+                    </div>
+                    <div class="flex gap-2">
+                        <input type="number" id="point-redeem-input" min="0" value="0" oninput="onPointRedeemInput()"
+                            class="w-full bg-white border border-blue-100 text-sm py-2 px-3 focus:outline-none focus:ring-2 focus:ring-blue-100 transition-all"
+                            placeholder="Jumlah point yang ditukar">
+                        <button type="button" onclick="clearPointRedeem()" class="px-3 py-2 border border-blue-100 text-blue-600 text-[10px] font-black uppercase bg-white">Reset</button>
+                    </div>
+                </div>
+
                 <!-- Member tidak ditemukan -->
                 <div id="member-notfound" class="mt-2 bg-red-50 border border-red-200 px-3 py-2">
                     <p class="text-[10px] font-black text-red-600">Member tidak ditemukan. Transaksi tanpa point.</p>
@@ -840,6 +1033,10 @@ $qrisImage    = 'assets/qr_code_kasir.png';
                 <!-- Preview diskon -->
                 <div id="diskon-preview" class="hidden flex justify-between text-[11px] font-bold text-red-600 uppercase tracking-widest">
                     <span id="diskon-preview-label">Diskon</span><span id="diskon-preview-val">-Rp 0</span>
+                </div>
+                <!-- Preview tukar point -->
+                <div id="point-redeem-preview" class="hidden flex justify-between text-[11px] font-bold text-purple-600 uppercase tracking-widest">
+                    <span id="point-redeem-preview-label">Tukar Point</span><span id="point-redeem-preview-val">-Rp 0</span>
                 </div>
                 <!-- Preview point -->
                 <div id="point-preview" class="hidden flex justify-between text-[11px] font-bold text-blue-600 uppercase tracking-widest">
@@ -989,12 +1186,15 @@ $qrisImage    = 'assets/qr_code_kasir.png';
         }
 
         // ── State ────────────────────────────────────────────────────────────────────
+        const POS_ENDPOINT = <?= json_encode(basename($_SERVER['PHP_SELF'])) ?>;
         let PRODUCTS = [];
         let cart = [];
         let currentCat = 'Semua';
         let selectedMethod = 'tunai';
+        const POINT_VALUE = 1000;
         let activeMember = null;
-        let activeDiskon = null; // ringkasan 1 promo diskon yang dipakai
+        let activeDiskon = null;
+        let pointRedeem = 0; // ringkasan 1 promo diskon yang dipakai
         let diskonPreviewTimeout = null;
 
         // Saat transaksi sukses, display dikunci agar heartbeat tidak menimpa layar "Terima Kasih"
@@ -1014,7 +1214,7 @@ $qrisImage    = 'assets/qr_code_kasir.png';
 
         async function loadProducts() {
             try {
-                const res = await fetch('pos.php?action=get_products', {
+                const res = await fetch(POS_ENDPOINT + '?action=get_products', {
                     method: 'POST'
                 });
                 const d = await res.json();
@@ -1036,6 +1236,7 @@ $qrisImage    = 'assets/qr_code_kasir.png';
                 hideMemberSuggest();
                 // Reset jika dikosongkan
                 activeMember = null;
+                pointRedeem = 0;
                 document.getElementById('member-found').style.display = 'none';
                 document.getElementById('member-notfound').style.display = 'none';
                 updateUI();
@@ -1044,12 +1245,13 @@ $qrisImage    = 'assets/qr_code_kasir.png';
 
             // Reset status member aktif saat mengetik ulang
             activeMember = null;
+            pointRedeem = 0;
             document.getElementById('member-found').style.display = 'none';
             document.getElementById('member-notfound').style.display = 'none';
 
             memberSuggestTimeout = setTimeout(async () => {
                 try {
-                    const res = await fetch('pos.php?action=suggest_member', {
+                    const res = await fetch(POS_ENDPOINT + '?action=suggest_member', {
                         method: 'POST',
                         headers: {
                             'Content-Type': 'application/json'
@@ -1071,7 +1273,11 @@ $qrisImage    = 'assets/qr_code_kasir.png';
                     memberSuggestIndex = -1;
                     renderMemberSuggest(memberSuggestData);
                 } catch (e) {
-                    hideMemberSuggest();
+                    const box = document.getElementById('member-suggest');
+                    if (box) {
+                        box.innerHTML = '<div class="px-4 py-3 text-[10px] font-bold uppercase tracking-widest text-red-500">Gagal mengambil data member</div>';
+                        box.classList.remove('hidden');
+                    }
                 }
             }, 200);
         }
@@ -1081,7 +1287,8 @@ $qrisImage    = 'assets/qr_code_kasir.png';
             if (!box) return;
 
             if (!Array.isArray(data) || !data.length) {
-                hideMemberSuggest();
+                box.innerHTML = '<div class="px-4 py-3 text-[10px] font-bold uppercase tracking-widest text-gray-400">Member tidak ditemukan</div>';
+                box.classList.remove('hidden');
                 return;
             }
 
@@ -1128,7 +1335,8 @@ $qrisImage    = 'assets/qr_code_kasir.png';
             const m = memberSuggestData[index];
             if (!m) return;
 
-            document.getElementById('member-input').value = m.kode;
+            document.getElementById('member-input').value = m.kode || m.nama || m.no_hp || '';
+            pointRedeem = 0;
             activeMember = {
                 id: m.id,
                 kode: m.kode,
@@ -1187,25 +1395,26 @@ $qrisImage    = 'assets/qr_code_kasir.png';
 
         // ── Member (exact search / manual) ────────────────────────────────────────
         async function cariMember() {
-            const kode = document.getElementById('member-input').value.trim();
-            if (!kode) return;
+            const keyword = document.getElementById('member-input').value.trim();
+            if (!keyword) return;
 
             hideMemberSuggest();
             document.getElementById('member-found').style.display = 'none';
             document.getElementById('member-notfound').style.display = 'none';
 
             try {
-                const res = await fetch('pos.php?action=cari_member', {
+                const res = await fetch(POS_ENDPOINT + '?action=cari_member', {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json'
                     },
                     body: JSON.stringify({
-                        kode
+                        keyword
                     })
                 });
                 const d = await res.json();
                 if (d.success) {
+                    pointRedeem = 0;
                     activeMember = d.data;
                     document.getElementById('member-nama').innerText = d.data.nama;
                     document.getElementById('member-point').innerText = Number(d.data.point).toLocaleString('id-ID');
@@ -1245,8 +1454,8 @@ $qrisImage    = 'assets/qr_code_kasir.png';
         function filterProducts() {
             const q = document.getElementById('search-input').value.toLowerCase();
             renderProducts(PRODUCTS.filter(p =>
-                (p.nama.toLowerCase().includes(q) || p.kode.toLowerCase().includes(q) || p.kategori.toLowerCase().includes(q)) &&
-                (currentCat === 'Semua' || p.kategori === currentCat)
+                ((p.nama || '').toLowerCase().includes(q) || (p.kode || '').toLowerCase().includes(q) || (p.kategori || '').toLowerCase().includes(q)) &&
+                (currentCat === 'Semua' || (p.kategori || '') === currentCat)
             ));
         }
 
@@ -1264,7 +1473,7 @@ $qrisImage    = 'assets/qr_code_kasir.png';
                 <div class="w-full aspect-square bg-gray-50 rounded-xl mb-3 flex items-center justify-center text-gray-200 ${habis ? '' : 'group-hover:text-blue-500'} transition-colors">
                     <svg class="h-8 w-8" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4"/></svg>
                 </div>
-                <p class="text-[8px] font-black uppercase text-gray-400 tracking-widest mb-1">${p.kategori}</p>
+                <p class="text-[8px] font-black uppercase text-gray-400 tracking-widest mb-1">${p.kategori || '-'}</p>
                 <h4 class="text-[12px] font-bold leading-tight h-8 overflow-hidden text-slate-800">${p.nama}</h4>
                 <p class="text-xs font-black text-black mt-1">${formatRp(p.harga_jual)}</p>
                 <div class="mt-1">${habis
@@ -1325,6 +1534,7 @@ $qrisImage    = 'assets/qr_code_kasir.png';
             activeDiskon = null;
             if (resetMember) {
                 activeMember = null;
+                pointRedeem = 0;
                 const memberInput = document.getElementById('member-input');
                 if (memberInput) memberInput.value = '';
                 document.getElementById('member-found').style.display = 'none';
@@ -1343,14 +1553,54 @@ $qrisImage    = 'assets/qr_code_kasir.png';
             return activeDiskon ? parseInt(activeDiskon.diskon_total || 0) : 0;
         }
 
-        function getGrandTotal() {
+        function getTotalBeforePoint() {
             return activeDiskon ? parseInt(activeDiskon.total || 0) : Math.max(0, getSubtotal() - getDiskonAmount());
+        }
+
+        function getPointRedeemAmount() {
+            if (!activeMember || pointRedeem <= 0) return 0;
+            return Math.min(pointRedeem * POINT_VALUE, getTotalBeforePoint());
+        }
+
+        function getGrandTotal() {
+            return Math.max(0, getTotalBeforePoint() - getPointRedeemAmount());
+        }
+
+        function getMaxPointRedeem() {
+            if (!activeMember) return 0;
+            const saldo = parseInt(activeMember.point || 0);
+            return Math.max(0, Math.min(saldo, Math.floor(getTotalBeforePoint() / POINT_VALUE)));
+        }
+
+        function onPointRedeemInput() {
+            const input = document.getElementById('point-redeem-input');
+            pointRedeem = Math.max(0, parseInt(input?.value || 0));
+            const maxPoint = getMaxPointRedeem();
+            if (pointRedeem > maxPoint) pointRedeem = maxPoint;
+            if (input) input.value = pointRedeem;
+            updateUI(false);
+        }
+
+        function setPointRedeemMax() {
+            pointRedeem = getMaxPointRedeem();
+            const input = document.getElementById('point-redeem-input');
+            if (input) input.value = pointRedeem;
+            updateUI(false);
+        }
+
+        function clearPointRedeem() {
+            pointRedeem = 0;
+            const input = document.getElementById('point-redeem-input');
+            if (input) input.value = 0;
+            updateUI(false);
         }
 
         function applyTotalsToUI() {
             const subtotal = getSubtotal();
             const diskon = getDiskonAmount();
-            const total = activeDiskon ? parseInt(activeDiskon.total || 0) : Math.max(0, subtotal - diskon);
+            const totalSebelumPoint = getTotalBeforePoint();
+            const potonganPoint = getPointRedeemAmount();
+            const total = getGrandTotal();
 
             document.getElementById('subtotal').innerText = formatRp(subtotal);
             document.getElementById('total-price').innerText = formatRp(total);
@@ -1370,9 +1620,23 @@ $qrisImage    = 'assets/qr_code_kasir.png';
                 diskonWrap.style.display = 'none';
             }
 
+            const pointRedeemWrap = document.getElementById('point-redeem-preview');
+            const pointRedeemVal = document.getElementById('point-redeem-preview-val');
+            if (potonganPoint > 0) {
+                pointRedeemVal.innerText = '-' + formatRp(potonganPoint) + ' (' + pointRedeem + ' pt)';
+                pointRedeemWrap.classList.remove('hidden');
+                pointRedeemWrap.style.display = 'flex';
+            } else {
+                pointRedeemWrap.classList.add('hidden');
+                pointRedeemWrap.style.display = 'none';
+            }
+
             return {
                 subtotal,
                 diskon,
+                pointRedeem,
+                potonganPoint,
+                totalSebelumPoint,
                 total
             };
         }
@@ -1386,7 +1650,7 @@ $qrisImage    = 'assets/qr_code_kasir.png';
             }
 
             try {
-                const res = await fetch('pos.php?action=hitung_diskon', {
+                const res = await fetch(POS_ENDPOINT + '?action=hitung_diskon', {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json'
@@ -1396,7 +1660,8 @@ $qrisImage    = 'assets/qr_code_kasir.png';
                             id: parseInt(i.id),
                             qty: parseInt(i.qty)
                         })),
-                        member_id: activeMember?.id || null
+                        member_id: activeMember ? activeMember.id : null,
+                        point_pakai: activeMember ? pointRedeem : 0
                     })
                 });
                 const d = await res.json();
@@ -1477,6 +1742,21 @@ $qrisImage    = 'assets/qr_code_kasir.png';
 
             const totals = applyTotalsToUI();
             const total = totals.total;
+
+            const redeemBox = document.getElementById('point-redeem-box');
+            const redeemInput = document.getElementById('point-redeem-input');
+            const redeemInfo = document.getElementById('point-redeem-info');
+            if (activeMember) {
+                const maxPoint = getMaxPointRedeem();
+                if (pointRedeem > maxPoint) pointRedeem = maxPoint;
+                if (redeemInput) redeemInput.value = pointRedeem;
+                if (redeemInfo) redeemInfo.innerText = `Saldo ${Number(activeMember.point || 0).toLocaleString('id-ID')} pt · Maks tukar ${maxPoint.toLocaleString('id-ID')} pt · 1 pt = ${formatRp(POINT_VALUE)}`;
+                redeemBox.classList.remove('hidden');
+            } else {
+                pointRedeem = 0;
+                if (redeemInput) redeemInput.value = 0;
+                redeemBox.classList.add('hidden');
+            }
 
             // Preview point dihitung dari total setelah diskon
             const pointDapat = activeMember ? Math.floor(total / 10000) : 0;
@@ -1591,7 +1871,7 @@ $qrisImage    = 'assets/qr_code_kasir.png';
             btn.innerText = 'Memproses...';
 
             try {
-                const res = await fetch('pos.php?action=simpan_transaksi', {
+                const res = await fetch(POS_ENDPOINT + '?action=simpan_transaksi', {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json'
@@ -1602,7 +1882,8 @@ $qrisImage    = 'assets/qr_code_kasir.png';
                             qty: parseInt(i.qty)
                         })),
                         bayar,
-                        member_id: activeMember?.id || null
+                        member_id: activeMember ? activeMember.id : null,
+                        point_pakai: activeMember ? pointRedeem : 0
                     })
                 });
                 const d = await res.json();
@@ -1617,6 +1898,12 @@ $qrisImage    = 'assets/qr_code_kasir.png';
                     } else if (sd) {
                         sd.classList.add('hidden');
                         sd.innerText = '';
+                    }
+                    if (parseInt(d.point_pakai || 0) > 0) {
+                        const info = document.getElementById('success-diskon');
+                        const current = info.innerText ? info.innerText + ' · ' : '';
+                        info.innerText = current + `Tukar point: -${formatRp(d.nilai_point_pakai || 0)} (${d.point_pakai} pt)`;
+                        info.classList.remove('hidden');
                     }
                     document.getElementById('success-kembalian').innerText = selectedMethod === 'tunai' ?
                         'Kembalian: ' + formatRp(d.kembalian) :
@@ -1633,7 +1920,7 @@ $qrisImage    = 'assets/qr_code_kasir.png';
                         pw.classList.add('hidden');
                     }
 
-                    document.getElementById('btn-struk').href = 'struk.php?invoice=' + encodeURIComponent(d.invoice);
+                    document.getElementById('btn-struk').href = 'struk.php?invoice=' + encodeURIComponent(d.invoice) + '&print=1';
                     document.getElementById('success-modal').style.display = 'flex';
 
                     // Tampilkan ucapan terima kasih di layar pembeli.
@@ -1806,6 +2093,8 @@ $qrisImage    = 'assets/qr_code_kasir.png';
                 })),
                 subtotal: parseInt(dataTransaksi.subtotal || getSubtotal()),
                 diskon: parseInt(dataTransaksi.diskon || getDiskonAmount()),
+                point_pakai: parseInt(dataTransaksi.point_pakai || 0),
+                nilai_point_pakai: parseInt(dataTransaksi.nilai_point_pakai || 0),
                 total: parseInt(dataTransaksi.total || getGrandTotal()),
                 bayar: parseInt(dataTransaksi.bayar || 0),
                 kembalian: parseInt(dataTransaksi.kembalian || 0),

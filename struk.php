@@ -1,4 +1,7 @@
 <?php
+if (session_status() === PHP_SESSION_NONE) {
+    session_start();
+}
 require_once 'config.php';
 
 /*
@@ -24,6 +27,9 @@ if ($invoice === '') {
     die('Invoice tidak ditemukan.');
 }
 
+$autoPrint = isset($_GET['print']) && $_GET['print'] == '1';
+$isMember  = isset($_GET['member']) && $_GET['member'] == '1';
+
 /**
  * @param mixed $v
  */
@@ -32,7 +38,7 @@ function uang_struk($v): string
     return number_format((float)($v ?? 0), 0, ',', '.');
 }
 
-function line_lr(string $left, string $right, int $width = 42): string
+function line_lr(string $left, string $right, int $width = 32): string
 {
     $left = trim($left);
     $right = trim($right);
@@ -193,7 +199,9 @@ try {
         }
 
         .wrap {
-            width: 320px;
+            width: 100%;
+            max-width: 56mm;
+            margin: 0 auto;
         }
 
         .toolbar {
@@ -227,12 +235,14 @@ try {
         }
 
         .receipt {
-            width: 320px;
+            width: 100%;
+            max-width: 56mm;
             background: #fff;
-            padding: 14px 12px;
+            padding: 2mm;
             box-shadow: 0 12px 28px rgba(0, 0, 0, .12);
-            font-size: 11px;
-            line-height: 1.35;
+            font-size: 10px;
+            line-height: 1.3;
+            overflow: visible;
         }
 
         .center {
@@ -289,51 +299,18 @@ try {
             text-align: center;
             font-size: 10px;
         }
-
-        @media print {
-            @page {
-                size: 58mm auto;
-                margin: 0;
-            }
-
-            body {
-                background: #fff;
-            }
-
-            .page {
-                padding: 0;
-                display: block;
-            }
-
-            .wrap {
-                width: 58mm;
-            }
-
-            .toolbar {
-                display: none;
-            }
-
-            .receipt {
-                width: 58mm;
-                box-shadow: none;
-                padding: 8px 7px;
-                font-size: 10px;
-            }
-
-            .store {
-                font-size: 13px;
-            }
-        }
     </style>
 </head>
 
 <body>
     <div class="page">
         <div class="wrap">
-            <div class="toolbar">
-                <a href="pos.php">Kembali</a>
-                <button type="button" onclick="window.print()">Cetak</button>
-            </div>
+            <?php if (!$isMember): ?>
+                <div class="toolbar">
+                    <a href="pos.php">Kembali</a>
+                    <button type="button" onclick="window.print()">Cetak</button>
+                </div>
+            <?php endif; ?>
 
             <div class="receipt">
                 <div class="center">
@@ -349,7 +326,7 @@ try {
                 <div class="line"><?= htmlspecialchars(line_lr('Kasir', (string)$operator)) ?></div>
 
                 <?php if (!empty($memberNama)): ?>
-                    <div class="line"><?= htmlspecialchars(line_lr('Member', cut_text((string)$memberNama, 24))) ?></div>
+                    <div class="line"><?= htmlspecialchars(line_lr('Member', cut_text((string)$memberNama, 18))) ?></div>
                     <?php if (!empty($memberKode)): ?>
                         <div class="line"><?= htmlspecialchars(line_lr('Kode', (string)$memberKode)) ?></div>
                     <?php endif; ?>
@@ -378,12 +355,12 @@ try {
                     $diskonSatuan = $qty > 0 ? ($diskonItem / $qty) : $diskonItem;
                     ?>
 
-                    <div class="item-name"><?= htmlspecialchars(cut_text($nama, 38)) ?></div>
+                    <div class="item-name"><?= htmlspecialchars(cut_text($nama, 30)) ?></div>
                     <div class="line"><?= htmlspecialchars(line_lr($qty . ' x ' . uang_struk($hargaNormal), uang_struk($normalItem))) ?></div>
 
                     <?php if ($diskonItem > 0): ?>
                         <?php if (!empty($item['nama_diskon_item'])): ?>
-                            <div class="small muted promo"><?= htmlspecialchars('Promo: ' . cut_text((string)$item['nama_diskon_item'], 30)) ?></div>
+                            <div class="small muted promo"><?= htmlspecialchars('Promo: ' . cut_text((string)$item['nama_diskon_item'], 24)) ?></div>
                         <?php endif; ?>
 
                         <div class="line"><?= htmlspecialchars(line_lr('Disc/pcs ' . uang_struk($diskonSatuan) . ' x ' . $qty, '-' . uang_struk($diskonItem))) ?></div>
@@ -403,7 +380,7 @@ try {
                 <?php if ($diskonTransaksi > 0): ?>
                     <div class="line"><?= htmlspecialchars(line_lr('DISKON PROMO', '-' . uang_struk($diskonTransaksi))) ?></div>
                     <?php if (!empty($trx['nama_diskon'])): ?>
-                        <div class="small muted"><?= htmlspecialchars('Promo: ' . cut_text((string)$trx['nama_diskon'], 34)) ?></div>
+                        <div class="small muted"><?= htmlspecialchars('Promo: ' . cut_text((string)$trx['nama_diskon'], 26)) ?></div>
                     <?php endif; ?>
                 <?php endif; ?>
 
@@ -437,6 +414,17 @@ try {
             </div>
         </div>
     </div>
+
+    <?php if ($autoPrint && !$isMember): ?>
+        <script>
+            window.addEventListener('load', function() {
+                setTimeout(function() {
+                    window.print();
+                }, 500);
+            });
+        </script>
+    <?php endif; ?>
+
 </body>
 
 </html>
