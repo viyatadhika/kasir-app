@@ -2795,24 +2795,28 @@ $trxBeranda = array_slice($transaksi, 0, 3);
             }
         }
 
+
         /* ─────────────────────────────────────────────
-           FINAL: Info Member dihapus, icon dipindah ke card statistik atas
+           FINAL UI: CARD STATISTIK ATAS + ICON
+           Hanya tampilan, tanpa ubah query/perhitungan.
         ───────────────────────────────────────────── */
         .stat-card-icon {
             position: relative !important;
             overflow: hidden !important;
             min-height: 88px;
+            background: var(--white);
         }
 
         .stat-card-icon::after {
             content: attr(data-icon);
             position: absolute;
-            right: 12px;
-            bottom: 8px;
+            right: 10px;
+            bottom: 6px;
             font-size: 42px;
             line-height: 1;
-            opacity: .055;
+            opacity: .06;
             pointer-events: none;
+            filter: grayscale(100%);
         }
 
         .stat-card-icon .stat-card-label,
@@ -2822,8 +2826,9 @@ $trxBeranda = array_slice($transaksi, 0, 3);
             z-index: 2;
         }
 
-        .stat-card-icon .stat-card-value {
-            padding-right: 28px;
+        .stat-card-icon .stat-card-value,
+        .stat-card-icon .stat-card-sub {
+            padding-right: 30px;
         }
 
         @media (max-width: 640px) {
@@ -2832,12 +2837,14 @@ $trxBeranda = array_slice($transaksi, 0, 3);
             }
 
             .stat-card-icon::after {
-                font-size: 34px;
                 right: 8px;
-                bottom: 8px;
+                bottom: 7px;
+                font-size: 34px;
+                opacity: .055;
             }
 
-            .stat-card-icon .stat-card-value {
+            .stat-card-icon .stat-card-value,
+            .stat-card-icon .stat-card-sub {
                 padding-right: 24px;
             }
         }
@@ -3155,30 +3162,6 @@ $trxBeranda = array_slice($transaksi, 0, 3);
 
                 <div class="gap-section"></div>
 
-                <!-- Info Member -->
-                <div style="padding:16px 16px 10px;">
-                    <div class="section-label">Info Member</div>
-                </div>
-                <div class="promo-mini-scroll no-scrollbar">
-                    <div class="promo-mini-card" data-icon="⭐" onclick="openModal('modal-point')">
-                        <div class="pmc-tag">Saldo Point</div>
-                        <div class="pmc-title"><?= angka_member($saldoPoint) ?> pt</div>
-                    </div>
-                    <div class="promo-mini-card" data-icon="🧾" onclick="goTo('pesanan')">
-                        <div class="pmc-tag">Transaksi</div>
-                        <div class="pmc-title"><?= angka_member($jumlahTransaksi) ?> Riwayat</div>
-                    </div>
-                    <div class="promo-mini-card" data-icon="💰" onclick="goTo('pesanan')">
-                        <div class="pmc-tag">Total Belanja</div>
-                        <div class="pmc-title"><?= rupiah_member($totalBelanjaTransaksi) ?></div>
-                    </div>
-                    <div class="promo-mini-card" data-icon="🎁" onclick="openModal('modal-point')">
-                        <div class="pmc-tag">Point Ditukar</div>
-                        <div class="pmc-title"><?= angka_member($totalPointPakai) ?> pt</div>
-                    </div>
-                </div>
-
-                <div class="gap-section" style="margin-top:10px;"></div>
 
                 <!-- Recent Transactions -->
                 <div style="padding:16px 16px 8px;display:flex;justify-content:space-between;align-items:center;">
