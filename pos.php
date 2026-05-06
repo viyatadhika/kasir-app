@@ -916,6 +916,7 @@ $operatorName = addslashes(e($_SESSION['nama'] ?? 'Kasir'));
                 </div>
             </div>
             <div class="flex items-center gap-3">
+                <button type="button" onclick="event.stopPropagation(); clearCart(true)" class="px-2 py-1 border border-red-100 bg-white text-red-500 text-[9px] font-black uppercase tracking-widest hover:bg-red-50 transition-all">Reset</button>
                 <span class="text-lg font-black text-blue-600" id="total-price-mobile">Rp 0</span>
                 <svg id="cart-chevron" class="w-5 h-5 text-gray-400 transition-transform duration-300" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 15l7-7 7 7" />
@@ -926,7 +927,12 @@ $operatorName = addslashes(e($_SESSION['nama'] ?? 'Kasir'));
 
         <!-- Mobile Member Input -->
         <div class="px-4 py-3 bg-white border-b border-subtle" id="mobile-member-input-section">
-            <p class="text-[10px] font-bold uppercase tracking-widest text-gray-400 mb-2">Member (Kode / Nama / No HP)</p>
+            <div class="flex items-center justify-between gap-3 mb-2">
+                <p class="text-[10px] font-bold uppercase tracking-widest text-gray-400">Member (Kode / Nama / No HP)</p>
+                <div class="flex items-center gap-2 shrink-0">
+
+                </div>
+            </div>
             <div class="flex gap-2">
                 <div class="relative flex-1">
                     <span class="absolute inset-y-0 left-3 flex items-center text-gray-400 pointer-events-none z-10">
