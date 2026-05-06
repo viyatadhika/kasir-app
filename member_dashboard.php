@@ -170,8 +170,6 @@ $saldoPoint              = (int)($member['point']                       ?? 0);
 $totalBelanjaProfil      = (int)($member['total_belanja']               ?? 0);
 $trxBeranda              = array_slice($transaksi, 0, 3);
 
-// Badge jumlah transaksi — selalu tampil, tidak hilang
-$badgeCount = $jumlahTransaksi > 99 ? '99+' : (string)$jumlahTransaksi;
 ?>
 <!DOCTYPE html>
 <html lang="id">
@@ -531,26 +529,32 @@ $badgeCount = $jumlahTransaksi > 99 ? '99+' : (string)$jumlahTransaksi;
 
         /* ── Point Strip ── */
         .point-strip {
-            margin: 16px 16px 0;
-            border: 0.5px solid var(--g6);
-            border-radius: var(--r);
+            margin: 12px;
+            border: none;
+            border-radius: 0;
             display: grid;
-            grid-template-columns: 1fr auto;
-            overflow: hidden;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 8px;
+            overflow: visible;
             flex-shrink: 0;
         }
 
         .point-strip-left {
             padding: 14px 16px;
-            border-right: 0.5px solid var(--g6);
+            border: 0.5px solid var(--g6);
+            border-radius: var(--r);
+            min-width: 0;
         }
 
         .point-strip-right {
             padding: 14px 16px;
+            border: 0.5px solid var(--g6);
+            border-radius: var(--r);
             display: flex;
             flex-direction: column;
-            align-items: flex-end;
+            align-items: flex-start;
             justify-content: center;
+            min-width: 0;
         }
 
         .point-number {
@@ -2410,7 +2414,6 @@ $badgeCount = $jumlahTransaksi > 99 ? '99+' : (string)$jumlahTransaksi;
 
         <!-- ══════════════════════════════
          BOTTOM NAV
-         Badge pesanan selalu tampil (tidak hilang saat diklik)
     ══════════════════════════════ -->
         <nav class="bottom-nav">
             <button class="nav-btn active" id="nav-beranda" onclick="goTo('beranda')">
@@ -2445,10 +2448,6 @@ $badgeCount = $jumlahTransaksi > 99 ? '99+' : (string)$jumlahTransaksi;
                         <polyline points="3.27 6.96 12 12.01 20.73 6.96" />
                         <line x1="12" y1="22.08" x2="12" y2="12" />
                     </svg>
-                    <?php if ($jumlahTransaksi > 0): ?>
-                        <!-- Badge selalu tampil, tidak dihapus oleh JS -->
-                        <span class="nav-badge" id="badge-pesanan-nav"><?= $badgeCount ?></span>
-                    <?php endif; ?>
                 </div>
                 <span class="nav-label">Pesanan</span>
             </button>
@@ -2844,9 +2843,7 @@ $badgeCount = $jumlahTransaksi > 99 ? '99+' : (string)$jumlahTransaksi;
     <script>
         'use strict';
 
-        /* ── Navigation ─────────────────────────────────────────────────────────────
-           Badge pesanan TIDAK dihapus saat navigasi — hanya warna aktif yang berubah.
-        ─────────────────────────────────────────────────────────────────────────── */
+        /* ── Navigation ───────────────────────────────────────────────────────────── */
         function goTo(page) {
             // Nonaktifkan semua halaman
             document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
@@ -2863,8 +2860,6 @@ $badgeCount = $jumlahTransaksi > 99 ? '99+' : (string)$jumlahTransaksi;
             // Aktifkan tombol nav tujuan
             var nb = document.getElementById('nav-' + page);
             if (nb) nb.classList.add('active');
-
-            // Badge tetap ada — tidak dihapus
         }
 
         /* ── Category chips ── */
