@@ -7,6 +7,98 @@ if (!isset($_SESSION['user'])) {
 }
 
 
+// ── API: Direct Thermal Reprint ─────────────────────────────────────────────
+if (isset($_GET['action']) && $_GET['action'] === 'reprint_data') {
+    header('Content-Type: application/json; charset=utf-8');
+
+    $id = isset($_GET['id']) ? (int)$_GET['id'] : 0;
+    $invoice = trim((string)($_GET['invoice'] ?? ''));
+
+    if ($id <= 0 && $invoice === '') {
+        echo json_encode(['success' => false, 'message' => 'ID / invoice kosong.']);
+        exit;
+    }
+
+    try {
+        if ($id > 0) {
+            $stmt = $pdo->prepare("SELECT t.*, u.nama AS kasir, m.nama AS member_nama, m.kode AS member_kode, m.point AS member_point_total FROM transaksi t LEFT JOIN users u ON t.user_id = u.id LEFT JOIN member m ON t.member_id = m.id WHERE t.id = :id LIMIT 1");
+            $stmt->execute([':id' => $id]);
+        } else {
+            $stmt = $pdo->prepare("SELECT t.*, u.nama AS kasir, m.nama AS member_nama, m.kode AS member_kode, m.point AS member_point_total FROM transaksi t LEFT JOIN users u ON t.user_id = u.id LEFT JOIN member m ON t.member_id = m.id WHERE t.invoice = :invoice LIMIT 1");
+            $stmt->execute([':invoice' => $invoice]);
+        }
+
+        $trx = $stmt->fetch(PDO::FETCH_ASSOC);
+        if (!$trx) {
+            echo json_encode(['success' => false, 'message' => 'Invoice tidak ditemukan.']);
+            exit;
+        }
+
+        $stmtDetail = $pdo->prepare("SELECT * FROM transaksi_detail WHERE transaksi_id = :tid ORDER BY id ASC");
+        $stmtDetail->execute([':tid' => (int)$trx['id']]);
+        $details = $stmtDetail->fetchAll(PDO::FETCH_ASSOC);
+
+        $items = [];
+        $subtotalNormal = 0;
+        $diskonBarang = 0;
+
+        foreach ($details as $d) {
+            $qty = (int)($d['qty'] ?? 0);
+            $hargaNormal = isset($d['harga_normal']) && $d['harga_normal'] !== null ? (int)$d['harga_normal'] : (int)($d['harga'] ?? 0);
+            $hargaFinal = (int)($d['harga'] ?? $hargaNormal);
+            $subtotalItem = (int)($d['subtotal'] ?? ($hargaFinal * $qty));
+            $diskonItem = isset($d['diskon']) ? (int)$d['diskon'] : max(0, ($hargaNormal * $qty) - $subtotalItem);
+
+            $subtotalNormal += $hargaNormal * $qty;
+            $diskonBarang += $diskonItem;
+
+            $items[] = [
+                'nama' => strtoupper((string)($d['nama'] ?? 'PRODUK')),
+                'qty' => $qty,
+                'harga_normal' => $hargaNormal,
+                'normal_item' => $hargaNormal * $qty,
+                'subtotal_item' => $subtotalItem,
+                'diskon_item' => $diskonItem,
+                'diskon_satuan' => $qty > 0 ? (int)round($diskonItem / $qty) : $diskonItem,
+                'nama_diskon' => ''
+            ];
+        }
+
+        $totalDiskon = (int)($trx['diskon'] ?? 0);
+        if ($totalDiskon <= 0) $totalDiskon = $diskonBarang;
+        $diskonTransaksi = max(0, $totalDiskon - $diskonBarang);
+
+        echo json_encode([
+            'success' => true,
+            'data' => [
+                'id' => (int)$trx['id'],
+                'invoice' => (string)$trx['invoice'],
+                'tanggal' => date('d/m/Y H:i:s', strtotime($trx['created_at'] ?? 'now')),
+                'operator' => (string)($trx['kasir'] ?? ($_SESSION['nama'] ?? 'Kasir')),
+                'member_nama' => (string)($trx['member_nama'] ?? ''),
+                'member_kode' => (string)($trx['member_kode'] ?? ''),
+                'member_point_total' => (int)($trx['member_point_total'] ?? 0),
+                'items' => $items,
+                'subtotal_normal' => $subtotalNormal,
+                'diskon_barang' => $diskonBarang,
+                'diskon_transaksi' => $diskonTransaksi,
+                'total_diskon' => $totalDiskon,
+                'total_bayar' => (int)($trx['total'] ?? 0),
+                'bayar' => (int)($trx['bayar'] ?? 0),
+                'kembalian' => (int)($trx['kembalian'] ?? 0),
+                'point_dapat' => (int)($trx['point_dapat'] ?? 0),
+                'point_dipakai' => (int)($trx['point_pakai'] ?? 0),
+                'nilai_point' => (int)($trx['nilai_point_pakai'] ?? 0),
+                'nama_diskon_trx' => ''
+            ]
+        ], JSON_UNESCAPED_UNICODE);
+    } catch (Throwable $e) {
+        echo json_encode(['success' => false, 'message' => 'Gagal mengambil data struk: ' . $e->getMessage()], JSON_UNESCAPED_UNICODE);
+    }
+    exit;
+}
+
+
 // ── Data: Ringkasan Shift Hari Ini ──────────────────────────────────────────
 $today = date('Y-m-d');
 
@@ -366,8 +458,8 @@ for ($h = 6; $h <= 22; $h++) {
                                         </td>
                                         <td class="py-4 text-sm font-medium"><?= formatRp($t['total']) ?></td>
                                         <td class="py-4 text-sm text-right">
-                                            <a href="struk.php?id=<?= $t['id'] ?>" target="_blank"
-                                                class="text-[10px] font-bold underline hover:text-blue-600">REPRINT</a>
+                                            <button type="button" onclick="reprintThermal(<?= (int)$t['id'] ?>, '<?= htmlspecialchars($t['invoice'], ENT_QUOTES) ?>')"
+                                                class="text-[10px] font-bold underline hover:text-blue-600">REPRINT</button>
                                         </td>
                                     </tr>
                                 <?php endforeach; ?>
@@ -398,6 +490,22 @@ for ($h = 6; $h <= 22; $h++) {
         </div>
 
     </main>
+
+
+    <!-- Direct Thermal Reprint Status -->
+    <div id="reprint-status" class="fixed bottom-24 right-4 left-4 md:left-auto md:w-96 bg-white border border-subtle shadow-2xl z-[120] p-4 rounded-sm hidden">
+        <div class="flex items-start justify-between gap-4">
+            <div>
+                <p class="text-[10px] font-black uppercase tracking-widest text-gray-400">Thermal Reprint</p>
+                <p id="reprint-status-text" class="text-sm font-bold mt-1">Menyiapkan struk...</p>
+            </div>
+            <button type="button" onclick="hideReprintStatus()" class="text-xs font-black text-gray-400 hover:text-black">✕</button>
+        </div>
+        <div class="mt-3 flex gap-2">
+            <button id="reprint-fallback-btn" type="button" onclick="openLastReceiptFallback()" class="hidden flex-1 py-2 text-[10px] font-black uppercase border border-subtle hover:bg-gray-50">Buka Struk</button>
+            <button type="button" onclick="hideReprintStatus()" class="flex-1 py-2 text-[10px] font-black uppercase bg-black text-white hover:bg-gray-800">Tutup</button>
+        </div>
+    </div>
 
     <!-- Mobile Bottom Navigation -->
     <nav class="lg:hidden fixed bottom-0 left-0 right-0 bg-white border-t border-subtle px-6 py-3 flex justify-between items-center z-50 shadow-lg">
@@ -503,6 +611,240 @@ for ($h = 6; $h <= 22; $h++) {
                 }
             }
         });
+
+
+        // ════════════════════════════════════════════════════════════════════════════
+        // DIRECT THERMAL REPRINT - Web Bluetooth ESC/POS
+        // ════════════════════════════════════════════════════════════════════════════
+        const BT_PRINTER_CONFIG = [{
+            service: '000018f0-0000-1000-8000-00805f9b34fb',
+            characteristic: '00002af1-0000-1000-8000-00805f9b34fb'
+        }, {
+            service: '49535343-fe7d-4ae5-8fa9-9fafd205e455',
+            characteristic: '49535343-8841-43f4-a8d4-ecbe34729bb3'
+        }, {
+            service: '6e400001-b5a3-f393-e0a9-e50e24dcca9e',
+            characteristic: '6e400002-b5a3-f393-e0a9-e50e24dcca9e'
+        }];
+
+        const ESC_BYTE = 0x1B;
+        const GS_BYTE = 0x1D;
+        const ESCPOS = {
+            init: [ESC_BYTE, 0x40],
+            alignLeft: [ESC_BYTE, 0x61, 0x00],
+            alignCenter: [ESC_BYTE, 0x61, 0x01],
+            boldOn: [ESC_BYTE, 0x45, 0x01],
+            boldOff: [ESC_BYTE, 0x45, 0x00],
+            fontBig: [GS_BYTE, 0x21, 0x11],
+            fontNormal: [GS_BYTE, 0x21, 0x00],
+            feed: (n) => [ESC_BYTE, 0x64, n],
+            cut: [GS_BYTE, 0x56, 0x41, 0x03]
+        };
+        const PRINT_W = 32;
+        let lastReprintFallbackUrl = '#';
+
+        function showReprintStatus(message, type = 'info') {
+            const box = document.getElementById('reprint-status');
+            const text = document.getElementById('reprint-status-text');
+            if (!box || !text) return;
+            text.textContent = message;
+            text.className = 'text-sm font-bold mt-1 ' + (type === 'error' ? 'text-red-600' : type === 'success' ? 'text-green-600' : 'text-gray-900');
+            box.classList.remove('hidden');
+        }
+
+        function hideReprintStatus() {
+            const box = document.getElementById('reprint-status');
+            if (box) box.classList.add('hidden');
+        }
+
+        function setFallbackVisible(show) {
+            const btn = document.getElementById('reprint-fallback-btn');
+            if (btn) btn.classList.toggle('hidden', !show);
+        }
+
+        function openLastReceiptFallback() {
+            if (lastReprintFallbackUrl && lastReprintFallbackUrl !== '#') window.open(lastReprintFallbackUrl, '_blank');
+        }
+
+        function _fmt(n) {
+            return Number(n || 0).toLocaleString('id-ID');
+        }
+
+        function _lr(l, r, w) {
+            const width = w || PRINT_W;
+            const ls = String(l || '');
+            const rs = String(r || '');
+            const sp = Math.max(1, width - ls.length - rs.length);
+            return ls + ' '.repeat(sp) + rs;
+        }
+
+        function _dash() {
+            return '-'.repeat(PRINT_W);
+        }
+
+        function _solid() {
+            return '='.repeat(PRINT_W);
+        }
+
+        function _enc(str) {
+            const out = [];
+            str = String(str || '');
+            for (let i = 0; i < str.length; i++) {
+                const c = str.charCodeAt(i);
+                out.push(c < 256 ? c : 0x3F);
+            }
+            return out;
+        }
+
+        function buildEscPos(d) {
+            const buf = [];
+            const push = a => {
+                for (let i = 0; i < a.length; i++) buf.push(a[i]);
+            };
+            const text = s => push(_enc(String(s || '') + '\n'));
+            const line = s => push(_enc(String(s || '')));
+
+            push(ESCPOS.init);
+            push(ESCPOS.alignCenter);
+            push(ESCPOS.boldOn);
+            push(ESCPOS.fontBig);
+            text('KOPERASI BSDK');
+            push(ESCPOS.fontNormal);
+            push(ESCPOS.boldOff);
+            text('MESIN KASIR / POS');
+            text('REPRINT STRUK');
+            push(ESCPOS.alignLeft);
+            line(_dash() + '\n');
+            line(_lr('No', d.invoice) + '\n');
+            line(_lr('Tgl', d.tanggal) + '\n');
+            line(_lr('Kasir', String(d.operator || '').substring(0, 18)) + '\n');
+            if (d.member_nama) {
+                line(_lr('Member', String(d.member_nama).substring(0, 18)) + '\n');
+                if (d.member_kode) line(_lr('Kode', String(d.member_kode)) + '\n');
+            }
+            line(_dash() + '\n');
+
+            (d.items || []).forEach(item => {
+                push(ESCPOS.boldOn);
+                text(String(item.nama || 'PRODUK').substring(0, 32));
+                push(ESCPOS.boldOff);
+                line(_lr((item.qty || 0) + ' x ' + _fmt(item.harga_normal), _fmt(item.normal_item)) + '\n');
+                if (Number(item.diskon_item || 0) > 0) {
+                    if (item.nama_diskon) text('Promo: ' + String(item.nama_diskon).substring(0, 26));
+                    line(_lr('Disc/pcs ' + _fmt(item.diskon_satuan) + ' x ' + item.qty, '-' + _fmt(item.diskon_item)) + '\n');
+                    push(ESCPOS.boldOn);
+                    line(_lr('Subtotal', _fmt(item.subtotal_item)) + '\n');
+                    push(ESCPOS.boldOff);
+                }
+            });
+
+            line(_dash() + '\n');
+            line(_lr('SUBTOTAL', _fmt(d.subtotal_normal)) + '\n');
+            if (Number(d.diskon_barang || 0) > 0) line(_lr('DISKON BARANG', '-' + _fmt(d.diskon_barang)) + '\n');
+            if (Number(d.diskon_transaksi || 0) > 0) {
+                line(_lr('DISKON PROMO', '-' + _fmt(d.diskon_transaksi)) + '\n');
+                if (d.nama_diskon_trx) text('Promo: ' + String(d.nama_diskon_trx).substring(0, 26));
+            }
+            if (Number(d.point_dipakai || 0) > 0) {
+                line(_lr('POINT DIPAKAI', '-' + d.point_dipakai + ' pt') + '\n');
+                if (Number(d.nilai_point || 0) > 0) line(_lr('NILAI POINT', '-' + _fmt(d.nilai_point)) + '\n');
+            }
+            if (Number(d.total_diskon || 0) > 0) {
+                push(ESCPOS.boldOn);
+                line(_lr('TOTAL DISKON', '-' + _fmt(d.total_diskon)) + '\n');
+                push(ESCPOS.boldOff);
+            }
+            line(_solid() + '\n');
+            push(ESCPOS.boldOn);
+            line(_lr('TOTAL BAYAR', _fmt(d.total_bayar)) + '\n');
+            push(ESCPOS.boldOff);
+            line(_lr('TUNAI/QRIS', _fmt(d.bayar)) + '\n');
+            line(_lr('KEMBALI', _fmt(d.kembalian)) + '\n');
+            if (d.member_nama && Number(d.point_dapat || 0) > 0) {
+                line(_dash() + '\n');
+                push(ESCPOS.boldOn);
+                text('POINT MEMBER');
+                push(ESCPOS.boldOff);
+                line(_lr('Point Didapat', '+' + _fmt(d.point_dapat) + ' pt') + '\n');
+                if (d.member_point_total) line(_lr('Total Point', _fmt(d.member_point_total) + ' pt') + '\n');
+            }
+            line(_dash() + '\n');
+            push(ESCPOS.alignCenter);
+            text('BARANG YANG SUDAH DIBELI');
+            text('TIDAK DAPAT DITUKAR/DIKEMBALIKAN');
+            text('');
+            text('*** TERIMA KASIH ***');
+            push(ESCPOS.alignLeft);
+            push(ESCPOS.feed(5));
+            push(ESCPOS.cut);
+            return new Uint8Array(buf);
+        }
+
+        function btSendData(characteristic, data) {
+            const CHUNK = 100;
+            let chain = Promise.resolve();
+            for (let pos = 0; pos < data.length; pos += CHUNK) {
+                const slice = data.slice(pos, pos + CHUNK);
+                chain = chain.then(() => characteristic.writeValueWithoutResponse(slice)).then(() => new Promise(r => setTimeout(r, 60)));
+            }
+            return chain;
+        }
+
+        function btConnectAndPrint(device, data) {
+            return device.gatt.connect().then(server => {
+                const tryUUID = idx => {
+                    if (idx >= BT_PRINTER_CONFIG.length) return Promise.reject(new Error('UUID printer tidak cocok.'));
+                    return server.getPrimaryService(BT_PRINTER_CONFIG[idx].service)
+                        .then(svc => svc.getCharacteristic(BT_PRINTER_CONFIG[idx].characteristic))
+                        .catch(() => tryUUID(idx + 1));
+                };
+                return tryUUID(0).then(characteristic => btSendData(characteristic, data).then(() => {
+                    try {
+                        server.disconnect();
+                    } catch (e) {}
+                }));
+            });
+        }
+
+        async function reprintThermal(id, invoice) {
+            lastReprintFallbackUrl = 'struk.php?invoice=' + encodeURIComponent(invoice || '') + '&print=1';
+            setFallbackVisible(false);
+            showReprintStatus('Mengambil data struk...', 'info');
+
+            try {
+                const res = await fetch('<?= basename($_SERVER['PHP_SELF']) ?>?action=reprint_data&id=' + encodeURIComponent(id), {
+                    method: 'GET',
+                    headers: {
+                        'Accept': 'application/json'
+                    }
+                });
+                const json = await res.json();
+                if (!json.success) throw new Error(json.message || 'Data struk tidak ditemukan.');
+
+                const data = json.data;
+                if (data.invoice) lastReprintFallbackUrl = 'struk.php?invoice=' + encodeURIComponent(data.invoice) + '&print=1';
+
+                if (!navigator.bluetooth) {
+                    setFallbackVisible(true);
+                    throw new Error('Web Bluetooth tidak tersedia. Gunakan Chrome/Edge di localhost atau HTTPS.');
+                }
+
+                showReprintStatus('Pilih printer Bluetooth...', 'info');
+                const escData = buildEscPos(data);
+                const device = await navigator.bluetooth.requestDevice({
+                    acceptAllDevices: true,
+                    optionalServices: BT_PRINTER_CONFIG.map(c => c.service)
+                });
+
+                showReprintStatus('Menghubungkan ke printer...', 'info');
+                await btConnectAndPrint(device, escData);
+                showReprintStatus('Struk berhasil dicetak ulang.', 'success');
+            } catch (err) {
+                const msg = err && err.name === 'NotFoundError' ? 'Tidak ada printer yang dipilih.' : (err.message || 'Gagal reprint struk.');
+                setFallbackVisible(true);
+                showReprintStatus(msg, err && err.name === 'NotFoundError' ? 'info' : 'error');
+            }
+        }
     </script>
 </body>
 

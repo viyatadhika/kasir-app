@@ -29,6 +29,9 @@ require_once 'config.php';
  * HELPER FUNCTIONS
  * ───────────────────────────────────────────── */
 
+/**
+ * @param int|float|string|null $v
+ */
 function uang_struk($v): string
 {
     return number_format((float)($v ?? 0), 0, ',', '.');
@@ -48,6 +51,14 @@ function cut_text(string $text, int $max): string
     $text = trim($text);
     if (strlen($text) <= $max) return $text;
     return substr($text, 0, max(0, $max - 1)) . '.';
+}
+
+function safe_upper(string $text): string
+{
+    if (function_exists('mb_strtoupper')) {
+        return mb_strtoupper($text, 'UTF-8');
+    }
+    return strtoupper($text);
 }
 
 /**
@@ -152,18 +163,18 @@ try {
     if ($totalDiskon <= 0) $totalDiskon = max(0, $subtotalNormal - $totalBayar);
 
     $diskonTransaksi  = max(0, $totalDiskon - $totalDiskonBarang);
-    $pointDapat       = (int)($trx['point_dapat']       ?? 0);
-    $pointDipakai     = (int)($trx['point_dipakai']     ?? 0);
-    $nilaiPoint       = (int)($trx['nilai_point']        ?? 0);
+    $pointDapat       = (int)($trx['point_dapat']   ?? 0);
+    $pointDipakai     = (int)($trx['point_dipakai'] ?? 0);
+    $nilaiPoint       = (int)($trx['nilai_point']   ?? 0);
 
     // Fallback kolom point_pakai / nilai_point_pakai
-    if ($pointDipakai <= 0 && isset($trx['point_pakai']))      $pointDipakai = (int)$trx['point_pakai'];
+    if ($pointDipakai <= 0 && isset($trx['point_pakai']))       $pointDipakai = (int)$trx['point_pakai'];
     if ($nilaiPoint   <= 0 && isset($trx['nilai_point_pakai'])) $nilaiPoint   = (int)$trx['nilai_point_pakai'];
 
-    $memberNama        = isset($trx['member_nama'])        ? (string)$trx['member_nama']        : null;
-    $memberKode        = isset($trx['member_kode'])        ? (string)$trx['member_kode']        : null;
-    $memberPointTotal  = isset($trx['member_point_total']) ? (int)$trx['member_point_total']    : null;
-    $namaDiskonTrx     = (string)($trx['nama_diskon'] ?? '');
+    $memberNama       = isset($trx['member_nama'])        ? (string)$trx['member_nama']     : null;
+    $memberKode       = isset($trx['member_kode'])        ? (string)$trx['member_kode']     : null;
+    $memberPointTotal = isset($trx['member_point_total']) ? (int)$trx['member_point_total'] : null;
+    $namaDiskonTrx    = (string)($trx['nama_diskon'] ?? '');
 
     $tanggalRaw = isset($trx['created_at']) ? (string)$trx['created_at'] : date('Y-m-d H:i:s');
     $tanggal    = date('d/m/Y H:i:s', (int)strtotime($tanggalRaw));
@@ -181,7 +192,7 @@ $jsItems = [];
 foreach ($items as $item) {
     $h = hitung_item($item);
     $jsItems[] = [
-        'nama'          => mb_strtoupper((string)($item['nama'] ?? 'ITEM')),
+        'nama'          => safe_upper((string)($item['nama'] ?? 'ITEM')),
         'qty'           => $h['qty'],
         'harga_normal'  => $h['harga_normal'],
         'normal_item'   => $h['normal_item'],
@@ -222,6 +233,7 @@ $httpHost = htmlspecialchars((string)($_SERVER['HTTP_HOST'] ?? '192.168.x.x'));
     <meta charset="UTF-8">
     <title>Struk <?= htmlspecialchars($invoice) ?></title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="icon" href="data:,">
     <style>
         * {
             box-sizing: border-box;
@@ -348,25 +360,49 @@ $httpHost = htmlspecialchars((string)($_SERVER['HTTP_HOST'] ?? '192.168.x.x'));
         /* ── HALAMAN ── */
         .page {
             min-height: 100vh;
-            padding: 12px;
+            padding: 10px;
             display: flex;
             justify-content: center;
             align-items: flex-start;
+            overflow-x: auto;
         }
 
+        /*
+         * .wrap: lebar tetap mengikuti konten struk.
+         * Pakai fit-content agar di mode member (modal/new tab sempit)
+         * wrap tidak melebar melebihi receipt itu sendiri.
+         */
         .wrap {
-            width: 100%;
-            max-width: 300px;
+            width: 270px !important;
+            min-width: 270px !important;
+            max-width: 270px !important;
         }
 
-        /* ── STRUK ── */
+        /*
+         * .receipt: KUNCI utama agar teks 32-char tidak terpotong.
+         *
+         * Lebar dihitung dari: 32 karakter × lebar 1 char Courier 10px
+         * Di browser, Courier New 10px → 1 char ≈ 6px → 32ch = ~192px
+         * Tapi karena padding dan variasi render, kita pakai 32ch + padding.
+         *
+         * Gunakan satuan `ch` (lebar karakter "0" pada font aktif) —
+         * ini cara paling akurat agar 32 karakter selalu muat 1 baris.
+         */
         .receipt {
-            width: 100%;
             background: #fff;
-            padding: 2mm;
+            padding: 8px 10px;
             box-shadow: 0 12px 28px rgba(0, 0, 0, .12);
-            font-size: 10px;
-            line-height: 1.3;
+
+            /* Font harus di-set DI SINI, sebelum ukuran ch dihitung browser */
+            font-family: "Courier New", Courier, monospace;
+            font-size: 13px;
+            /* ← naik dari 10px; 13px lebih terbaca & ch lebih stabil */
+            line-height: 1.4;
+
+            /* Lebar preview sama di desktop, tablet, dan mobile */
+            width: 270px !important;
+            min-width: 270px !important;
+            max-width: 270px !important;
         }
 
         .center {
@@ -374,13 +410,13 @@ $httpHost = htmlspecialchars((string)($_SERVER['HTTP_HOST'] ?? '192.168.x.x'));
         }
 
         .store {
-            font-size: 14px;
+            font-size: 1.2em;
             font-weight: 900;
             letter-spacing: 1px;
         }
 
         .small {
-            font-size: 9.5px;
+            font-size: 0.85em;
         }
 
         .bold {
@@ -397,13 +433,17 @@ $httpHost = htmlspecialchars((string)($_SERVER['HTTP_HOST'] ?? '192.168.x.x'));
             margin: 6px 0;
         }
 
-        /* Baris fixed-width */
+        /*
+         * .line: JANGAN overflow:hidden — itu yang bikin teks terpotong.
+         * white-space:pre wajib agar spasi padding lr() tidak collapse.
+         * overflow:visible (default) biarkan konten terlihat semua.
+         */
         .line {
+            display: block;
             white-space: pre;
             overflow: visible;
             font-size: inherit;
-            line-height: 1.3;
-            display: block;
+            line-height: inherit;
         }
 
         .item-name {
@@ -420,7 +460,7 @@ $httpHost = htmlspecialchars((string)($_SERVER['HTTP_HOST'] ?? '192.168.x.x'));
 
         .promo-label {
             padding-left: 6px;
-            font-size: 9px;
+            font-size: 0.85em;
             color: #555;
         }
 
@@ -431,7 +471,34 @@ $httpHost = htmlspecialchars((string)($_SERVER['HTTP_HOST'] ?? '192.168.x.x'));
         .thanks {
             margin-top: 8px;
             text-align: center;
-            font-size: 9.5px;
+            font-size: 0.9em;
+        }
+
+
+        /* Fixed preview width seperti screenshot; jangan mengecil di mobile/tablet */
+        @media screen and (max-width: 480px) {
+            .page {
+                padding: 10px;
+                justify-content: center;
+                overflow-x: auto;
+            }
+
+            .wrap {
+                width: 270px !important;
+                min-width: 270px !important;
+                max-width: 270px !important;
+            }
+
+            .receipt {
+                width: 270px !important;
+                min-width: 270px !important;
+                max-width: 270px !important;
+            }
+        }
+
+        @page {
+            size: 80mm auto;
+            margin: 0;
         }
 
         /* ── PRINT ── */
@@ -450,9 +517,20 @@ $httpHost = htmlspecialchars((string)($_SERVER['HTTP_HOST'] ?? '192.168.x.x'));
                 padding: 0;
             }
 
+            /* Saat print, biarkan lebar mengikuti kertas */
+            .wrap {
+                width: 80mm !important;
+                min-width: 80mm !important;
+                max-width: 80mm !important;
+            }
+
             .receipt {
+                width: 80mm !important;
+                min-width: 80mm !important;
+                max-width: 80mm !important;
                 box-shadow: none;
                 font-size: 9px;
+                padding: 0;
             }
         }
     </style>
@@ -583,8 +661,8 @@ $httpHost = htmlspecialchars((string)($_SERVER['HTTP_HOST'] ?? '192.168.x.x'));
     </div>
 
     <!-- ════════════════════════════════════════════
-     WEB BLUETOOTH + ESC/POS ENGINE
-     ════════════════════════════════════════════ -->
+         WEB BLUETOOTH + ESC/POS ENGINE
+         ════════════════════════════════════════════ -->
     <script>
         'use strict';
 
