@@ -6,7 +6,6 @@ if (!isset($_SESSION['user'])) {
     exit;
 }
 
-
 // ── API: Direct Thermal Reprint ─────────────────────────────────────────────
 if (isset($_GET['action']) && $_GET['action'] === 'reprint_data') {
     header('Content-Type: application/json; charset=utf-8');
@@ -98,7 +97,6 @@ if (isset($_GET['action']) && $_GET['action'] === 'reprint_data') {
     exit;
 }
 
-
 // ── Data: Ringkasan Shift Hari Ini ──────────────────────────────────────────
 $today = date('Y-m-d');
 
@@ -184,7 +182,8 @@ for ($h = 6; $h <= 22; $h++) {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Dashboard Retail – <?= htmlspecialchars($_SESSION['nama']) ?></title>
+    <title>Dashboard – <?= htmlspecialchars($_SESSION['nama']) ?></title>
+    <link rel="icon" href="assets/sejahub_icon.png" sizes="192x192">
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700&display=swap" rel="stylesheet">
@@ -256,6 +255,13 @@ for ($h = 6; $h <= 22; $h++) {
                 <a href="pos.php" class="block text-sm font-medium text-blue-600 uppercase tracking-widest">Mesin Kasir (POS)</a>
                 <!-- <a href="#" class="block text-sm font-medium text-gray-400 uppercase tracking-widest">Laporan Shift</a> -->
                 <a href="produk.php" class="block text-sm font-medium text-gray-400 uppercase tracking-widest">Kelola Produk</a>
+                <a href="stok_opname.php" class="block text-sm font-medium text-gray-400 uppercase tracking-widest">Stok Opname</a>
+                <a href="rental_bandara.php" class="block text-sm font-medium text-gray-400 hover:text-black uppercase tracking-widest transition-colors">
+                    Rental Bandara
+                </a>
+                <a href="driver.php" class="block text-sm font-medium text-gray-400 hover:text-black uppercase tracking-widest transition-colors">
+                    Driver Mitra
+                </a>
                 <a href="diskon.php" class="block text-xs font-medium text-gray-400 hover:text-black uppercase tracking-widest transition-colors">
                     Kelola Diskon
                 </a>
@@ -271,7 +277,7 @@ for ($h = 6; $h <= 22; $h++) {
                 </a>
             </nav>
             <div class="pt-8 border-t border-subtle">
-                <p class="text-[10px] text-gray-400 font-medium uppercase">ID Toko: T042 - BOGOR</p>
+                <p class="text-[10px] text-gray-400 font-medium uppercase">SEJAHUB KASIR</p>
                 <p class="text-[10px] text-gray-400 font-medium">Login: <?= htmlspecialchars($_SESSION['nama']) ?></p>
             </div>
         </div>
@@ -280,7 +286,7 @@ for ($h = 6; $h <= 22; $h++) {
     <!-- Desktop Sidebar -->
     <aside class="sidebar hidden lg:flex flex-col fixed inset-y-0 left-0 border-r border-subtle bg-white p-8 z-30">
         <div class="mb-12">
-            <span class="text-sm font-bold tracking-tighter border-b-2 border-black pb-1">BSDK SEJAHTERA</span>
+            <span class="text-sm font-bold tracking-tighter border-b-2 border-black pb-1">SEJAHUB KASIR</span>
         </div>
         <nav class="flex-1 space-y-6">
             <a href="index.php" class="block text-xs font-semibold text-black uppercase tracking-widest">Dashboard</a>
@@ -290,6 +296,9 @@ for ($h = 6; $h <= 22; $h++) {
             </a>
             <!-- <a href="#" class="block text-xs font-medium text-gray-400 hover:text-black uppercase tracking-widest transition-colors">Laporan Shift</a> -->
             <a href="produk.php" class="block text-xs font-medium text-gray-400 hover:text-black uppercase tracking-widest transition-colors">Kelola Produk</a>
+            <a href="stok_opname.php" class="block text-xs font-medium text-gray-400 hover:text-black uppercase tracking-widest transition-colors">Stok Opname</a>
+            <a href="rental_bandara.php" class="block text-xs font-medium text-gray-400 hover:text-black uppercase tracking-widest transition-colors">Rental Bandara</a>
+            <a href="driver.php" class="block text-xs font-medium text-gray-400 hover:text-black uppercase tracking-widest transition-colors">Driver Mitra</a>
             <a href="diskon.php" class="block text-xs font-medium text-gray-400 hover:text-black uppercase tracking-widest transition-colors">
                 Kelola Diskon
             </a>
@@ -300,8 +309,6 @@ for ($h = 6; $h <= 22; $h++) {
             <a href="#" class="block text-xs font-medium text-gray-400 hover:text-black uppercase tracking-widest transition-colors">Pengaturan Toko</a> -->
         </nav>
         <div class="mt-auto">
-            <p class="text-[10px] text-gray-400 font-medium uppercase">ID Toko: T042 - BOGOR</p>
-            <p class="text-[10px] text-gray-400 font-medium">v 2.4.0</p>
 
             <!-- LOGOUT -->
             <a href="logout.php"
@@ -330,7 +337,7 @@ for ($h = 6; $h <= 22; $h++) {
                     <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                         <path stroke-width="2" d="M12 4v16m8-8H4" />
                     </svg>
-                    BUKA KASIR (POS)
+                    MESIN KASIR (POS)
                 </a>
             </div>
         </header>
@@ -491,7 +498,6 @@ for ($h = 6; $h <= 22; $h++) {
 
     </main>
 
-
     <!-- Direct Thermal Reprint Status -->
     <div id="reprint-status" class="fixed bottom-24 right-4 left-4 md:left-auto md:w-96 bg-white border border-subtle shadow-2xl z-[120] p-4 rounded-sm hidden">
         <div class="flex items-start justify-between gap-4">
@@ -526,6 +532,13 @@ for ($h = 6; $h <= 22; $h++) {
                 <path d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4" />
             </svg>
             <span class="text-[8px] font-bold mt-1 uppercase text-gray-400">Produk</span>
+        </a>
+        <a href="rental_bandara.php" class="flex flex-col items-center p-2">
+            <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 text-gray-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M2 16l20-8-20-8 4 8-4 8z" />
+                <path d="M6 8h16" />
+            </svg>
+            <span class="text-[8px] font-bold mt-1 uppercase text-gray-400">Bandara</span>
         </a>
     </nav>
 
@@ -611,7 +624,6 @@ for ($h = 6; $h <= 22; $h++) {
                 }
             }
         });
-
 
         // ════════════════════════════════════════════════════════════════════════════
         // DIRECT THERMAL REPRINT - Web Bluetooth ESC/POS

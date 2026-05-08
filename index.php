@@ -51,7 +51,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Login | KOPERASI BSDK</title>
+    <title>Login | SEJAHUB</title>
+    <link rel="icon" href="assets/sejahub_icon.png" sizes="192x192">
 
     <!-- Framework & Fonts -->
     <script src="https://cdn.tailwindcss.com"></script>
@@ -133,11 +134,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     <!-- Container Utama -->
     <div class="w-full max-w-[400px]">
 
-        <!-- Bagian Header Logo -->
-        <div class="text-center mb-10">
-            <div class="brand-logo">KOPERASI BSDK</div>
+        <div class="text-center mb-6">
+            <img
+                src="assets/sejahub_icon.png"
+                alt="SEJAHUB"
+                class="max-h-32 w-auto mx-auto object-contain select-none drop-shadow-sm"
+                draggable="false">
         </div>
-
         <!-- Kartu Form Login -->
         <div class="bg-white border border-[#f0f0f0] p-6 sm:p-10 shadow-sm rounded-sm">
 
@@ -197,7 +200,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         <!-- Bagian Footer (Tanpa Versi) -->
         <div class="mt-12 text-center">
             <p class="text-[10px] text-gray-400 font-bold uppercase tracking-[0.2em]">
-                &copy; <?= date('Y') ?> KOPERASI BSDK
+                &copy; <?= date('Y') ?> KOPERASI BSDK SEJAHTERA
             </p>
         </div>
 

@@ -69,6 +69,72 @@ function member_initial($name): string
     return strtoupper(substr($name, 0, 2));
 }
 
+
+/**
+ * Mengambil tarif kendaraan dari tabel driver.
+ * Harga memakai MIN(harga_bandara) agar yang tampil adalah tarif termurah untuk tipe tersebut.
+ *
+ * @return array<string, array{label:string, kapasitas:int, harga:int}>
+ */
+function get_transport_tarif_from_driver(PDO $pdo): array
+{
+    $default = [
+        'avanza' => [
+            'label' => 'Toyota Avanza',
+            'kapasitas' => 4,
+            'harga' => 0,
+        ],
+        'innova' => [
+            'label' => 'Toyota Innova',
+            'kapasitas' => 6,
+            'harga' => 0,
+        ],
+        'hiace' => [
+            'label' => 'Toyota Hiace',
+            'kapasitas' => 12,
+            'harga' => 0,
+        ],
+    ];
+
+    try {
+        $stmt = $pdo->query("
+            SELECT
+                CASE
+                    WHEN LOWER(COALESCE(kendaraan_tipe, kendaraan_nama, '')) LIKE '%hiace%' THEN 'hiace'
+                    WHEN LOWER(COALESCE(kendaraan_tipe, kendaraan_nama, '')) LIKE '%innova%' THEN 'innova'
+                    WHEN LOWER(COALESCE(kendaraan_tipe, kendaraan_nama, '')) LIKE '%inova%' THEN 'innova'
+                    WHEN LOWER(COALESCE(kendaraan_tipe, kendaraan_nama, '')) LIKE '%avanza%' THEN 'avanza'
+                    ELSE LOWER(COALESCE(kendaraan_tipe, kendaraan_nama, ''))
+                END AS tipe,
+                MAX(COALESCE(kapasitas, 0)) AS kapasitas,
+                MIN(NULLIF(COALESCE(harga_bandara, 0), 0)) AS harga
+            FROM driver
+            WHERE status_aktif = 'aktif'
+            GROUP BY tipe
+        ");
+
+        foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
+            $tipe = strtolower(trim((string)($row['tipe'] ?? '')));
+
+            if (!isset($default[$tipe])) {
+                continue;
+            }
+
+            if ((int)($row['kapasitas'] ?? 0) > 0) {
+                $default[$tipe]['kapasitas'] = (int)$row['kapasitas'];
+            }
+
+            if ((int)($row['harga'] ?? 0) > 0) {
+                $default[$tipe]['harga'] = (int)$row['harga'];
+            }
+        }
+    } catch (Throwable $e) {
+        // Jika tabel driver belum siap, tetap tampilkan pilihan kendaraan dengan harga 0.
+    }
+
+    return $default;
+}
+
 function has_column_member(PDO $pdo, string $table, string $column): bool
 {
     try {
@@ -81,6 +147,7 @@ function has_column_member(PDO $pdo, string $table, string $column): bool
 }
 
 $memberId = (int)$_SESSION['member_id'];
+$transportTarif = get_transport_tarif_from_driver($pdo);
 
 try {
     $stmt = $pdo->prepare("SELECT id,kode,nama,no_hp,point,total_belanja,status,created_at,updated_at FROM member WHERE id=:id LIMIT 1");
@@ -169,6 +236,166 @@ $totalNilaiPointPakai    = (int)($summary['total_nilai_point_pakai']    ?? 0);
 $saldoPoint              = (int)($member['point']                       ?? 0);
 $totalBelanjaProfil      = (int)($member['total_belanja']               ?? 0);
 $trxBeranda              = array_slice($transaksi, 0, 3);
+
+$transportBookings = [];
+
+try {
+    $stmtTransport = $pdo->prepare("
+        SELECT
+            rb.id,
+            rb.kode_booking,
+            rb.member_id,
+            rb.driver_id,
+            rb.nama_pemesan,
+            rb.no_hp,
+            rb.layanan,
+            rb.lokasi_jemput,
+            rb.tujuan,
+            rb.tanggal,
+            rb.jam,
+            rb.jumlah_penumpang,
+            rb.kendaraan,
+            rb.total_harga,
+            rb.status,
+            rb.catatan,
+            rb.created_at,
+            d.nama AS driver_nama,
+            d.no_hp AS driver_no_hp,
+            d.kendaraan_nama AS driver_kendaraan,
+            d.plat_nomor AS driver_plat,
+            d.rating AS driver_rating
+        FROM rental_bandara rb
+        LEFT JOIN driver d ON d.id = rb.driver_id
+        WHERE rb.member_id = :member_id
+        ORDER BY created_at DESC, id DESC
+        LIMIT 20
+    ");
+
+    $stmtTransport->execute([
+        ':member_id' => $memberId
+    ]);
+
+    $transportBookings = $stmtTransport->fetchAll(PDO::FETCH_ASSOC);
+} catch (Throwable $e) {
+    $transportBookings = [];
+}
+
+
+
+if (!function_exists('transport_status_class_member')) {
+    /**
+     * @param mixed $status
+     */
+    function transport_status_class_member($status): string
+    {
+        $status = strtolower(trim((string)$status));
+
+        if ($status === 'diproses') {
+            return 'transport-status-blue';
+        }
+
+        if ($status === 'driver_menuju_lokasi') {
+            return 'transport-status-blue';
+        }
+
+        if ($status === 'dalam_perjalanan') {
+            return 'transport-status-purple';
+        }
+
+        if ($status === 'selesai') {
+            return 'transport-status-green';
+        }
+
+        if ($status === 'batal') {
+            return 'transport-status-red';
+        }
+
+        return 'transport-status-orange';
+    }
+}
+
+if (!function_exists('transport_status_label_member')) {
+    /**
+     * @param mixed $status
+     */
+    function transport_status_label_member($status): string
+    {
+        $status = strtolower(trim((string)$status));
+
+        if ($status === 'diproses') {
+            return 'Diproses';
+        }
+
+        if ($status === 'driver_menuju_lokasi') {
+            return 'Driver Menuju Lokasi';
+        }
+
+        if ($status === 'dalam_perjalanan') {
+            return 'Dalam Perjalanan';
+        }
+
+        if ($status === 'selesai') {
+            return 'Selesai';
+        }
+
+        if ($status === 'batal') {
+            return 'Batal';
+        }
+
+        return 'Pending';
+    }
+}
+
+if (!function_exists('transport_layanan_label_member')) {
+    /**
+     * @param mixed $layanan
+     */
+    function transport_layanan_label_member($layanan): string
+    {
+        return ((string)$layanan === 'jemput_bandara') ? 'Jemput Bandara' : 'Antar Bandara';
+    }
+}
+
+if (!function_exists('transport_kendaraan_label_member')) {
+    /**
+     * @param mixed $kendaraan
+     */
+    function transport_kendaraan_label_member($kendaraan): string
+    {
+        $kendaraan = strtolower(trim((string)$kendaraan));
+
+        if ($kendaraan === 'innova') {
+            return 'Toyota Innova';
+        }
+
+        if ($kendaraan === 'hiace') {
+            return 'Hiace Premio';
+        }
+
+        return 'Toyota Avanza';
+    }
+}
+
+if (!function_exists('transport_tanggal_member')) {
+    /**
+     * @param mixed $v
+     */
+    function transport_tanggal_member($v): string
+    {
+        return $v ? date('d/m/Y', strtotime((string)$v)) : '-';
+    }
+}
+
+if (!function_exists('transport_jam_member')) {
+    /**
+     * @param mixed $v
+     */
+    function transport_jam_member($v): string
+    {
+        return $v ? date('H:i', strtotime((string)$v)) : '-';
+    }
+}
+
 
 ?>
 <!DOCTYPE html>
@@ -1794,6 +2021,464 @@ $trxBeranda              = array_slice($transaksi, 0, 3);
             opacity: 1;
         }
 
+
+
+        /* ── Pesanan Gabungan ── */
+        .pesanan-content {
+            display: none;
+        }
+
+        .pesanan-content.active {
+            display: block;
+        }
+
+        .pesanan-content .order-list {
+            padding-top: 12px;
+        }
+
+
+
+        .transport-alert {
+            margin: 12px 16px 0;
+            border: 0.5px solid var(--g6);
+            border-radius: var(--r);
+            padding: 12px 14px;
+            font-size: 11px;
+            font-weight: 800;
+            line-height: 1.5;
+            display: flex;
+            gap: 10px;
+            align-items: flex-start;
+        }
+
+        .transport-alert-success {
+            background: #f0fdf4;
+            border-color: #bbf7d0;
+            color: #166534;
+        }
+
+        .transport-alert-error {
+            background: #fef2f2;
+            border-color: #fecaca;
+            color: #b91c1c;
+        }
+
+        .transport-alert-icon {
+            width: 18px;
+            height: 18px;
+            min-width: 18px;
+            border-radius: 999px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 10px;
+            font-weight: 900;
+            background: rgba(255, 255, 255, .7);
+        }
+
+
+        /* ── Transport Bandara ── */
+        .transport-form {
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
+        }
+
+        .transport-card-box {
+            margin: 12px 16px;
+            border: 0.5px solid var(--g6);
+            border-radius: var(--r);
+            background: var(--white);
+            padding: 16px;
+        }
+
+        .transport-section-head {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            gap: 12px;
+            margin-bottom: 16px;
+        }
+
+        .transport-section-head h3 {
+            font-size: 13px;
+            font-weight: 900;
+            text-transform: uppercase;
+            letter-spacing: .1em;
+            color: var(--black);
+        }
+
+        .transport-section-head span {
+            font-size: 9px;
+            font-weight: 900;
+            text-transform: uppercase;
+            letter-spacing: .1em;
+            color: var(--g4);
+            border: 0.5px solid var(--g6);
+            padding: 4px 8px;
+            border-radius: var(--r);
+            background: var(--g8);
+        }
+
+        .transport-form-group {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        }
+
+        .transport-form-group label {
+            font-size: 9px;
+            font-weight: 900;
+            text-transform: uppercase;
+            letter-spacing: .12em;
+            color: var(--g4);
+        }
+
+        .transport-input {
+            width: 100%;
+            padding: 11px 12px;
+            border: 0.5px solid var(--g6);
+            border-radius: var(--r);
+            font-family: inherit;
+            font-size: 13px;
+            font-weight: 600;
+            color: var(--black);
+            background: var(--white);
+            outline: none;
+            transition: border-color .12s, background .12s;
+        }
+
+        .transport-input:focus {
+            border-color: var(--black);
+            background: var(--white);
+        }
+
+        .transport-textarea {
+            min-height: 88px;
+            resize: vertical;
+        }
+
+        .transport-grid-2 {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 10px;
+        }
+
+        .transport-submit {
+            width: 100%;
+            border: 0.5px solid var(--black);
+            background: var(--black);
+            color: var(--white);
+            border-radius: var(--r);
+            padding: 13px 16px;
+            font-family: inherit;
+            font-size: 11px;
+            font-weight: 900;
+            text-transform: uppercase;
+            letter-spacing: .1em;
+            cursor: pointer;
+            transition: background .12s, border-color .12s;
+        }
+
+        .transport-submit:hover {
+            background: var(--g2);
+            border-color: var(--g2);
+        }
+
+        .transport-service-grid {
+            display: grid;
+            grid-template-columns: repeat(4, minmax(0, 1fr));
+            gap: 8px;
+            padding: 12px 16px 0;
+        }
+
+        .transport-service-card {
+            border: 0.5px solid var(--g6);
+            border-radius: var(--r);
+            background: var(--white);
+            padding: 12px 8px;
+            text-align: center;
+            min-height: 78px;
+        }
+
+        .transport-service-ico {
+            font-size: 22px;
+            line-height: 1;
+            margin-bottom: 8px;
+            filter: grayscale(100%);
+        }
+
+        .transport-service-label {
+            font-size: 9px;
+            font-weight: 900;
+            text-transform: uppercase;
+            letter-spacing: .08em;
+            color: var(--g2);
+            line-height: 1.3;
+        }
+
+        .transport-cars {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        .transport-car-card {
+            border: 0.5px solid var(--g6);
+            border-radius: var(--r);
+            background: var(--white);
+            padding: 14px;
+        }
+
+        .transport-car-top {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            gap: 10px;
+        }
+
+        .transport-car-top h4 {
+            font-size: 13px;
+            font-weight: 900;
+            color: var(--black);
+            letter-spacing: -.01em;
+        }
+
+        .transport-car-top p {
+            margin-top: 3px;
+            font-size: 10px;
+            font-weight: 600;
+            color: var(--g4);
+        }
+
+        .transport-badge-ready {
+            font-size: 9px;
+            font-weight: 900;
+            text-transform: uppercase;
+            letter-spacing: .08em;
+            padding: 4px 8px;
+            border-radius: var(--r);
+            background: #f0fdf4;
+            color: #15803d;
+            border: 0.5px solid #bbf7d0;
+            flex-shrink: 0;
+        }
+
+        .transport-car-price {
+            margin-top: 12px;
+            padding-top: 12px;
+            border-top: 0.5px solid var(--g7);
+            font-size: 18px;
+            font-weight: 900;
+            letter-spacing: -.03em;
+            color: var(--black);
+        }
+
+        .transport-note-box {
+            margin: 12px 16px 0;
+            border: 0.5px solid var(--g6);
+            border-radius: var(--r);
+            padding: 12px;
+            background: var(--g8);
+            font-size: 11px;
+            font-weight: 600;
+            color: var(--g3);
+            line-height: 1.6;
+        }
+
+
+
+        .transport-history-wrap {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            margin-top: 12px;
+        }
+
+        .transport-history-card {
+            border: 0.5px solid var(--g6);
+            border-radius: var(--r);
+            background: var(--white);
+            padding: 14px;
+        }
+
+        .transport-history-top {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            gap: 12px;
+        }
+
+        .transport-booking-code {
+            font-size: 12px;
+            font-weight: 900;
+            color: var(--black);
+            letter-spacing: -.02em;
+        }
+
+        .transport-booking-date {
+            margin-top: 3px;
+            font-size: 10px;
+            color: var(--g4);
+            font-weight: 600;
+        }
+
+        .transport-status {
+            padding: 4px 8px;
+            border-radius: var(--r);
+            font-size: 9px;
+            font-weight: 900;
+            text-transform: uppercase;
+            letter-spacing: .08em;
+            border: 0.5px solid transparent;
+            flex-shrink: 0;
+        }
+
+        .transport-status-orange {
+            background: #fff7ed;
+            color: #c2410c;
+            border-color: #fed7aa;
+        }
+
+        .transport-status-blue {
+            background: #eff6ff;
+            color: #2563eb;
+            border-color: #bfdbfe;
+        }
+
+        .transport-status-green {
+            background: #f0fdf4;
+            color: #15803d;
+            border-color: #bbf7d0;
+        }
+
+
+        .transport-status-purple {
+            background: #faf5ff;
+            color: #7e22ce;
+            border-color: #e9d5ff;
+        }
+
+        .transport-status-red {
+            background: #fef2f2;
+            color: #dc2626;
+            border-color: #fecaca;
+        }
+
+        .transport-history-grid {
+            margin-top: 12px;
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 6px;
+        }
+
+        .transport-history-item {
+            border: 0.5px solid var(--g7);
+            border-radius: var(--r);
+            padding: 9px;
+            min-width: 0;
+        }
+
+        .transport-history-item span {
+            display: block;
+            font-size: 9px;
+            font-weight: 900;
+            text-transform: uppercase;
+            letter-spacing: .08em;
+            color: var(--g4);
+            margin-bottom: 5px;
+        }
+
+        .transport-history-item strong {
+            display: block;
+            font-size: 11px;
+            font-weight: 800;
+            color: var(--black);
+            line-height: 1.35;
+            overflow-wrap: anywhere;
+        }
+
+        .transport-route-box {
+            margin-top: 12px;
+            border: 0.5px solid var(--g7);
+            border-radius: var(--r);
+            padding: 12px;
+            background: var(--g8);
+        }
+
+        .transport-route-item small {
+            display: block;
+            font-size: 9px;
+            font-weight: 900;
+            text-transform: uppercase;
+            letter-spacing: .08em;
+            color: var(--g4);
+            margin-bottom: 5px;
+        }
+
+        .transport-route-item div {
+            font-size: 11px;
+            font-weight: 700;
+            color: var(--g2);
+            line-height: 1.5;
+            overflow-wrap: anywhere;
+        }
+
+        .transport-route-divider {
+            height: 0.5px;
+            background: var(--g6);
+            margin: 10px 0;
+        }
+
+        .transport-note {
+            margin-top: 10px;
+            border: 0.5px solid var(--g7);
+            border-radius: var(--r);
+            background: var(--white);
+            padding: 10px;
+            font-size: 11px;
+            color: var(--g3);
+            font-weight: 600;
+            line-height: 1.6;
+        }
+
+        .transport-price-row {
+            margin-top: 12px;
+            padding-top: 12px;
+            border-top: 0.5px solid var(--g7);
+        }
+
+        .transport-price-row small {
+            display: block;
+            font-size: 9px;
+            font-weight: 900;
+            text-transform: uppercase;
+            letter-spacing: .08em;
+            color: var(--g4);
+            margin-bottom: 4px;
+        }
+
+        .transport-price {
+            font-size: 18px;
+            font-weight: 900;
+            color: var(--black);
+            letter-spacing: -.03em;
+        }
+
+        .transport-empty {
+            border: 0.5px dashed var(--g6);
+            border-radius: var(--r);
+            background: var(--g8);
+            padding: 24px 14px;
+            text-align: center;
+            font-size: 10px;
+            font-weight: 900;
+            color: var(--g4);
+            text-transform: uppercase;
+            letter-spacing: .12em;
+        }
+
+
         /* ── Responsive ── */
         @media(min-width:640px) {
             .stats-grid {
@@ -1822,6 +2507,22 @@ $trxBeranda              = array_slice($transaksi, 0, 3);
         }
 
         @media(max-width:480px) {
+
+            .transport-history-grid {
+                grid-template-columns: repeat(2, 1fr) !important;
+            }
+
+
+
+            .transport-service-grid {
+                grid-template-columns: repeat(2, 1fr) !important;
+            }
+
+            .transport-grid-2 {
+                grid-template-columns: 1fr !important;
+            }
+
+
             .order-summary-bar {
                 grid-template-columns: repeat(2, 1fr) !important;
             }
@@ -1870,6 +2571,65 @@ $trxBeranda              = array_slice($transaksi, 0, 3);
 
             .quick-grid {
                 grid-template-columns: repeat(3, 1fr) !important;
+            }
+        }
+
+        .vehicle-type-grid {
+            display: grid;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            gap: 10px;
+            margin-top: 8px;
+        }
+
+        .vehicle-type-option {
+            position: relative;
+        }
+
+        .vehicle-type-option input {
+            position: absolute;
+            opacity: 0;
+            pointer-events: none;
+        }
+
+        .vehicle-type-card {
+            border: 1px solid var(--g6);
+            background: #fff;
+            padding: 13px 14px;
+            min-height: 96px;
+            cursor: pointer;
+            transition: .15s ease;
+        }
+
+        .vehicle-type-option input:checked+.vehicle-type-card {
+            border-color: #111;
+            background: #fafafa;
+            box-shadow: inset 0 0 0 1px #111;
+        }
+
+        .vehicle-type-name {
+            font-size: 12px;
+            font-weight: 900;
+            color: var(--ink);
+            margin-bottom: 8px;
+        }
+
+        .vehicle-type-meta {
+            font-size: 10px;
+            font-weight: 700;
+            color: var(--muted);
+            line-height: 1.6;
+        }
+
+        .vehicle-type-price {
+            margin-top: 8px;
+            font-size: 13px;
+            font-weight: 900;
+            color: #111;
+        }
+
+        @media (max-width: 720px) {
+            .vehicle-type-grid {
+                grid-template-columns: 1fr;
             }
         }
     </style>
@@ -2012,6 +2772,16 @@ $trxBeranda              = array_slice($transaksi, 0, 3);
                                     <line x1="12" y1="17" x2="12.01" y2="17" />
                                 </svg></div>
                             <span class="quick-label">Bantuan</span>
+                        </button>
+
+                        <button class="quick-item" onclick="goTo('transport')">
+                            <div class="quick-ico">
+                                <svg viewBox="0 0 24 24">
+                                    <path d="M2 16l20-8-20-8 4 8-4 8z" />
+                                    <path d="M6 8h16" />
+                                </svg>
+                            </div>
+                            <span class="quick-label">Bandara</span>
                         </button>
                         <button class="quick-item" onclick="openModal('modal-kontak')">
                             <div class="quick-ico"><svg viewBox="0 0 24 24">
@@ -2162,92 +2932,477 @@ $trxBeranda              = array_slice($transaksi, 0, 3);
 
                 <!-- ── Tab ── -->
                 <div class="tab-bar no-scrollbar">
-                    <button class="tab-btn active" onclick="setOrderTab(this)">Semua (<?= angka_member($jumlahTransaksi) ?>)</button>
-                    <button class="tab-btn" onclick="setOrderTab(this)">Selesai</button>
-                    <button class="tab-btn" onclick="setOrderTab(this)">Diproses</button>
+                    <button class="tab-btn active" data-target="pesanan-semua" onclick="setOrderTab(this)">Semua</button>
+                    <button class="tab-btn" data-target="pesanan-belanja" onclick="setOrderTab(this)">Belanja (<?= angka_member($jumlahTransaksi) ?>)</button>
+                    <button class="tab-btn" data-target="pesanan-bandara" onclick="setOrderTab(this)">Bandara (<?= angka_member(count($transportBookings)) ?>)</button>
                 </div>
 
-                <!-- ── Order Cards ── -->
-                <?php if (!$transaksi): ?>
-                    <div class="empty-state">
-                        <svg viewBox="0 0 24 24">
-                            <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z" />
-                            <polyline points="3.27 6.96 12 12.01 20.73 6.96" />
-                            <line x1="12" y1="22.08" x2="12" y2="12" />
-                        </svg>
-                        <p>Belum ada riwayat transaksi</p>
-                    </div>
-                <?php else: ?>
-                    <div class="order-list">
-                        <?php foreach ($transaksi as $t):
-                            $sebelumDiskon   = (int)($t['total_sebelum_diskon'] ?? 0);
-                            $setelahPoint    = (int)($t['total_transaksi']      ?? 0);
-                            $pointPakai      = (int)($t['point_pakai']          ?? 0);
-                            $nilaiPointPakai = (int)($t['nilai_point_pakai']    ?? 0);
-                            $setelahDiskon   = $setelahPoint + $nilaiPointPakai;
-                            $diskonDariSelisih = max(0, $sebelumDiskon - $setelahDiskon);
-                            $diskonDb        = (int)($t['diskon_transaksi'] ?? 0);
-                            $diskonTampil    = max($diskonDb, $diskonDariSelisih);
-                            $ptDb            = (int)($t['point_transaksi']  ?? 0);
-                            $ptTampil        = $ptDb > 0 ? $ptDb : (int)floor($setelahPoint / 10000);
-                        ?>
-                            <div class="order-card">
-                                <div class="order-card-head">
-                                    <div>
-                                        <div class="order-store">Koperasi BSDK</div>
-                                        <div class="order-date"><?= h(tanggal_member($t['tanggal_transaksi'])) ?></div>
+
+                <!-- ── Order Cards Gabungan ── -->
+                <div class="pesanan-content active" id="pesanan-semua">
+                    <?php if (!$transaksi): ?>
+                        <div class="empty-state">
+                            <svg viewBox="0 0 24 24">
+                                <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z" />
+                                <polyline points="3.27 6.96 12 12.01 20.73 6.96" />
+                                <line x1="12" y1="22.08" x2="12" y2="12" />
+                            </svg>
+                            <p>Belum ada riwayat transaksi</p>
+                        </div>
+                    <?php else: ?>
+                        <div class="order-list">
+                            <?php foreach ($transaksi as $t):
+                                $sebelumDiskon   = (int)($t['total_sebelum_diskon'] ?? 0);
+                                $setelahPoint    = (int)($t['total_transaksi']      ?? 0);
+                                $pointPakai      = (int)($t['point_pakai']          ?? 0);
+                                $nilaiPointPakai = (int)($t['nilai_point_pakai']    ?? 0);
+                                $setelahDiskon   = $setelahPoint + $nilaiPointPakai;
+                                $diskonDariSelisih = max(0, $sebelumDiskon - $setelahDiskon);
+                                $diskonDb        = (int)($t['diskon_transaksi'] ?? 0);
+                                $diskonTampil    = max($diskonDb, $diskonDariSelisih);
+                                $ptDb            = (int)($t['point_transaksi']  ?? 0);
+                                $ptTampil        = $ptDb > 0 ? $ptDb : (int)floor($setelahPoint / 10000);
+                            ?>
+                                <div class="order-card">
+                                    <div class="order-card-head">
+                                        <div>
+                                            <div class="order-store">Koperasi BSDK</div>
+                                            <div class="order-date"><?= h(tanggal_member($t['tanggal_transaksi'])) ?></div>
+                                        </div>
+                                        <span class="badge badge-selesai">Selesai</span>
                                     </div>
-                                    <span class="badge badge-selesai">Selesai</span>
+                                    <div class="order-items-wrap">
+                                        <div class="order-item-row">
+                                            <span class="oi-name" style="font-weight:800;color:var(--black);"><?= h($t['invoice']) ?></span>
+                                            <span class="oi-price"><?= rupiah_member($setelahPoint) ?></span>
+                                        </div>
+                                        <?php if ($sebelumDiskon > $setelahDiskon): ?>
+                                            <div class="order-item-row">
+                                                <span style="font-size:11px;color:var(--g4);font-weight:600;">Harga Asli</span>
+                                                <span style="font-size:11px;font-weight:600;color:var(--g4);text-decoration:line-through;"><?= rupiah_member($sebelumDiskon) ?></span>
+                                            </div>
+                                        <?php endif; ?>
+                                        <?php if ($diskonTampil > 0): ?>
+                                            <div class="order-item-row">
+                                                <span style="font-size:11px;color:var(--g4);font-weight:600;">Diskon</span>
+                                                <span style="font-size:11px;font-weight:700;color:#15803d;">- <?= rupiah_member($diskonTampil) ?></span>
+                                            </div>
+                                        <?php endif; ?>
+                                        <?php if ($nilaiPointPakai > 0): ?>
+                                            <div class="order-item-row">
+                                                <span style="font-size:11px;color:var(--g4);font-weight:600;">Tukar Point</span>
+                                                <span style="font-size:11px;font-weight:700;color:#7c3aed;">- <?= rupiah_member($nilaiPointPakai) ?> (<?= angka_member($pointPakai) ?> pt)</span>
+                                            </div>
+                                        <?php endif; ?>
+                                        <div class="order-item-row" style="margin-top:4px;padding-top:8px;border-top:0.5px solid var(--g7);">
+                                            <span style="font-size:11px;color:var(--g4);font-weight:600;">Bayar</span>
+                                            <span style="font-size:11px;font-weight:700;color:var(--black);"><?= rupiah_member($t['bayar_transaksi'] ?? 0) ?></span>
+                                        </div>
+                                        <?php if (($t['kembalian_transaksi'] ?? 0) > 0): ?>
+                                            <div class="order-item-row">
+                                                <span style="font-size:11px;color:var(--g4);font-weight:600;">Kembali</span>
+                                                <span style="font-size:11px;font-weight:700;color:var(--g3);"><?= rupiah_member($t['kembalian_transaksi']) ?></span>
+                                            </div>
+                                        <?php endif; ?>
+                                    </div>
+                                    <div class="order-card-foot">
+                                        <div class="order-total-wrap">
+                                            <div class="ot-label">Total Dibayar</div>
+                                            <div class="ot-val"><?= rupiah_member($setelahPoint) ?></div>
+                                            <div class="ot-pt">+<?= angka_member($ptTampil) ?> point diperoleh</div>
+                                        </div>
+                                        <div class="order-actions">
+                                            <a href="struk.php?invoice=<?= urlencode($t['invoice']) ?>&member=1" target="_blank" class="btn btn-black" style="padding:7px 14px;">Struk</a>
+                                        </div>
+                                    </div>
                                 </div>
-                                <div class="order-items-wrap">
-                                    <div class="order-item-row">
-                                        <span class="oi-name" style="font-weight:800;color:var(--black);"><?= h($t['invoice']) ?></span>
-                                        <span class="oi-price"><?= rupiah_member($setelahPoint) ?></span>
-                                    </div>
-                                    <?php if ($sebelumDiskon > $setelahDiskon): ?>
-                                        <div class="order-item-row">
-                                            <span style="font-size:11px;color:var(--g4);font-weight:600;">Harga Asli</span>
-                                            <span style="font-size:11px;font-weight:600;color:var(--g4);text-decoration:line-through;"><?= rupiah_member($sebelumDiskon) ?></span>
-                                        </div>
-                                    <?php endif; ?>
-                                    <?php if ($diskonTampil > 0): ?>
-                                        <div class="order-item-row">
-                                            <span style="font-size:11px;color:var(--g4);font-weight:600;">Diskon</span>
-                                            <span style="font-size:11px;font-weight:700;color:#15803d;">- <?= rupiah_member($diskonTampil) ?></span>
-                                        </div>
-                                    <?php endif; ?>
-                                    <?php if ($nilaiPointPakai > 0): ?>
-                                        <div class="order-item-row">
-                                            <span style="font-size:11px;color:var(--g4);font-weight:600;">Tukar Point</span>
-                                            <span style="font-size:11px;font-weight:700;color:#7c3aed;">- <?= rupiah_member($nilaiPointPakai) ?> (<?= angka_member($pointPakai) ?> pt)</span>
-                                        </div>
-                                    <?php endif; ?>
-                                    <div class="order-item-row" style="margin-top:4px;padding-top:8px;border-top:0.5px solid var(--g7);">
-                                        <span style="font-size:11px;color:var(--g4);font-weight:600;">Bayar</span>
-                                        <span style="font-size:11px;font-weight:700;color:var(--black);"><?= rupiah_member($t['bayar_transaksi'] ?? 0) ?></span>
-                                    </div>
-                                    <?php if (($t['kembalian_transaksi'] ?? 0) > 0): ?>
-                                        <div class="order-item-row">
-                                            <span style="font-size:11px;color:var(--g4);font-weight:600;">Kembali</span>
-                                            <span style="font-size:11px;font-weight:700;color:var(--g3);"><?= rupiah_member($t['kembalian_transaksi']) ?></span>
-                                        </div>
-                                    <?php endif; ?>
-                                </div>
-                                <div class="order-card-foot">
-                                    <div class="order-total-wrap">
-                                        <div class="ot-label">Total Dibayar</div>
-                                        <div class="ot-val"><?= rupiah_member($setelahPoint) ?></div>
-                                        <div class="ot-pt">+<?= angka_member($ptTampil) ?> point diperoleh</div>
-                                    </div>
-                                    <div class="order-actions">
-                                        <a href="struk.php?invoice=<?= urlencode($t['invoice']) ?>&member=1" target="_blank" class="btn btn-black" style="padding:7px 14px;">Struk</a>
-                                    </div>
-                                </div>
+                            <?php endforeach; ?>
+                        </div>
+                    <?php endif; ?>
+
+                    <div class="transport-card-box" style="margin-top:12px;">
+                        <div class="transport-section-head">
+                            <div>
+                                <h3>Booking Bandara</h3>
+                                <div style="font-size:11px;font-weight:600;color:var(--g4);margin-top:4px;">Riwayat transport bandara Anda</div>
                             </div>
-                        <?php endforeach; ?>
+                            <span><?= angka_member(count($transportBookings)) ?></span>
+                        </div>
+
+                        <div class="transport-history-wrap">
+                            <?php if (!$transportBookings): ?>
+                                <div class="transport-empty">
+                                    Belum ada booking transport
+                                </div>
+                            <?php endif; ?>
+
+                            <?php foreach ($transportBookings as $tb): ?>
+                                <div class="transport-history-card">
+                                    <div class="transport-history-top">
+                                        <div>
+                                            <div class="transport-booking-code"><?= h($tb['kode_booking']) ?></div>
+                                            <div class="transport-booking-date"><?= h(tanggal_member($tb['created_at'])) ?></div>
+                                        </div>
+
+                                        <div class="transport-status <?= h(transport_status_class_member($tb['status'])) ?>">
+                                            <?= h(transport_status_label_member($tb['status'])) ?>
+                                        </div>
+                                    </div>
+
+                                    <div class="transport-history-grid">
+                                        <div class="transport-history-item">
+                                            <span>Layanan</span>
+                                            <strong><?= h(transport_layanan_label_member($tb['layanan'])) ?></strong>
+                                        </div>
+
+                                        <div class="transport-history-item">
+                                            <span>Kendaraan</span>
+                                            <strong><?= h($tb['driver_kendaraan'] ?? $tb['kendaraan'] ?? 'Menunggu Driver') ?></strong>
+                                        </div>
+
+                                        <div class="transport-history-item">
+                                            <span>Tanggal</span>
+                                            <strong><?= h(transport_tanggal_member($tb['tanggal'])) ?></strong>
+                                        </div>
+
+                                        <div class="transport-history-item">
+                                            <span>Jam</span>
+                                            <strong><?= h(transport_jam_member($tb['jam'])) ?> WIB</strong>
+                                        </div>
+                                    </div>
+
+                                    <div class="transport-route-box">
+                                        <div class="transport-route-item">
+                                            <small>Jemput</small>
+                                            <div><?= h($tb['lokasi_jemput']) ?></div>
+                                        </div>
+
+                                        <div class="transport-route-divider"></div>
+
+                                        <div class="transport-route-item">
+                                            <small>Tujuan</small>
+                                            <div><?= h($tb['tujuan']) ?></div>
+                                        </div>
+                                    </div>
+
+                                    <?php if (!empty($tb['catatan'])): ?>
+                                        <div class="transport-note">
+                                            <?= h($tb['catatan']) ?>
+                                        </div>
+                                    <?php endif; ?>
+
+                                    <div class="transport-price-row">
+                                        <small>Total Harga</small>
+                                        <div class="transport-price">
+                                            <?= rupiah_member($tb['total_harga']) ?>
+                                        </div>
+                                    </div>
+                                </div>
+                            <?php endforeach; ?>
+                        </div>
                     </div>
-                <?php endif; ?>
+
+                </div>
+
+                <div class="pesanan-content" id="pesanan-belanja">
+                    <?php if (!$transaksi): ?>
+                        <div class="empty-state">
+                            <svg viewBox="0 0 24 24">
+                                <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z" />
+                                <polyline points="3.27 6.96 12 12.01 20.73 6.96" />
+                                <line x1="12" y1="22.08" x2="12" y2="12" />
+                            </svg>
+                            <p>Belum ada riwayat transaksi</p>
+                        </div>
+                    <?php else: ?>
+                        <div class="order-list">
+                            <?php foreach ($transaksi as $t):
+                                $sebelumDiskon   = (int)($t['total_sebelum_diskon'] ?? 0);
+                                $setelahPoint    = (int)($t['total_transaksi']      ?? 0);
+                                $pointPakai      = (int)($t['point_pakai']          ?? 0);
+                                $nilaiPointPakai = (int)($t['nilai_point_pakai']    ?? 0);
+                                $setelahDiskon   = $setelahPoint + $nilaiPointPakai;
+                                $diskonDariSelisih = max(0, $sebelumDiskon - $setelahDiskon);
+                                $diskonDb        = (int)($t['diskon_transaksi'] ?? 0);
+                                $diskonTampil    = max($diskonDb, $diskonDariSelisih);
+                                $ptDb            = (int)($t['point_transaksi']  ?? 0);
+                                $ptTampil        = $ptDb > 0 ? $ptDb : (int)floor($setelahPoint / 10000);
+                            ?>
+                                <div class="order-card">
+                                    <div class="order-card-head">
+                                        <div>
+                                            <div class="order-store">Koperasi BSDK</div>
+                                            <div class="order-date"><?= h(tanggal_member($t['tanggal_transaksi'])) ?></div>
+                                        </div>
+                                        <span class="badge badge-selesai">Selesai</span>
+                                    </div>
+                                    <div class="order-items-wrap">
+                                        <div class="order-item-row">
+                                            <span class="oi-name" style="font-weight:800;color:var(--black);"><?= h($t['invoice']) ?></span>
+                                            <span class="oi-price"><?= rupiah_member($setelahPoint) ?></span>
+                                        </div>
+                                        <?php if ($sebelumDiskon > $setelahDiskon): ?>
+                                            <div class="order-item-row">
+                                                <span style="font-size:11px;color:var(--g4);font-weight:600;">Harga Asli</span>
+                                                <span style="font-size:11px;font-weight:600;color:var(--g4);text-decoration:line-through;"><?= rupiah_member($sebelumDiskon) ?></span>
+                                            </div>
+                                        <?php endif; ?>
+                                        <?php if ($diskonTampil > 0): ?>
+                                            <div class="order-item-row">
+                                                <span style="font-size:11px;color:var(--g4);font-weight:600;">Diskon</span>
+                                                <span style="font-size:11px;font-weight:700;color:#15803d;">- <?= rupiah_member($diskonTampil) ?></span>
+                                            </div>
+                                        <?php endif; ?>
+                                        <?php if ($nilaiPointPakai > 0): ?>
+                                            <div class="order-item-row">
+                                                <span style="font-size:11px;color:var(--g4);font-weight:600;">Tukar Point</span>
+                                                <span style="font-size:11px;font-weight:700;color:#7c3aed;">- <?= rupiah_member($nilaiPointPakai) ?> (<?= angka_member($pointPakai) ?> pt)</span>
+                                            </div>
+                                        <?php endif; ?>
+                                        <div class="order-item-row" style="margin-top:4px;padding-top:8px;border-top:0.5px solid var(--g7);">
+                                            <span style="font-size:11px;color:var(--g4);font-weight:600;">Bayar</span>
+                                            <span style="font-size:11px;font-weight:700;color:var(--black);"><?= rupiah_member($t['bayar_transaksi'] ?? 0) ?></span>
+                                        </div>
+                                        <?php if (($t['kembalian_transaksi'] ?? 0) > 0): ?>
+                                            <div class="order-item-row">
+                                                <span style="font-size:11px;color:var(--g4);font-weight:600;">Kembali</span>
+                                                <span style="font-size:11px;font-weight:700;color:var(--g3);"><?= rupiah_member($t['kembalian_transaksi']) ?></span>
+                                            </div>
+                                        <?php endif; ?>
+                                    </div>
+                                    <div class="order-card-foot">
+                                        <div class="order-total-wrap">
+                                            <div class="ot-label">Total Dibayar</div>
+                                            <div class="ot-val"><?= rupiah_member($setelahPoint) ?></div>
+                                            <div class="ot-pt">+<?= angka_member($ptTampil) ?> point diperoleh</div>
+                                        </div>
+                                        <div class="order-actions">
+                                            <a href="struk.php?invoice=<?= urlencode($t['invoice']) ?>&member=1" target="_blank" class="btn btn-black" style="padding:7px 14px;">Struk</a>
+                                        </div>
+                                    </div>
+                                </div>
+                            <?php endforeach; ?>
+                        </div>
+                    <?php endif; ?>
+                </div>
+
+                <div class="pesanan-content" id="pesanan-bandara">
+
+                    <div class="transport-card-box" style="margin-top:12px;">
+                        <div class="transport-section-head">
+                            <div>
+                                <h3>Booking Bandara</h3>
+                                <div style="font-size:11px;font-weight:600;color:var(--g4);margin-top:4px;">Riwayat transport bandara Anda</div>
+                            </div>
+                            <span><?= angka_member(count($transportBookings)) ?></span>
+                        </div>
+
+                        <div class="transport-history-wrap">
+                            <?php if (!$transportBookings): ?>
+                                <div class="transport-empty">
+                                    Belum ada booking transport
+                                </div>
+                            <?php endif; ?>
+
+                            <?php foreach ($transportBookings as $tb): ?>
+                                <div class="transport-history-card">
+                                    <div class="transport-history-top">
+                                        <div>
+                                            <div class="transport-booking-code"><?= h($tb['kode_booking']) ?></div>
+                                            <div class="transport-booking-date"><?= h(tanggal_member($tb['created_at'])) ?></div>
+                                        </div>
+
+                                        <div class="transport-status <?= h(transport_status_class_member($tb['status'])) ?>">
+                                            <?= h(transport_status_label_member($tb['status'])) ?>
+                                        </div>
+                                    </div>
+
+                                    <div class="transport-history-grid">
+                                        <div class="transport-history-item">
+                                            <span>Layanan</span>
+                                            <strong><?= h(transport_layanan_label_member($tb['layanan'])) ?></strong>
+                                        </div>
+
+                                        <div class="transport-history-item">
+                                            <span>Kendaraan</span>
+                                            <strong><?= h($tb['driver_kendaraan'] ?? $tb['kendaraan'] ?? 'Menunggu Driver') ?></strong>
+                                        </div>
+
+                                        <div class="transport-history-item">
+                                            <span>Tanggal</span>
+                                            <strong><?= h(transport_tanggal_member($tb['tanggal'])) ?></strong>
+                                        </div>
+
+                                        <div class="transport-history-item">
+                                            <span>Jam</span>
+                                            <strong><?= h(transport_jam_member($tb['jam'])) ?> WIB</strong>
+                                        </div>
+                                    </div>
+
+                                    <div class="transport-route-box">
+                                        <div class="transport-route-item">
+                                            <small>Jemput</small>
+                                            <div><?= h($tb['lokasi_jemput']) ?></div>
+                                        </div>
+
+                                        <div class="transport-route-divider"></div>
+
+                                        <div class="transport-route-item">
+                                            <small>Tujuan</small>
+                                            <div><?= h($tb['tujuan']) ?></div>
+                                        </div>
+                                    </div>
+
+                                    <?php if (!empty($tb['catatan'])): ?>
+                                        <div class="transport-note">
+                                            <?= h($tb['catatan']) ?>
+                                        </div>
+                                    <?php endif; ?>
+
+                                    <div class="transport-price-row">
+                                        <small>Total Harga</small>
+                                        <div class="transport-price">
+                                            <?= rupiah_member($tb['total_harga']) ?>
+                                        </div>
+                                    </div>
+                                </div>
+                            <?php endforeach; ?>
+                        </div>
+                    </div>
+
+                </div>
+
             </div><!-- /page-pesanan -->
+
+
+
+            <!-- ══════════════════════════════
+             PAGE: TRANSPORT BANDARA
+        ══════════════════════════════ -->
+            <div class="page" id="page-transport">
+                <div class="promo-hero-bar">
+                    <div style="font-size:10px;font-weight:900;text-transform:uppercase;letter-spacing:.15em;opacity:.4;margin-bottom:8px;">Transport Service</div>
+                    <h2>Airport<br>Transfer</h2>
+                    <p>Booking kendaraan bandara cepat, aman, dan nyaman.</p>
+                </div>
+
+                <div class="transport-service-grid">
+                    <div class="transport-service-card">
+                        <div class="transport-service-ico">🛫</div>
+                        <div class="transport-service-label">Antar Bandara</div>
+                    </div>
+                    <div class="transport-service-card">
+                        <div class="transport-service-ico">🛬</div>
+                        <div class="transport-service-label">Jemput Bandara</div>
+                    </div>
+                    <div class="transport-service-card">
+                        <div class="transport-service-ico">📍</div>
+                        <div class="transport-service-label">Lokasi Jemput</div>
+                    </div>
+                    <div class="transport-service-card">
+                        <div class="transport-service-ico">📋</div>
+                        <div class="transport-service-label">Riwayat</div>
+                    </div>
+                </div>
+
+                <div class="transport-note-box">
+                    Pilih jenis kendaraan sesuai kebutuhan. Admin/operator akan menugaskan driver dan unit kendaraan yang sesuai.
+                </div>
+
+                <div class="transport-card-box">
+                    <div class="transport-section-head">
+                        <div>
+                            <h3>Booking Kendaraan</h3>
+                            <div style="font-size:11px;font-weight:600;color:var(--g4);margin-top:4px;">Airport transfer member</div>
+                        </div>
+                        <span>Form</span>
+                    </div>
+
+                    <form method="POST" action="transport_booking.php" class="transport-form">
+                        <input type="hidden" name="member_id" value="<?= h($member['id']) ?>">
+
+                        <div class="transport-form-group">
+                            <label>Jenis Layanan</label>
+                            <select name="layanan" class="transport-input" required>
+                                <option value="antar_bandara">Antar Bandara</option>
+                                <option value="jemput_bandara">Jemput Bandara</option>
+                            </select>
+                        </div>
+
+                        <div class="transport-form-group">
+                            <label>Jenis Kendaraan</label>
+
+                            <div class="vehicle-type-grid">
+                                <label class="vehicle-type-option">
+                                    <input type="radio" name="tipe_kendaraan" value="avanza" checked>
+                                    <div class="vehicle-type-card">
+                                        <div class="vehicle-type-name"><?= h($transportTarif['avanza']['label']) ?></div>
+                                        <div class="vehicle-type-meta">Kapasitas <?= angka_member($transportTarif['avanza']['kapasitas']) ?> orang</div>
+                                        <div class="vehicle-type-price"><?= rupiah_member($transportTarif['avanza']['harga']) ?></div>
+                                    </div>
+                                </label>
+
+                                <label class="vehicle-type-option">
+                                    <input type="radio" name="tipe_kendaraan" value="innova">
+                                    <div class="vehicle-type-card">
+                                        <div class="vehicle-type-name"><?= h($transportTarif['innova']['label']) ?></div>
+                                        <div class="vehicle-type-meta">Kapasitas <?= angka_member($transportTarif['innova']['kapasitas']) ?> orang</div>
+                                        <div class="vehicle-type-price"><?= rupiah_member($transportTarif['innova']['harga']) ?></div>
+                                    </div>
+                                </label>
+
+                                <label class="vehicle-type-option">
+                                    <input type="radio" name="tipe_kendaraan" value="hiace">
+                                    <div class="vehicle-type-card">
+                                        <div class="vehicle-type-name"><?= h($transportTarif['hiace']['label']) ?></div>
+                                        <div class="vehicle-type-meta">Kapasitas <?= angka_member($transportTarif['hiace']['kapasitas']) ?> orang</div>
+                                        <div class="vehicle-type-price"><?= rupiah_member($transportTarif['hiace']['harga']) ?></div>
+                                    </div>
+                                </label>
+                            </div>
+                        </div>
+
+
+
+                        <div class="transport-form-group">
+                            <label>Lokasi Jemput</label>
+                            <input type="text" name="lokasi_jemput" class="transport-input" placeholder="Contoh: Bogor Selatan" required>
+                        </div>
+
+                        <div class="transport-form-group">
+                            <label>Tujuan</label>
+                            <input type="text" name="tujuan" class="transport-input" placeholder="Contoh: Bandara Soekarno Hatta Terminal 3" required>
+                        </div>
+
+                        <div class="transport-grid-2">
+                            <div class="transport-form-group">
+                                <label>Tanggal</label>
+                                <input type="date" name="tanggal" class="transport-input" required>
+                            </div>
+
+                            <div class="transport-form-group">
+                                <label>Jam</label>
+                                <input type="time" name="jam" class="transport-input" required>
+                            </div>
+                        </div>
+
+                        <div class="transport-form-group">
+                            <label>Penumpang</label>
+                            <input type="number" name="jumlah_penumpang" class="transport-input" value="1" min="1" required>
+                        </div>
+
+                        <div class="transport-form-group">
+                            <label>Catatan</label>
+                            <textarea name="catatan" class="transport-input transport-textarea" placeholder="Contoh: bawa koper besar, jemput di lobby, butuh kursi bayi"></textarea>
+                        </div>
+
+                        <button type="submit" class="transport-submit">
+                            Booking Sekarang
+                        </button>
+                    </form>
+                </div>
+
+            </div><!-- /page-transport -->
 
 
             <!-- ══════════════════════════════
@@ -2450,6 +3605,14 @@ $trxBeranda              = array_slice($transaksi, 0, 3);
                     </svg>
                 </div>
                 <span class="nav-label">Pesanan</span>
+            </button>
+
+            <button class="nav-btn" id="nav-transport" onclick="goTo('transport')">
+                <div class="nav-icon"><svg viewBox="0 0 24 24">
+                        <path d="M2 16l20-8-20-8 4 8-4 8z" />
+                        <path d="M6 8h16" />
+                    </svg></div>
+                <span class="nav-label">Bandara</span>
             </button>
             <button class="nav-btn" id="nav-akun" onclick="goTo('akun')">
                 <div class="nav-icon"><svg viewBox="0 0 24 24">
@@ -2876,6 +4039,15 @@ $trxBeranda              = array_slice($transaksi, 0, 3);
         function setOrderTab(el) {
             document.querySelectorAll('#page-pesanan .tab-btn').forEach(t => t.classList.remove('active'));
             el.classList.add('active');
+
+            var target = el.getAttribute('data-target') || 'pesanan-semua';
+
+            document.querySelectorAll('#page-pesanan .pesanan-content').forEach(function(box) {
+                box.classList.remove('active');
+            });
+
+            var activeBox = document.getElementById(target);
+            if (activeBox) activeBox.classList.add('active');
         }
 
         /* ── Modal ── */
@@ -2964,6 +4136,13 @@ $trxBeranda              = array_slice($transaksi, 0, 3);
                 window.location.href = 'member_dashboard.php?logout=1';
             }
         }
+
+        document.addEventListener('DOMContentLoaded', function() {
+            var targetHash = (window.location.hash || '').replace('#', '');
+            if (targetHash && typeof goTo === 'function') {
+                goTo(targetHash);
+            }
+        });
     </script>
 </body>
 

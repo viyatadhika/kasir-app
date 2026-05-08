@@ -59,23 +59,65 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
 <head>
     <meta charset="UTF-8">
-    <title>Login Member - Koperasi BSDK</title>
+    <title>Login Member - Sejahub</title>
+    <link rel="icon" href="assets/sejahub_icon.png" sizes="192x192">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <!-- Framework & Fonts -->
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800;900&display=swap" rel="stylesheet">
+
     <style>
-        body { font-family: 'Plus Jakarta Sans', sans-serif; background:#f8fafc; color:#111827; }
-        .border-subtle { border-color:#e5e7eb; }
-        button, a.btn { border-radius:2px!important; font-size:11px!important; font-weight:800!important; text-transform:uppercase!important; letter-spacing:.08em!important; }
+        body {
+            font-family: 'Plus Jakarta Sans', sans-serif;
+            background: #f5f5f5;
+            color: #111827;
+        }
+
+        .border-subtle {
+            border-color: #e5e7eb;
+        }
+
+        button,
+        a.btn {
+            border-radius: 2px !important;
+            font-size: 11px !important;
+            font-weight: 800 !important;
+            text-transform: uppercase !important;
+            letter-spacing: .08em !important;
+        }
+
+        input:focus {
+            outline: none;
+            border-color: #000 !important;
+            box-shadow: 0 0 0 3px rgba(0, 0, 0, .04);
+        }
     </style>
 </head>
 
 <body class="min-h-screen flex items-center justify-center p-4">
-    <div class="w-full max-w-md bg-white border border-subtle shadow-sm p-8">
-        <div class="text-center mb-8">
-            <div class="text-sm font-black tracking-tighter border-b-2 border-black inline-block pb-1">KOPERASI BSDK</div>
-            <h1 class="mt-6 text-xl font-black uppercase tracking-[0.2em]">Login Member</h1>
-            <p class="mt-2 text-xs text-gray-400 font-semibold">Lihat point, riwayat belanja, dan struk transaksi.</p>
+    <div class="w-full max-w-md bg-white border border-subtle shadow-sm p-10">
+
+        <div class="text-center mb-10">
+
+            <!-- Logo -->
+            <img
+                src="assets/sejahub_icon.png"
+                alt="SEJAHUB"
+                class="h-28 w-auto mx-auto object-contain select-none mb-6"
+                draggable="false">
+
+            <!-- Title -->
+            <h1 class="text-xl font-black uppercase tracking-[0.2em]">
+                Login Member
+            </h1>
+
+            <!-- Subtitle -->
+            <p class="mt-3 text-xs text-gray-400 font-semibold leading-relaxed">
+                Lihat point, riwayat belanja,<br>
+                dan struk transaksi member.
+            </p>
+
         </div>
 
         <?php if ($error): ?>
@@ -89,7 +131,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 <label class="block text-[10px] font-black uppercase tracking-widest text-gray-400 mb-2">
                     Nomor HP / Kode Member
                 </label>
-                <input type="text" name="login" value="<?= h($_POST['login'] ?? '') ?>" required
+                <input
+                    type="text"
+                    name="login"
+                    value="<?= h($_POST['login'] ?? '') ?>"
+                    required
                     class="w-full border border-gray-200 px-4 py-3 text-sm focus:outline-none focus:border-black"
                     placeholder="Contoh: 08111000001 / MBR001">
             </div>

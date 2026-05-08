@@ -207,6 +207,7 @@ try {
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Kelola Diskon</title>
+    <link rel="icon" href="assets/sejahub_icon.png" sizes="192x192">
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
     <style>
@@ -382,7 +383,7 @@ try {
                 <a href="logout.php" onclick="return confirm('Yakin mau logout?')" class="block text-sm font-bold text-red-500 uppercase tracking-widest">Logout</a>
             </nav>
             <div class="pt-8 border-t border-subtle">
-                <p class="text-[10px] text-gray-400 font-medium uppercase">ID Toko: T042 - BOGOR</p>
+                <p class="text-[10px] text-gray-400 font-medium uppercase">SEJAHUB KASIR</p>
                 <p class="text-[10px] text-gray-400 font-medium">Login: <?= htmlspecialchars($_SESSION['nama'] ?? '') ?></p>
             </div>
         </div>
@@ -391,7 +392,7 @@ try {
     <!-- Desktop Sidebar -->
     <aside class="sidebar hidden lg:flex flex-col fixed inset-y-0 left-0 border-r border-subtle bg-white p-8 z-30">
         <div class="mb-12">
-            <span class="text-sm font-bold tracking-tighter border-b-2 border-black pb-1">BSDK SEJAHTERA</span>
+            <span class="text-sm font-bold tracking-tighter border-b-2 border-black pb-1">SEJAHUB KASIR</span>
         </div>
         <nav class="flex-1 space-y-6">
             <a href="index.php" class="block text-xs font-medium text-gray-400 hover:text-black uppercase tracking-widest transition-colors">Dashboard</a>
@@ -409,8 +410,6 @@ try {
             </a>
         </nav>
         <div class="mt-auto">
-            <p class="text-[10px] text-gray-400 font-medium uppercase">ID Toko: T042 - BOGOR</p>
-            <p class="text-[10px] text-gray-400 font-medium">v 2.4.0</p>
             <a href="logout.php" onclick="return confirm('Yakin mau logout?')" class="block mt-4 text-[10px] text-red-500 hover:text-red-700 uppercase font-bold tracking-widest">Logout</a>
         </div>
     </aside>
@@ -426,9 +425,9 @@ try {
             <h1 class="diskon-header-title text-sm font-bold tracking-[0.2em] uppercase">Kelola Diskon</h1>
         </div>
         <div class="flex items-center gap-4">
-            <a href="pos.php" class="hidden sm:inline-flex text-[10px] font-black uppercase tracking-widest px-4 py-3 border border-subtle rounded-sm bg-white hover:bg-gray-50 transition-all">
+            <!-- <a href="pos.php" class="hidden sm:inline-flex text-[10px] font-black uppercase tracking-widest px-4 py-3 border border-subtle rounded-sm bg-white hover:bg-gray-50 transition-all">
                 Mesin Kasir
-            </a>
+            </a> -->
             <button onclick="openModal()"
                 class="inline-flex items-center gap-2 bg-black text-white text-[10px] font-black uppercase tracking-widest px-5 py-3 rounded-sm hover:bg-gray-800 transition-all shadow-sm">
                 <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
