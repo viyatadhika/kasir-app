@@ -1,5 +1,12 @@
 <?php
+session_start();
 require_once 'config.php';
+require_once 'activity_helper.php';
+
+$activeMenu = 'diskon';
+$pageTitle = 'Kelola Diskon';
+$backUrl = 'dashboard.php';
+
 
 /*
 SQL untuk fitur promo diskon aman:
@@ -114,6 +121,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     ':id' => $id
                 ]);
                 $success = 'Diskon berhasil diperbarui.';
+                catat_aktivitas($pdo, 'update', 'Diskon', 'Mengubah diskon: ' . $nama);
             } else {
                 $stmt = $pdo->prepare("
                     INSERT INTO diskon (nama, cakupan, target, produk_id, kategori, jenis, nilai, minimal_belanja, tanggal_mulai, tanggal_selesai, status)
@@ -133,15 +141,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     ':status' => $status
                 ]);
                 $success = 'Diskon berhasil ditambahkan.';
+                catat_aktivitas($pdo, 'create', 'Diskon', 'Menambah diskon: ' . $nama);
             }
         } elseif ($action === 'toggle') {
             $id = (int)($_POST['id'] ?? 0);
             $pdo->prepare("UPDATE diskon SET status=IF(status='aktif','nonaktif','aktif'), updated_at=NOW() WHERE id=:id")->execute([':id' => $id]);
             $success = 'Status diskon berhasil diubah.';
+            catat_aktivitas($pdo, 'status', 'Diskon', 'Mengubah status diskon ID: ' . $id);
         } elseif ($action === 'delete') {
             $id = (int)($_POST['id'] ?? 0);
             $pdo->prepare("DELETE FROM diskon WHERE id=:id")->execute([':id' => $id]);
             $success = 'Diskon berhasil dihapus.';
+            catat_aktivitas($pdo, 'delete', 'Diskon', 'Menghapus diskon ID: ' . $id);
         }
     } catch (Throwable $e) {
         $error = $e->getMessage();
@@ -199,6 +210,8 @@ try {
 } catch (Throwable $e) {
     $summary = ['total' => 0, 'aktif' => 0, 'transaksi' => 0, 'produk' => 0, 'kategori' => 0];
 }
+
+catat_view_once($pdo, 'Diskon', 'Membuka halaman Diskon');
 ?>
 <!DOCTYPE html>
 <html lang="id">
@@ -356,88 +369,38 @@ try {
                 justify-content: center;
             }
         }
+
+        /* Shared layout aliases for sidebar.php/navbar.php */
+        @media (min-width: 1024px) {
+
+            .app-header,
+            .page-header,
+            .main-wrap,
+            .content,
+            .produk-header,
+            .produk-main,
+            .diskon-header,
+            .diskon-main,
+            .stok-header,
+            .stok-main-wrap,
+            .laporan-header,
+            .laporan-main-wrap {
+                margin-left: 220px;
+            }
+        }
     </style>
 </head>
 
 <body class="antialiased bg-[#fcfcfc] min-h-screen pb-20 lg:pb-0">
 
+    <?php require_once 'sidebar.php'; ?>
+    <?php require_once 'navbar.php'; ?>
+
+
     <!-- Mobile Menu Overlay -->
-    <div id="mobileMenuOverlay" class="fixed inset-0 bg-black/50 z-[100] opacity-0 invisible flex justify-end lg:hidden">
-        <div id="mobileMenuContent" class="w-72 bg-white h-full p-8 translate-x-full shadow-2xl flex flex-col">
-            <div class="flex justify-between items-center mb-10">
-                <span class="text-xs font-bold tracking-widest uppercase">Navigasi</span>
-                <button onclick="toggleMobileMenu()" class="p-2 -mr-2 hover:bg-gray-100 rounded-sm transition-colors">
-                    <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
-                    </svg>
-                </button>
-            </div>
-            <nav class="space-y-8 flex-1">
-                <a href="index.php" class="block text-sm font-bold text-black uppercase tracking-widest">Dashboard</a>
-                <a href="pos.php" class="block text-sm font-medium text-blue-600 uppercase tracking-widest">Mesin Kasir (POS)</a>
-                <a href="produk.php" class="block text-sm font-medium text-gray-400 uppercase tracking-widest">Kelola Produk</a>
-                <a href="diskon.php" class="block text-sm font-semibold text-black uppercase tracking-widest">Kelola Diskon</a>
-                <a href="laporan.php" class="block text-xs font-medium text-gray-400 hover:text-black uppercase tracking-widest transition-colors">
-                    Laporan Keuangan
-                </a>
-                <a href="logout.php" onclick="return confirm('Yakin mau logout?')" class="block text-sm font-bold text-red-500 uppercase tracking-widest">Logout</a>
-            </nav>
-            <div class="pt-8 border-t border-subtle">
-                <p class="text-[10px] text-gray-400 font-medium uppercase">SEJAHUB KASIR</p>
-                <p class="text-[10px] text-gray-400 font-medium">Login: <?= htmlspecialchars($_SESSION['nama'] ?? '') ?></p>
-            </div>
-        </div>
-    </div>
 
     <!-- Desktop Sidebar -->
-    <aside class="sidebar hidden lg:flex flex-col fixed inset-y-0 left-0 border-r border-subtle bg-white p-8 z-30">
-        <div class="mb-12">
-            <span class="text-sm font-bold tracking-tighter border-b-2 border-black pb-1">SEJAHUB KASIR</span>
-        </div>
-        <nav class="flex-1 space-y-6">
-            <a href="index.php" class="block text-xs font-medium text-gray-400 hover:text-black uppercase tracking-widest transition-colors">Dashboard</a>
-            <a href="pos.php" class="block text-xs font-medium text-blue-600 hover:font-bold uppercase tracking-widest transition-all flex items-center gap-2">
-                <span class="w-2 h-2 bg-blue-600 rounded-full"></span>
-                Mesin Kasir (POS)
-            </a>
-            <a href="produk.php" class="block text-xs font-medium text-gray-400 hover:text-black uppercase tracking-widest transition-colors">Kelola Produk</a>
-            <a href="diskon.php" class="block text-xs font-semibold text-black uppercase tracking-widest flex items-center gap-2">
-                <span class="w-2 h-2 bg-black rounded-full"></span>
-                Kelola Diskon
-            </a>
-            <a href="laporan.php" class="block text-xs font-medium text-gray-400 hover:text-black uppercase tracking-widest transition-colors">
-                Laporan Keuangan
-            </a>
-        </nav>
-        <div class="mt-auto">
-            <a href="logout.php" onclick="return confirm('Yakin mau logout?')" class="block mt-4 text-[10px] text-red-500 hover:text-red-700 uppercase font-bold tracking-widest">Logout</a>
-        </div>
-    </aside>
-
     <!-- Header -->
-    <header class="diskon-header sticky top-0 bg-white border-b border-subtle px-4 sm:px-6 py-4 flex justify-between items-center z-40 shadow-sm">
-        <div class="flex items-center gap-4">
-            <a href="index.php" class="p-2 hover:bg-gray-100 rounded-full transition-colors group">
-                <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 group-hover:-translate-x-1 transition-transform" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 19l-7-7m0 0l7-7m-7 7h18" />
-                </svg>
-            </a>
-            <h1 class="diskon-header-title text-sm font-bold tracking-[0.2em] uppercase">Kelola Diskon</h1>
-        </div>
-        <div class="flex items-center gap-4">
-            <!-- <a href="pos.php" class="hidden sm:inline-flex text-[10px] font-black uppercase tracking-widest px-4 py-3 border border-subtle rounded-sm bg-white hover:bg-gray-50 transition-all">
-                Mesin Kasir
-            </a> -->
-            <button onclick="openModal()"
-                class="inline-flex items-center gap-2 bg-black text-white text-[10px] font-black uppercase tracking-widest px-5 py-3 rounded-sm hover:bg-gray-800 transition-all shadow-sm">
-                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M12 4v16m8-8H4" />
-                </svg>
-                <span class="diskon-add-text">Tambah Diskon</span>
-            </button>
-        </div>
-    </header>
-
     <!-- Main Content -->
     <main class="diskon-main p-4 sm:p-5 md:p-8 lg:p-10">
 

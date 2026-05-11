@@ -1,7 +1,14 @@
 <?php
+session_start();
 ini_set('display_errors', 1);
 error_reporting(E_ALL);
 require_once 'config.php';
+require_once 'activity_helper.php';
+
+$activeMenu = 'laporan';
+$pageTitle = 'Laporan Keuangan';
+$backUrl = 'dashboard.php';
+
 
 if (!function_exists('rupiah')) {
     /**
@@ -225,6 +232,8 @@ if (!function_exists('e')) {
         return htmlspecialchars((string)($v ?? ''), ENT_QUOTES, 'UTF-8');
     }
 }
+
+catat_view_once($pdo, 'Laporan Keuangan', 'Membuka halaman Laporan Keuangan');
 ?>
 <!DOCTYPE html>
 <html lang="id">
@@ -532,10 +541,33 @@ if (!function_exists('e')) {
                 padding: .75rem !important;
             }
         }
+
+        /* Shared layout aliases for sidebar.php/navbar.php */
+        @media (min-width: 1024px) {
+
+            .app-header,
+            .page-header,
+            .main-wrap,
+            .content,
+            .produk-header,
+            .produk-main,
+            .diskon-header,
+            .diskon-main,
+            .stok-header,
+            .stok-main-wrap,
+            .laporan-header,
+            .laporan-main-wrap {
+                margin-left: 220px;
+            }
+        }
     </style>
 </head>
 
 <body class="antialiased min-h-screen pb-20 lg:pb-0">
+
+    <?php require_once 'sidebar.php'; ?>
+    <?php require_once 'navbar.php'; ?>
+
 
     <!-- ══ Mobile Menu Overlay ══════════════════════════════════════ -->
     <div id="mobileMenuOverlay" class="fixed inset-0 bg-black/50 z-[100] opacity-0 invisible flex justify-end lg:hidden">
@@ -564,45 +596,7 @@ if (!function_exists('e')) {
     </div>
 
     <!-- ══ Desktop Sidebar ══════════════════════════════════════════ -->
-    <aside class="sidebar hidden lg:flex flex-col fixed inset-y-0 left-0 border-r border-subtle bg-white p-8 z-30">
-        <div class="mb-12">
-            <span class="text-sm font-bold tracking-tighter border-b-2 border-black pb-1">SEJAHUB KASIR</span>
-        </div>
-        <nav class="flex-1 space-y-6">
-            <a href="index.php" class="block text-xs font-medium text-gray-400 hover:text-black uppercase tracking-widest transition-colors">Dashboard</a>
-            <a href="pos.php" class="block text-xs font-medium text-gray-400 hover:text-black uppercase tracking-widest transition-colors">Mesin Kasir (POS)</a>
-            <a href="produk.php" class="block text-xs font-medium text-gray-400 hover:text-black uppercase tracking-widest transition-colors">Kelola Produk</a>
-            <a href="diskon.php" class="block text-xs font-medium text-gray-400 hover:text-black uppercase tracking-widest transition-colors">Kelola Diskon</a>
-            <a href="laporan.php" class="block text-xs font-semibold text-black uppercase tracking-widest flex items-center gap-2">
-                <span class="w-2 h-2 bg-black rounded-full"></span>Laporan Keuangan
-            </a>
-        </nav>
-        <div class="mt-auto">
-            <a href="logout.php" onclick="return confirm('Yakin mau logout?')" class="block mt-4 text-[10px] text-red-500 hover:text-red-700 uppercase font-bold tracking-widest">Logout</a>
-        </div>
-    </aside>
-
     <!-- ══ Header ═══════════════════════════════════════════════════ -->
-    <header class="laporan-header no-print sticky top-0 bg-white border-b border-subtle px-4 sm:px-6 py-4 flex justify-between items-center z-40 shadow-sm">
-        <div class="flex items-center gap-3 sm:gap-4">
-            <!-- Back -->
-            <a href="index.php" class="p-2 hover:bg-gray-100 rounded-full transition-colors group">
-                <svg class="h-5 w-5 group-hover:-translate-x-1 transition-transform" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 19l-7-7m0 0l7-7m-7 7h18" />
-                </svg>
-            </a>
-            <h1 class="laporan-header-title text-sm font-bold tracking-[0.2em] uppercase">Laporan Keuangan</h1>
-        </div>
-        <!-- Export buttons — desktop -->
-        <div class="flex items-center gap-2 sm:gap-3">
-            <!-- <a href="pos.php" class="header-export-btn hidden sm:inline-flex text-[10px] font-black uppercase tracking-widest px-4 py-2.5 border border-subtle rounded-sm bg-white hover:bg-gray-50 transition-all">POS</a> -->
-            <a href="export_laporan_pdf.php?jenis=ringkasan&awal=<?= $awal ?>&akhir=<?= $akhir ?>" class="header-export-btn hidden sm:inline-flex text-[10px] font-black uppercase tracking-widest px-4 py-2.5 bg-black text-white rounded-none hover:bg-gray-800 transition-all">Ringkasan</a>
-            <a href="export_laporan_pdf.php?jenis=transaksi&awal=<?= $awal ?>&akhir=<?= $akhir ?>" class="header-export-btn hidden sm:inline-flex text-[10px] font-black uppercase tracking-widest px-4 py-2.5 bg-black text-white rounded-sm hover:bg-gray-800 transition-all">Transaksi</a>
-            <a href="export_laporan_pdf.php?jenis=produk&awal=<?= $awal ?>&akhir=<?= $akhir ?>" class="header-export-btn hidden sm:inline-flex text-[10px] font-black uppercase tracking-widest px-4 py-2.5 bg-black text-white rounded-sm hover:bg-gray-800 transition-all">Produk</a>
-            <a href="export_laporan_pdf.php?jenis=diskon&awal=<?= $awal ?>&akhir=<?= $akhir ?>" class="header-export-btn hidden sm:inline-flex text-[10px] font-black uppercase tracking-widest px-4 py-2.5 bg-black text-white rounded-sm hover:bg-gray-800 transition-all">Diskon</a>
-        </div>
-    </header>
-
     <!-- ══ Main ═════════════════════════════════════════════════════ -->
     <div class="laporan-main-wrap">
         <main class="laporan-main p-4 sm:p-5 md:p-8 lg:p-10 flex flex-col gap-5 md:gap-6">

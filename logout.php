@@ -1,10 +1,17 @@
 <?php
+session_start();
+require_once 'config.php';
+require_once 'activity_helper.php';
 
-require 'auth.php';
+catat_aktivitas(
+    $pdo,
+    'logout',
+    'Logout',
+    'User keluar dari aplikasi'
+);
 
-// Hapus session
+session_unset();
 session_destroy();
 
-// Kembali ke login
-header('Location: index.php');
+header('Location: login.php');
 exit;

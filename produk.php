@@ -1,5 +1,12 @@
 <?php
+session_start();
 require_once 'config.php';
+require_once 'activity_helper.php';
+
+$activeMenu = 'produk';
+$pageTitle = 'Kelola Produk';
+$backUrl = 'dashboard.php';
+
 
 // ── API Handler (AJAX) ───────────────────────────────────────────────────────
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_GET['action'])) {
@@ -38,6 +45,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_GET['action'])) {
                 ':satuan'       => trim($input['satuan'] ?? 'pcs'),
                 ':status'       => in_array($input['status'] ?? 'aktif', ['aktif', 'nonaktif']) ? $input['status'] : 'aktif',
             ]);
+            catat_aktivitas($pdo, 'create', 'Produk', 'Menambah produk: ' . trim($input['nama']));
             echo json_encode(['success' => true, 'message' => 'Produk berhasil ditambahkan.', 'id' => $pdo->lastInsertId()]);
             exit;
 
@@ -74,6 +82,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_GET['action'])) {
                 ':satuan'       => trim($input['satuan'] ?? 'pcs'),
                 ':status'       => in_array($input['status'] ?? 'aktif', ['aktif', 'nonaktif']) ? $input['status'] : 'aktif',
             ]);
+            catat_aktivitas($pdo, 'update', 'Produk', 'Mengubah produk ID: ' . (int)$input['id']);
             echo json_encode(['success' => true, 'message' => 'Produk berhasil diperbarui.']);
             exit;
 
@@ -89,9 +98,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_GET['action'])) {
             if ($cek->fetch()) {
                 $pdo->prepare("UPDATE produk SET status = 'nonaktif', updated_at = NOW() WHERE id = :id")
                     ->execute([':id' => $input['id']]);
+                catat_aktivitas($pdo, 'status', 'Produk', 'Menonaktifkan produk ID: ' . (int)$input['id']);
                 echo json_encode(['success' => true, 'message' => 'Produk dinonaktifkan (ada di riwayat transaksi).', 'type' => 'soft']);
             } else {
                 $pdo->prepare("DELETE FROM produk WHERE id = :id")->execute([':id' => $input['id']]);
+                catat_aktivitas($pdo, 'delete', 'Produk', 'Menghapus produk ID: ' . (int)$input['id']);
                 echo json_encode(['success' => true, 'message' => 'Produk berhasil dihapus.', 'type' => 'hard']);
             }
             exit;
@@ -115,6 +126,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_GET['action'])) {
             }
             $pdo->prepare("UPDATE produk SET stok = :stok, updated_at = NOW() WHERE id = :id")
                 ->execute([':stok' => (int)$input['stok'], ':id' => (int)$input['id']]);
+            catat_aktivitas($pdo, 'update', 'Produk', 'Mengubah stok produk ID: ' . (int)$input['id']);
             echo json_encode(['success' => true, 'message' => 'Stok berhasil diperbarui.']);
             exit;
     }
@@ -170,6 +182,8 @@ $summary = $pdo->query("
         SUM(harga_jual * stok) AS nilai_stok
     FROM produk
 ")->fetch();
+
+catat_view_once($pdo, 'Produk', 'Membuka halaman Produk');
 ?>
 <!DOCTYPE html>
 <html lang="id">
@@ -392,106 +406,38 @@ $summary = $pdo->query("
                 justify-content: center;
             }
         }
+
+        /* Shared layout aliases for sidebar.php/navbar.php */
+        @media (min-width: 1024px) {
+
+            .app-header,
+            .page-header,
+            .main-wrap,
+            .content,
+            .produk-header,
+            .produk-main,
+            .diskon-header,
+            .diskon-main,
+            .stok-header,
+            .stok-main-wrap,
+            .laporan-header,
+            .laporan-main-wrap {
+                margin-left: 220px;
+            }
+        }
     </style>
 </head>
 
 <body class="antialiased bg-[#fcfcfc] min-h-screen pb-20 lg:pb-0">
 
-    <!-- Mobile Menu Overlay -->
-    <div id="mobileMenuOverlay" class="fixed inset-0 bg-black/50 z-[100] opacity-0 invisible flex justify-end lg:hidden">
-        <div id="mobileMenuContent" class="w-72 bg-white h-full p-8 translate-x-full shadow-2xl flex flex-col">
-            <div class="flex justify-between items-center mb-10">
-                <span class="text-xs font-bold tracking-widest uppercase">Navigasi</span>
-                <button onclick="toggleMobileMenu()" class="p-2 -mr-2 hover:bg-gray-100 rounded-sm transition-colors">
-                    <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
-                    </svg>
-                </button>
-            </div>
-            <nav class="space-y-8 flex-1">
-                <a href="index.php" class="block text-sm font-bold text-black uppercase tracking-widest">Dashboard</a>
-                <a href="pos.php" class="block text-sm font-medium text-blue-600 uppercase tracking-widest">Mesin Kasir (POS)</a>
-                <!-- <a href="#" class="block text-sm font-medium text-gray-400 uppercase tracking-widest">Laporan Shift</a> -->
-                <a href="produk.php" class="block text-sm font-medium text-gray-400 uppercase tracking-widest">Kelola Produk</a>
-                <a href="diskon.php" class="block text-xs font-medium text-gray-400 hover:text-black uppercase tracking-widest transition-colors">
-                    Kelola Diskon
-                </a>
-                <a href="laporan.php" class="block text-xs font-medium text-gray-400 hover:text-black uppercase tracking-widest transition-colors">
-                    Laporan Keuangan
-                </a>
+    <?php require_once 'sidebar.php'; ?>
+    <?php require_once 'navbar.php'; ?>
 
-                <!-- LOGOUT -->
-                <a href="logout.php"
-                    onclick="return confirm('Yakin mau logout?')"
-                    class="block text-sm font-bold text-red-500 uppercase tracking-widest">
-                    Logout
-                </a>
-            </nav>
-            <div class="pt-8 border-t border-subtle">
-                <p class="text-[10px] text-gray-400 font-medium uppercase">SEJAHUB KASIR</p>
-                <p class="text-[10px] text-gray-400 font-medium">Login: <?= htmlspecialchars($_SESSION['nama']) ?></p>
-            </div>
-        </div>
-    </div>
+
+    <!-- Mobile Menu Overlay -->
 
     <!-- Desktop Sidebar -->
-    <aside class="sidebar hidden lg:flex flex-col fixed inset-y-0 left-0 border-r border-subtle bg-white p-8 z-30">
-        <div class="mb-12">
-            <span class="text-sm font-bold tracking-tighter border-b-2 border-black pb-1">SEJAHUB KASIR</span>
-        </div>
-        <nav class="flex-1 space-y-6">
-            <a href="index.php" class="block text-xs font-medium text-gray-400 hover:text-black uppercase tracking-widest transition-colors">Dashboard</a>
-            <a href="pos.php" class="block text-xs font-medium text-blue-600 hover:font-bold uppercase tracking-widest transition-all flex items-center gap-2">
-                <span class="w-2 h-2 bg-blue-600 rounded-full"></span>
-                Mesin Kasir (POS)
-            </a>
-            <!-- <a href="#" class="block text-xs font-medium text-gray-400 hover:text-black uppercase tracking-widest transition-colors">Laporan Shift</a> -->
-            <a href="produk.php" class="block text-xs font-semibold text-black uppercase tracking-widest">Kelola Produk</a>
-
-            <a href="diskon.php" class="block text-xs font-medium text-gray-400 hover:text-black uppercase tracking-widest transition-colors">
-                Kelola Diskon
-            </a>
-            <a href="laporan.php" class="block text-xs font-medium text-gray-400 hover:text-black uppercase tracking-widest transition-colors">
-                Laporan Keuangan
-            </a>
-            <!-- <a href="#" class="block text-xs font-medium text-gray-400 hover:text-black uppercase tracking-widest transition-colors">Stok Opname</a>
-            <a href="#" class="block text-xs font-medium text-gray-400 hover:text-black uppercase tracking-widest transition-colors">Pengaturan Toko</a> -->
-        </nav>
-        <div class="mt-auto">
-
-            <!-- LOGOUT -->
-            <a href="logout.php"
-                onclick="return confirm('Yakin mau logout?')"
-                class="block mt-4 text-[10px] text-red-500 hover:text-red-700 uppercase font-bold tracking-widest">
-                Logout
-            </a>
-        </div>
-    </aside>
-
     <!-- Header -->
-    <header class="produk-header sticky top-0 bg-white border-b border-subtle px-4 sm:px-6 py-4 flex justify-between items-center z-40 shadow-sm">
-        <div class="flex items-center gap-4">
-            <a href="index.php" class="p-2 hover:bg-gray-100 rounded-full transition-colors group">
-                <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 group-hover:-translate-x-1 transition-transform" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 19l-7-7m0 0l7-7m-7 7h18" />
-                </svg>
-            </a>
-            <h1 class="produk-header-title text-sm font-bold tracking-[0.2em] uppercase">Kelola Produk</h1>
-        </div>
-        <div class="flex items-center gap-4">
-            <!-- <a href="pos.php" class="produk-pos-link hidden sm:inline-flex text-[10px] font-black uppercase tracking-widest px-4 py-3 border border-subtle rounded-sm bg-white hover:bg-gray-50 transition-all">
-                Mesin Kasir
-            </a> -->
-            <button onclick="openModal()"
-                class="inline-flex items-center gap-2 bg-black text-white text-[10px] font-black uppercase tracking-widest px-5 py-3 rounded-sm hover:bg-gray-800 transition-all shadow-sm">
-                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M12 4v16m8-8H4" />
-                </svg>
-                <span class="produk-add-text">Tambah Produk</span>
-            </button>
-        </div>
-    </header>
-
     <!-- Main Content -->
     <main class="produk-main p-4 sm:p-5 md:p-8 lg:p-10">
 

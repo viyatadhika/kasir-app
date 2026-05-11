@@ -1,7 +1,14 @@
 <?php
+session_start();
 ini_set('display_errors', 1);
 error_reporting(E_ALL);
 require_once 'config.php';
+require_once 'activity_helper.php';
+
+$activeMenu = 'pos';
+$pageTitle = 'Mesin Kasir';
+$backUrl = 'dashboard.php';
+
 
 if (!function_exists('e')) {
     function e(mixed $v): string
@@ -314,6 +321,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_GET['action'])) {
                 }
                 if ($memberId) $pdo->prepare("UPDATE member SET point=point-:pakai+:pt, total_belanja=total_belanja+:total, updated_at=NOW() WHERE id=:id")->execute([':pakai' => $pointPakai, ':pt' => $pointDapat, ':total' => $total, ':id' => $memberId]);
                 $pdo->commit();
+                catat_aktivitas($pdo, 'create', 'Mesin Kasir', 'Menyimpan transaksi: ' . $invoice . ' total ' . $total);
                 $pointTotal = 0;
                 if ($memberId) {
                     $r = $pdo->prepare("SELECT point FROM member WHERE id=:id");
@@ -337,6 +345,8 @@ $stmtKat = $pdo->query("SELECT DISTINCT kategori FROM produk WHERE status='aktif
 $kategoriList = $stmtKat->fetchAll(PDO::FETCH_COLUMN);
 $qrisImage = 'assets/qr_code_kasir.png';
 $operatorName = addslashes(e($_SESSION['nama'] ?? 'Kasir'));
+
+catat_view_once($pdo, 'Mesin Kasir', 'Membuka halaman Mesin Kasir');
 ?>
 <!DOCTYPE html>
 <html lang="id">
@@ -701,72 +711,38 @@ $operatorName = addslashes(e($_SESSION['nama'] ?? 'Kasir'));
             color: #991b1b;
             display: block;
         }
+
+        /* Shared layout aliases for sidebar.php/navbar.php */
+        @media (min-width: 1024px) {
+
+            .app-header,
+            .page-header,
+            .main-wrap,
+            .content,
+            .produk-header,
+            .produk-main,
+            .diskon-header,
+            .diskon-main,
+            .stok-header,
+            .stok-main-wrap,
+            .laporan-header,
+            .laporan-main-wrap {
+                margin-left: 220px;
+            }
+        }
     </style>
 </head>
 
 <body class="antialiased min-h-screen flex flex-col overflow-x-hidden pb-0">
 
+    <?php require_once 'sidebar.php'; ?>
+    <?php require_once 'navbar.php'; ?>
+
+
     <!-- Mobile Menu Overlay -->
-    <div id="mobileMenuOverlay" class="fixed inset-0 bg-black/50 z-[300] opacity-0 invisible flex justify-end lg:hidden">
-        <div id="mobileMenuContent" class="w-72 bg-white h-full p-8 translate-x-full shadow-2xl flex flex-col">
-            <div class="flex justify-between items-center mb-10">
-                <span class="text-xs font-bold tracking-widest uppercase">Navigasi</span>
-                <button onclick="toggleMobileMenu()" class="p-2 -mr-2 hover:bg-gray-100">
-                    <svg class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
-                    </svg>
-                </button>
-            </div>
-            <nav class="space-y-8 flex-1">
-                <a href="index.php" class="block text-sm font-medium text-gray-400 hover:text-black uppercase tracking-widest transition-colors">Dashboard</a>
-                <a href="pos.php" class="block text-sm font-bold text-black uppercase tracking-widest">Mesin Kasir (POS)</a>
-                <a href="produk.php" class="block text-sm font-medium text-gray-400 hover:text-black uppercase tracking-widest transition-colors">Kelola Produk</a>
-                <a href="diskon.php" class="block text-sm font-medium text-gray-400 hover:text-black uppercase tracking-widest transition-colors">Kelola Diskon</a>
-                <a href="laporan.php" class="block text-sm font-medium text-gray-400 hover:text-black uppercase tracking-widest transition-colors">Laporan Keuangan</a>
-                <a href="logout.php" onclick="return confirm('Yakin mau logout?')" class="block text-sm font-bold text-red-500 uppercase tracking-widest">Logout</a>
-            </nav>
-            <div class="pt-8 border-t border-subtle">
-                <p class="text-[10px] text-gray-400 font-medium uppercase">SEJAHUB KASIR</p>
-                <p class="text-[10px] text-gray-400 font-medium">Login: <?= e($_SESSION['nama']) ?></p>
-            </div>
-        </div>
-    </div>
 
     <!-- Desktop Sidebar -->
-    <aside class="sidebar hidden lg:flex flex-col fixed inset-y-0 left-0 border-r border-subtle bg-white p-8 z-30">
-        <div class="mb-12"><span class="text-sm font-bold tracking-tighter border-b-2 border-black pb-1">SEJAHUB KASIR</span></div>
-        <nav class="flex-1 space-y-6">
-            <a href="index.php" class="block text-xs font-medium text-gray-400 hover:text-black uppercase tracking-widest transition-colors">Dashboard</a>
-            <a href="pos.php" class="block text-xs font-semibold text-black uppercase tracking-widest flex items-center gap-2"><span class="w-2 h-2 bg-black rounded-full"></span>Mesin Kasir (POS)</a>
-            <a href="produk.php" class="block text-xs font-medium text-gray-400 hover:text-black uppercase tracking-widest transition-colors">Kelola Produk</a>
-            <a href="diskon.php" class="block text-xs font-medium text-gray-400 hover:text-black uppercase tracking-widest transition-colors">Kelola Diskon</a>
-            <a href="laporan.php" class="block text-xs font-medium text-gray-400 hover:text-black uppercase tracking-widest transition-colors">Laporan Keuangan</a>
-        </nav>
-        <div class="mt-auto">
-
-            <a href="logout.php" onclick="return confirm('Yakin mau logout?')" class="block mt-4 text-[10px] text-red-500 hover:text-red-700 uppercase font-bold tracking-widest">Logout</a>
-        </div>
-    </aside>
-
     <!-- Header -->
-    <header class="content bg-white border-b border-subtle px-4 sm:px-6 py-3 sm:py-4 flex justify-between items-center z-10 shadow-sm sticky top-0 lg:relative">
-        <div class="flex items-center gap-3 sm:gap-4">
-            <a href="index.php" class="p-2 hover:bg-gray-100 group">
-                <svg class="h-5 w-5 group-hover:-translate-x-1 transition-transform" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 19l-7-7m0 0l7-7m-7 7h18" />
-                </svg>
-            </a>
-            <h1 class="text-sm font-bold tracking-[0.2em] uppercase">Mesin Kasir</h1>
-        </div>
-        <div class="flex items-center gap-3 sm:gap-6">
-            <div class="text-right hidden md:block border-r border-subtle pr-6">
-                <p class="text-[10px] font-bold text-gray-400 uppercase tracking-widest">Operator</p>
-                <p class="text-xs font-semibold uppercase"><?= e($_SESSION['nama']) ?></p>
-            </div>
-            <div id="clock" class="text-sm font-bold tabular-nums">00:00:00</div>
-        </div>
-    </header>
-
     <!-- ══════════════════════════════════════════════════════════════
          MAIN LAYOUT
          Desktop: side by side (produk kiri, cart kanan)
@@ -1192,8 +1168,13 @@ $operatorName = addslashes(e($_SESSION['nama'] ?? 'Kasir'));
 
         // ── Init ─────────────────────────────────────────────────────────────────────
         async function init() {
-            updateClock();
-            setInterval(updateClock, 1000);
+            try {
+                updateClock();
+                setInterval(updateClock, 1000);
+            } catch (e) {
+                // Abaikan jika elemen jam tidak tersedia.
+            }
+
             await loadProducts();
         }
 
@@ -2168,7 +2149,10 @@ $operatorName = addslashes(e($_SESSION['nama'] ?? 'Kasir'));
         }
 
         function updateClock() {
-            document.getElementById('clock').innerText = new Date().toLocaleTimeString('id-ID', {
+            const clock = document.getElementById('clock');
+            if (!clock) return;
+
+            clock.innerText = new Date().toLocaleTimeString('id-ID', {
                 hour12: false
             });
         }

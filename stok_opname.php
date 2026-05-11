@@ -1,6 +1,12 @@
 <?php
 session_start();
 require_once 'config.php';
+require_once 'activity_helper.php';
+
+$activeMenu = 'stok';
+$pageTitle = 'Stok Opname';
+$backUrl = 'dashboard.php';
+
 
 /*
 |--------------------------------------------------------------------------
@@ -241,6 +247,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
             $pdo->commit();
 
+            catat_aktivitas($pdo, 'create', 'Stok Opname', 'Menyimpan stok opname: ' . $kodeOpname);
+
             header('Location: stok_opname.php?success=' . urlencode('Stok opname berhasil disimpan. Kode: ' . $kodeOpname));
             exit;
         } catch (Throwable $e) {
@@ -351,6 +359,8 @@ try {
 } catch (Throwable $e) {
     $error = $error ?: 'Gagal memuat data stok opname: ' . $e->getMessage();
 }
+
+catat_view_once($pdo, 'Stok Opname', 'Membuka halaman Stok Opname');
 ?>
 <!DOCTYPE html>
 <html lang="id">
@@ -506,86 +516,32 @@ try {
                 text-overflow: ellipsis;
             }
         }
+
+        /* Shared layout aliases for sidebar.php/navbar.php */
+        @media (min-width: 1024px) {
+
+            .app-header,
+            .page-header,
+            .main-wrap,
+            .content,
+            .produk-header,
+            .produk-main,
+            .diskon-header,
+            .diskon-main,
+            .stok-header,
+            .stok-main-wrap,
+            .laporan-header,
+            .laporan-main-wrap {
+                margin-left: 220px;
+            }
+        }
     </style>
 </head>
 
 <body class="antialiased min-h-screen pb-20 lg:pb-0">
 
-    <div id="mobileMenuOverlay" class="fixed inset-0 bg-black/50 z-[100] opacity-0 invisible flex justify-end lg:hidden">
-        <div id="mobileMenuContent" class="w-72 bg-white h-full p-8 translate-x-full shadow-2xl flex flex-col">
-            <div class="flex justify-between items-center mb-10">
-                <span class="text-xs font-bold tracking-widest uppercase">Navigasi</span>
-                <button onclick="toggleMobileMenu()" class="p-2 -mr-2 hover:bg-gray-100 transition-colors">
-                    <svg class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
-                    </svg>
-                </button>
-            </div>
-
-            <nav class="space-y-8 flex-1">
-                <a href="index.php" class="block text-sm font-medium text-gray-400 hover:text-black uppercase tracking-widest transition-colors">Dashboard</a>
-                <a href="pos.php" class="block text-sm font-medium text-gray-400 hover:text-black uppercase tracking-widest transition-colors">Mesin Kasir (POS)</a>
-                <a href="produk.php" class="block text-sm font-medium text-gray-400 hover:text-black uppercase tracking-widest transition-colors">Kelola Produk</a>
-                <a href="stok_opname.php" class="block text-sm font-bold text-black uppercase tracking-widest">Stok Opname</a>
-                <a href="diskon.php" class="block text-sm font-medium text-gray-400 hover:text-black uppercase tracking-widest transition-colors">Kelola Diskon</a>
-                <a href="laporan.php" class="block text-sm font-medium text-gray-400 hover:text-black uppercase tracking-widest transition-colors">Laporan Keuangan</a>
-                <a href="logout.php" onclick="return confirm('Yakin mau logout?')" class="block text-sm font-bold text-red-500 uppercase tracking-widest">Logout</a>
-            </nav>
-
-            <div class="pt-8 border-t border-subtle">
-                <p class="text-[10px] text-gray-400 font-medium uppercase">ID Toko: T042 - BOGOR</p>
-                <p class="text-[10px] text-gray-400 font-medium">Login: <?= h($_SESSION['nama'] ?? ($_SESSION['user']['nama'] ?? '-')) ?></p>
-            </div>
-        </div>
-    </div>
-
-    <aside class="sidebar hidden lg:flex flex-col fixed inset-y-0 left-0 border-r border-subtle bg-white p-8 z-30">
-        <div class="mb-12">
-            <span class="text-sm font-bold tracking-tighter border-b-2 border-black pb-1">KOPERASI BSDK</span>
-        </div>
-
-        <nav class="flex-1 space-y-6">
-            <a href="index.php" class="block text-xs font-medium text-gray-400 hover:text-black uppercase tracking-widest transition-colors">Dashboard</a>
-            <a href="pos.php" class="block text-xs font-medium text-gray-400 hover:text-black uppercase tracking-widest transition-colors">Mesin Kasir (POS)</a>
-            <a href="produk.php" class="block text-xs font-medium text-gray-400 hover:text-black uppercase tracking-widest transition-colors">Kelola Produk</a>
-            <a href="stok_opname.php" class="block text-xs font-semibold text-black uppercase tracking-widest flex items-center gap-2">
-                <span class="w-2 h-2 bg-black rounded-full"></span>Stok Opname
-            </a>
-            <a href="diskon.php" class="block text-xs font-medium text-gray-400 hover:text-black uppercase tracking-widest transition-colors">Kelola Diskon</a>
-            <a href="laporan.php" class="block text-xs font-medium text-gray-400 hover:text-black uppercase tracking-widest transition-colors">Laporan Keuangan</a>
-        </nav>
-
-        <div class="mt-auto">
-            <p class="text-[10px] text-gray-400 font-medium uppercase">ID Toko: T042 - BOGOR</p>
-            <p class="text-[10px] text-gray-400 font-medium">v 2.5.1</p>
-            <a href="logout.php" onclick="return confirm('Yakin mau logout?')" class="block mt-4 text-[10px] text-red-500 hover:text-red-700 uppercase font-bold tracking-widest">Logout</a>
-        </div>
-    </aside>
-
-    <header class="stok-header sticky top-0 bg-white border-b border-subtle px-4 sm:px-6 py-4 flex justify-between items-center z-40 shadow-sm">
-        <div class="flex items-center gap-3 sm:gap-4">
-            <button onclick="toggleMobileMenu()" class="lg:hidden p-2 hover:bg-gray-100 transition-colors" aria-label="Menu">
-                <svg class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5">
-                    <line x1="3" y1="6" x2="21" y2="6" />
-                    <line x1="3" y1="12" x2="21" y2="12" />
-                    <line x1="3" y1="18" x2="21" y2="18" />
-                </svg>
-            </button>
-
-            <a href="produk.php" class="p-2 hover:bg-gray-100 rounded-full transition-colors group">
-                <svg class="h-5 w-5 group-hover:-translate-x-1 transition-transform" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 19l-7-7m0 0l7-7m-7 7h18" />
-                </svg>
-            </a>
-
-            <h1 class="stok-header-title text-sm font-bold tracking-[0.2em] uppercase">Stok Opname</h1>
-        </div>
-
-        <div class="flex items-center gap-2 sm:gap-3">
-            <a href="produk.php" class="hidden sm:inline-flex text-[10px] font-black uppercase tracking-widest px-4 py-2.5 border border-subtle bg-white hover:bg-gray-50 transition-all">Produk</a>
-            <a href="#form-opname" class="inline-flex text-[10px] font-black uppercase tracking-widest px-4 py-2.5 bg-black text-white hover:bg-gray-800 transition-all">Mulai Opname</a>
-        </div>
-    </header>
+    <?php require_once 'sidebar.php'; ?>
+    <?php require_once 'navbar.php'; ?>
 
     <div class="stok-main-wrap">
         <main class="stok-main p-4 sm:p-5 md:p-8 lg:p-10 flex flex-col gap-5 md:gap-6">

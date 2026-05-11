@@ -1,6 +1,12 @@
 <?php
 session_start();
 require_once 'config.php';
+require_once 'activity_helper.php';
+
+$activeMenu = 'rental';
+$pageTitle = 'Rental Bandara';
+$backUrl = 'dashboard.php';
+
 
 /*
 |--------------------------------------------------------------------------
@@ -464,6 +470,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'updat
             $pdo->commit();
 
             $success = 'Status booking berhasil diperbarui.';
+            catat_aktivitas($pdo, 'status', 'Rental Bandara', 'Mengubah status booking ID: ' . $id . ' menjadi ' . $status);
         } catch (Throwable $e) {
             if ($pdo->inTransaction()) {
                 $pdo->rollBack();
@@ -606,6 +613,8 @@ try {
 }
 
 $loginNama = $_SESSION['nama'] ?? ($_SESSION['user']['nama'] ?? '-');
+
+catat_view_once($pdo, 'Rental Bandara', 'Membuka halaman Rental Bandara');
 ?>
 <!DOCTYPE html>
 <html lang="id">
@@ -712,74 +721,32 @@ $loginNama = $_SESSION['nama'] ?? ($_SESSION['user']['nama'] ?? '-');
                 text-overflow: ellipsis;
             }
         }
+
+        /* Shared layout aliases for sidebar.php/navbar.php */
+        @media (min-width: 1024px) {
+
+            .app-header,
+            .page-header,
+            .main-wrap,
+            .content,
+            .produk-header,
+            .produk-main,
+            .diskon-header,
+            .diskon-main,
+            .stok-header,
+            .stok-main-wrap,
+            .laporan-header,
+            .laporan-main-wrap {
+                margin-left: 220px;
+            }
+        }
     </style>
 </head>
 
 <body class="antialiased min-h-screen pb-20 lg:pb-0">
 
-    <div id="mobileMenuOverlay" class="fixed inset-0 bg-black/50 z-[100] opacity-0 invisible flex justify-end lg:hidden">
-        <div id="mobileMenuContent" class="w-72 bg-white h-full p-8 translate-x-full shadow-2xl flex flex-col">
-            <div class="flex justify-between items-center mb-10">
-                <span class="text-xs font-bold tracking-widest uppercase">Navigasi</span>
-                <button onclick="toggleMobileMenu()" class="p-2 -mr-2 hover:bg-gray-100 transition-colors">✕</button>
-            </div>
-
-            <nav class="space-y-8 flex-1">
-                <a href="index.php" class="block text-sm font-medium text-gray-400 hover:text-black uppercase tracking-widest">Dashboard</a>
-                <a href="pos.php" class="block text-sm font-medium text-gray-400 hover:text-black uppercase tracking-widest">Mesin Kasir (POS)</a>
-                <a href="produk.php" class="block text-sm font-medium text-gray-400 hover:text-black uppercase tracking-widest">Kelola Produk</a>
-                <a href="stok_opname.php" class="block text-sm font-medium text-gray-400 hover:text-black uppercase tracking-widest">Stok Opname</a>
-                <a href="rental_bandara.php" class="block text-sm font-bold text-black uppercase tracking-widest">Rental Bandara</a>
-                <a href="driver.php" class="block text-sm font-medium text-gray-400 hover:text-black uppercase tracking-widest">Driver Mitra</a>
-                <a href="diskon.php" class="block text-sm font-medium text-gray-400 hover:text-black uppercase tracking-widest">Kelola Diskon</a>
-                <a href="laporan.php" class="block text-sm font-medium text-gray-400 hover:text-black uppercase tracking-widest">Laporan Keuangan</a>
-                <a href="logout.php" onclick="return confirm('Yakin mau logout?')" class="block text-sm font-bold text-red-500 uppercase tracking-widest">Logout</a>
-            </nav>
-
-            <div class="pt-8 border-t border-subtle">
-                <p class="text-[10px] text-gray-400 font-medium uppercase">ID Toko: T042 - BOGOR</p>
-                <p class="text-[10px] text-gray-400 font-medium">Login: <?= h($loginNama) ?></p>
-            </div>
-        </div>
-    </div>
-
-    <aside class="sidebar hidden lg:flex flex-col fixed inset-y-0 left-0 border-r border-subtle bg-white p-8 z-30">
-        <div class="mb-12">
-            <span class="text-sm font-bold tracking-tighter border-b-2 border-black pb-1">KOPERASI BSDK</span>
-        </div>
-
-        <nav class="flex-1 space-y-6">
-            <a href="index.php" class="block text-xs font-medium text-gray-400 hover:text-black uppercase tracking-widest">Dashboard</a>
-            <a href="pos.php" class="block text-xs font-medium text-gray-400 hover:text-black uppercase tracking-widest">Mesin Kasir (POS)</a>
-            <a href="produk.php" class="block text-xs font-medium text-gray-400 hover:text-black uppercase tracking-widest">Kelola Produk</a>
-            <a href="stok_opname.php" class="block text-xs font-medium text-gray-400 hover:text-black uppercase tracking-widest">Stok Opname</a>
-            <a href="rental_bandara.php" class="block text-xs font-semibold text-black uppercase tracking-widest flex items-center gap-2">
-                <span class="w-2 h-2 bg-black rounded-full"></span>Rental Bandara
-            </a>
-            <a href="driver.php" class="block text-xs font-medium text-gray-400 hover:text-black uppercase tracking-widest">Driver Mitra</a>
-            <a href="diskon.php" class="block text-xs font-medium text-gray-400 hover:text-black uppercase tracking-widest">Kelola Diskon</a>
-            <a href="laporan.php" class="block text-xs font-medium text-gray-400 hover:text-black uppercase tracking-widest">Laporan Keuangan</a>
-        </nav>
-
-        <div class="mt-auto">
-            <p class="text-[10px] text-gray-400 font-medium uppercase">ID Toko: T042 - BOGOR</p>
-            <p class="text-[10px] text-gray-400 font-medium">v 2.5.1</p>
-            <a href="logout.php" onclick="return confirm('Yakin mau logout?')" class="block mt-4 text-[10px] text-red-500 hover:text-red-700 uppercase font-bold tracking-widest">Logout</a>
-        </div>
-    </aside>
-
-    <header class="app-header sticky top-0 bg-white border-b border-subtle px-4 sm:px-6 py-4 flex justify-between items-center z-40 shadow-sm">
-        <div class="flex items-center gap-3 sm:gap-4">
-            <button onclick="toggleMobileMenu()" class="lg:hidden p-2 hover:bg-gray-100 transition-colors" aria-label="Menu">☰</button>
-            <a href="index.php" class="p-2 hover:bg-gray-100 transition-colors">←</a>
-            <h1 class="header-title text-sm font-bold tracking-[0.2em] uppercase">Rental Bandara</h1>
-        </div>
-
-        <div class="flex items-center gap-2 sm:gap-3">
-            <a href="driver.php" class="hidden sm:inline-flex text-[10px] font-black uppercase tracking-widest px-4 py-2.5 border border-subtle bg-white hover:bg-gray-50">Driver</a>
-            <a href="#booking-list" class="inline-flex text-[10px] font-black uppercase tracking-widest px-4 py-2.5 bg-black text-white hover:bg-gray-800">Booking</a>
-        </div>
-    </header>
+    <?php require_once 'sidebar.php'; ?>
+    <?php require_once 'navbar.php'; ?>
 
     <div class="main-wrap">
         <main class="main-content p-4 sm:p-5 md:p-8 lg:p-10 flex flex-col gap-5 md:gap-6">

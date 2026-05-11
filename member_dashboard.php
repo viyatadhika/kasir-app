@@ -1,6 +1,7 @@
 <?php
 session_start();
 require_once 'config.php';
+require_once 'activity_helper.php';
 
 // Nilai tukar point mengikuti POS: 1 point = Rp 1.000
 if (!defined('MEMBER_POINT_RUPIAH')) {
@@ -397,6 +398,8 @@ if (!function_exists('transport_jam_member')) {
 }
 
 
+
+catat_view_once($pdo, 'Member Dashboard', 'Membuka halaman Member Dashboard');
 ?>
 <!DOCTYPE html>
 <html lang="id">

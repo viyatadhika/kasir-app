@@ -1,9 +1,19 @@
 <?php
 
 require 'config.php';
+require_once 'activity_helper.php';
 
 // Kalau sudah login, langsung ke kasir
 if (isset($_SESSION['user'])) {
+
+    // Log view dashboard otomatis
+    catat_aktivitas(
+        $pdo,
+        'login_redirect',
+        'Login',
+        'User sudah login dan diarahkan ke dashboard'
+    );
+
     header('Location: index.php');
     exit;
 }
@@ -12,6 +22,7 @@ $error = "";
 
 // Proses login
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+
     $username = trim($_POST['username']);
     $password = $_POST['password'];
 
@@ -20,6 +31,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $user = $stmt->fetch();
 
     if ($user && password_verify($password, $user['password'])) {
+
         $_SESSION['user'] = [
             'id' => $user['id'],
             'nama' => $user['nama'],
@@ -27,9 +39,26 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             'role' => $user['role']
         ];
 
+        // LOG LOGIN BERHASIL
+        catat_aktivitas(
+            $pdo,
+            'login',
+            'Login',
+            'User login: ' . $user['username']
+        );
+
         header('Location: dashboard.php');
         exit;
     } else {
+
+        // LOG LOGIN GAGAL
+        catat_aktivitas(
+            $pdo,
+            'login_gagal',
+            'Login',
+            'Login gagal username: ' . $username
+        );
+
         $error = "Username atau password salah";
     }
 }

@@ -1,6 +1,7 @@
 <?php
 session_start();
 require_once 'config.php';
+require_once 'activity_helper.php';
 
 /*
 |--------------------------------------------------------------------------
@@ -627,6 +628,8 @@ try {
         'Booking transport berhasil dikirim. '
         . 'Kode booking: '
         . $kodeBooking;
+
+    catat_aktivitas($pdo, 'booking', 'Transport Bandara', 'Member membuat booking transport: ' . $kodeBooking . ' - ' . $tipeKendaraan['label']);
 
     header('Location: member_dashboard.php#pesanan');
     exit;
