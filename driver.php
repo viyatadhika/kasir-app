@@ -5,7 +5,7 @@ require_once 'activity_helper.php';
 
 $activeMenu = 'driver';
 $pageTitle = 'Driver Mitra';
-$backUrl = 'rental_bandara.php';
+$backUrl = 'dashboard.php';
 
 
 /*
@@ -501,7 +501,8 @@ catat_view_once($pdo, 'Driver Mitra', 'Membuka halaman Driver Mitra');
 
 <head>
     <meta charset="UTF-8">
-    <title>Driver Mitra - Koperasi BSDK</title>
+    <title>Driver Mitra</title>
+    <?php include 'header.php'; ?>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
 
     <script src="https://cdn.tailwindcss.com"></script>
@@ -525,6 +526,14 @@ catat_view_once($pdo, 'Driver Mitra', 'Membuka halaman Driver Mitra');
         .no-scrollbar {
             -ms-overflow-style: none;
             scrollbar-width: none;
+        }
+
+        input,
+        select,
+        textarea,
+        button,
+        a {
+            border-radius: 0 !important;
         }
 
         tbody tr:hover {
@@ -551,6 +560,233 @@ catat_view_once($pdo, 'Driver Mitra', 'Membuka halaman Driver Mitra');
             display: none;
         }
 
+        .driver-table {
+            table-layout: fixed;
+        }
+
+        .driver-table th {
+            white-space: nowrap;
+        }
+
+        .driver-table td {
+            vertical-align: top;
+        }
+
+        .driver-col-driver {
+            width: 190px;
+        }
+
+        .driver-col-kendaraan {
+            width: 180px;
+        }
+
+        .driver-col-plat {
+            width: 110px;
+        }
+
+        .driver-col-kapasitas {
+            width: 100px;
+        }
+
+        .driver-col-tarif {
+            width: 130px;
+        }
+
+        .driver-col-status {
+            width: 120px;
+        }
+
+        .driver-col-rating {
+            width: 90px;
+        }
+
+        .driver-col-saldo {
+            width: 130px;
+        }
+
+        .driver-col-aksi {
+            width: 360px;
+        }
+
+        .driver-status-pill {
+            min-width: 72px;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            white-space: nowrap;
+            border-radius: 999px !important;
+        }
+
+        .driver-action-form {
+            display: grid;
+            grid-template-columns: 1fr 1fr auto;
+            gap: .5rem;
+            align-items: center;
+        }
+
+        .driver-action-form select {
+            min-width: 92px;
+        }
+
+        .driver-card {
+            background: #fff;
+            border: 1px solid #f0f0f0;
+            padding: 1rem;
+            display: flex;
+            flex-direction: column;
+            gap: .875rem;
+            min-height: 100%;
+        }
+
+        .driver-card-head {
+            display: flex;
+            align-items: flex-start;
+            justify-content: space-between;
+            gap: .75rem;
+        }
+
+        .driver-card-title {
+            min-width: 0;
+        }
+
+        .driver-card-title .driver-name {
+            font-size: 13px;
+            line-height: 1.25;
+            font-weight: 900;
+            color: #111827;
+            overflow: hidden;
+            white-space: nowrap;
+            text-overflow: ellipsis;
+        }
+
+        .driver-card-title .driver-meta {
+            font-size: 10px;
+            line-height: 1.35;
+            color: #9ca3af;
+            font-weight: 600;
+        }
+
+        .driver-card-status {
+            display: flex;
+            flex-direction: column;
+            align-items: flex-end;
+            gap: .35rem;
+            flex-shrink: 0;
+        }
+
+        .driver-card-grid {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: .5rem;
+            padding-top: .75rem;
+            border-top: 1px solid #f0f0f0;
+        }
+
+        .driver-card-field {
+            min-width: 0;
+            min-height: 58px;
+            background: #fafafa;
+            border: 1px solid #f3f3f3;
+            padding: .65rem .7rem;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+        }
+
+        .driver-card-field span {
+            display: block;
+            color: #9ca3af;
+            font-size: 9px;
+            line-height: 1;
+            font-weight: 800;
+            text-transform: uppercase;
+            letter-spacing: .08em;
+            margin-bottom: .4rem;
+        }
+
+        .driver-card-field p {
+            font-size: 11px;
+            line-height: 1.25;
+            font-weight: 900;
+            color: #111827;
+            overflow-wrap: anywhere;
+        }
+
+        .driver-card-note {
+            font-size: 11px;
+            line-height: 1.5;
+            color: #6b7280;
+            padding-top: .75rem;
+            border-top: 1px solid #f0f0f0;
+        }
+
+        .driver-card-action {
+            padding-top: .75rem;
+            border-top: 1px solid #f0f0f0;
+        }
+
+        .driver-card-form {
+            display: flex;
+            flex-direction: column;
+            gap: .5rem;
+        }
+
+        .driver-card-top-action {
+            display: grid;
+            grid-template-columns: 72px 1fr 1fr;
+            gap: .5rem;
+            align-items: stretch;
+        }
+
+        .driver-card-top-action>a {
+            min-height: 40px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            border: 1px solid #f0f0f0;
+            background: #fff;
+            color: #111827;
+            font-size: 10px;
+            font-weight: 900;
+            text-transform: uppercase;
+            letter-spacing: .08em;
+            transition: all .15s ease;
+        }
+
+        .driver-card-top-action>a:hover {
+            background: #fafafa;
+        }
+
+        .driver-card-top-action select {
+            width: 100%;
+            min-height: 40px;
+            background: #fafafa;
+            border: 1px solid #f0f0f0;
+            padding: 0 .55rem;
+            font-size: 10px;
+            font-weight: 700;
+            color: #111827;
+        }
+
+        .driver-save-btn {
+            width: 100%;
+            min-height: 42px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: #000;
+            color: #fff;
+            font-size: 10px;
+            font-weight: 900;
+            text-transform: uppercase;
+            letter-spacing: .12em;
+            transition: all .15s ease;
+        }
+
+        .driver-save-btn:hover {
+            background: #1f1f1f;
+        }
+
         @media (min-width: 1024px) {
             .sidebar {
                 width: 220px;
@@ -564,7 +800,7 @@ catat_view_once($pdo, 'Driver Mitra', 'Membuka halaman Driver Mitra');
 
         @media (max-width: 1023px) {
             body {
-                padding-bottom: 76px;
+                padding-bottom: 0;
             }
 
             .app-header,
@@ -574,7 +810,7 @@ catat_view_once($pdo, 'Driver Mitra', 'Membuka halaman Driver Mitra');
 
             .main-content {
                 padding: 1rem !important;
-                padding-bottom: 6rem !important;
+                padding-bottom: 1.25rem !important;
             }
 
             .tbl-desktop {
@@ -593,6 +829,7 @@ catat_view_once($pdo, 'Driver Mitra', 'Membuka halaman Driver Mitra');
         @media (max-width: 640px) {
             .card-list {
                 grid-template-columns: 1fr;
+                padding: .75rem;
             }
 
             .header-title {
@@ -600,6 +837,14 @@ catat_view_once($pdo, 'Driver Mitra', 'Membuka halaman Driver Mitra');
                 overflow: hidden;
                 white-space: nowrap;
                 text-overflow: ellipsis;
+            }
+
+            .driver-card {
+                padding: .875rem;
+            }
+
+            .driver-card-top-action {
+                grid-template-columns: 64px 1fr 1fr;
             }
         }
 
@@ -844,7 +1089,7 @@ catat_view_once($pdo, 'Driver Mitra', 'Membuka halaman Driver Mitra');
                 </div>
 
                 <div class="tbl-desktop overflow-x-auto no-scrollbar">
-                    <table class="w-full text-left" style="min-width:1180px">
+                    <table class="driver-table w-full text-left" style="min-width:1320px">
                         <thead class="border-b border-subtle bg-gray-50">
                             <tr>
                                 <th class="px-5 py-4 text-[10px] font-bold uppercase tracking-widest text-gray-400">Driver</th>
@@ -884,10 +1129,10 @@ catat_view_once($pdo, 'Driver Mitra', 'Membuka halaman Driver Mitra');
                                     <td class="px-5 py-4 text-right text-sm font-black"><?= rupiah($d['harga_bandara']) ?></td>
                                     <td class="px-5 py-4">
                                         <div class="flex flex-col gap-1">
-                                            <span class="<?= h(driver_status_online_class($d['status_online'])) ?> border text-[9px] font-bold uppercase px-2 py-1 rounded-full w-fit">
+                                            <span class="<?= h(driver_status_online_class($d['status_online'])) ?> driver-status-pill border text-[9px] font-bold uppercase px-2 py-1 w-fit">
                                                 <?= h(driver_status_online_label($d['status_online'])) ?>
                                             </span>
-                                            <span class="<?= h(driver_status_aktif_class($d['status_aktif'])) ?> border text-[9px] font-bold uppercase px-2 py-1 rounded-full w-fit">
+                                            <span class="<?= h(driver_status_aktif_class($d['status_aktif'])) ?> driver-status-pill border text-[9px] font-bold uppercase px-2 py-1 w-fit">
                                                 <?= h(driver_status_aktif_label($d['status_aktif'])) ?>
                                             </span>
                                         </div>
@@ -900,7 +1145,7 @@ catat_view_once($pdo, 'Driver Mitra', 'Membuka halaman Driver Mitra');
                                                 Edit
                                             </a>
 
-                                            <form method="POST" class="inline-flex items-center gap-2">
+                                            <form method="POST" class="driver-action-form">
                                                 <input type="hidden" name="action" value="update_status">
                                                 <input type="hidden" name="id" value="<?= h($d['id']) ?>">
                                                 <select name="status_online" class="bg-gray-50 border border-gray-100 px-2 py-2 text-xs">
@@ -937,64 +1182,66 @@ catat_view_once($pdo, 'Driver Mitra', 'Membuka halaman Driver Mitra');
                     <?php endif; ?>
 
                     <?php foreach ($drivers as $d): ?>
-                        <div class="bg-white border border-subtle p-4 flex flex-col gap-3">
-                            <div class="flex items-start justify-between gap-2">
-                                <div>
-                                    <p class="font-bold text-sm"><?= h($d['nama']) ?></p>
-                                    <p class="text-[10px] text-gray-400"><?= h($d['no_hp']) ?></p>
-                                    <p class="text-[10px] text-gray-400 font-mono"><?= h($d['kode']) ?></p>
+                        <div class="driver-card">
+                            <div class="driver-card-head">
+                                <div class="driver-card-title">
+                                    <p class="driver-name"><?= h($d['nama']) ?></p>
+                                    <p class="driver-meta"><?= h($d['no_hp']) ?></p>
+                                    <p class="driver-meta font-mono"><?= h($d['kode']) ?></p>
                                 </div>
-                                <div class="flex flex-col gap-1 items-end">
-                                    <span class="<?= h(driver_status_online_class($d['status_online'])) ?> border text-[9px] font-bold uppercase px-2 py-1 rounded-full">
+
+                                <div class="driver-card-status">
+                                    <span class="<?= h(driver_status_online_class($d['status_online'])) ?> driver-status-pill border text-[9px] font-bold uppercase px-2 py-1">
                                         <?= h(driver_status_online_label($d['status_online'])) ?>
                                     </span>
-                                    <span class="<?= h(driver_status_aktif_class($d['status_aktif'])) ?> border text-[9px] font-bold uppercase px-2 py-1 rounded-full">
+                                    <span class="<?= h(driver_status_aktif_class($d['status_aktif'])) ?> driver-status-pill border text-[9px] font-bold uppercase px-2 py-1">
                                         <?= h(driver_status_aktif_label($d['status_aktif'])) ?>
                                     </span>
                                 </div>
                             </div>
 
-                            <div class="grid grid-cols-2 gap-2 pt-2 border-t border-subtle text-xs">
-                                <div>
-                                    <span class="text-gray-400 font-medium">Kendaraan</span>
-                                    <p class="font-bold"><?= h($d['kendaraan_nama']) ?></p>
+                            <div class="driver-card-grid">
+                                <div class="driver-card-field">
+                                    <span>Kendaraan</span>
+                                    <p><?= h($d['kendaraan_nama']) ?></p>
                                 </div>
-                                <div>
-                                    <span class="text-gray-400 font-medium">Plat</span>
-                                    <p class="font-bold"><?= h($d['plat_nomor']) ?></p>
+                                <div class="driver-card-field">
+                                    <span>Plat</span>
+                                    <p><?= h($d['plat_nomor']) ?></p>
                                 </div>
-                                <div>
-                                    <span class="text-gray-400 font-medium">Kapasitas</span>
-                                    <p class="font-bold"><?= angka($d['kapasitas']) ?> seat</p>
+                                <div class="driver-card-field">
+                                    <span>Kapasitas</span>
+                                    <p><?= angka($d['kapasitas']) ?> seat</p>
                                 </div>
-                                <div>
-                                    <span class="text-gray-400 font-medium">Tarif</span>
-                                    <p class="font-bold"><?= rupiah($d['harga_bandara']) ?></p>
+                                <div class="driver-card-field">
+                                    <span>Tarif</span>
+                                    <p><?= rupiah($d['harga_bandara']) ?></p>
                                 </div>
-                                <div>
-                                    <span class="text-gray-400 font-medium">Rating</span>
-                                    <p class="font-bold">⭐ <?= h(number_format((float)$d['rating'], 2)) ?></p>
+                                <div class="driver-card-field">
+                                    <span>Rating</span>
+                                    <p>⭐ <?= h(number_format((float)$d['rating'], 2)) ?></p>
                                 </div>
-                                <div>
-                                    <span class="text-gray-400 font-medium">Saldo</span>
-                                    <p class="font-bold"><?= rupiah($d['saldo']) ?></p>
+                                <div class="driver-card-field">
+                                    <span>Saldo</span>
+                                    <p><?= rupiah($d['saldo']) ?></p>
                                 </div>
                             </div>
 
                             <?php if (!empty($d['catatan'])): ?>
-                                <p class="text-xs text-gray-500 pt-2 border-t border-subtle"><?= h($d['catatan']) ?></p>
+                                <p class="driver-card-note"><?= h($d['catatan']) ?></p>
                             <?php endif; ?>
 
-                            <div class="pt-2 border-t border-subtle grid grid-cols-[auto_1fr] gap-2">
-                                <a href="driver.php?edit=<?= h($d['id']) ?>#form-driver" class="px-4 py-2.5 border border-subtle text-[10px] font-black uppercase tracking-widest text-center">
-                                    Edit
-                                </a>
-
-                                <form method="POST" class="grid grid-cols-1 gap-2">
+                            <div class="driver-card-action">
+                                <form method="POST" class="driver-card-form">
                                     <input type="hidden" name="action" value="update_status">
                                     <input type="hidden" name="id" value="<?= h($d['id']) ?>">
-                                    <div class="grid grid-cols-2 gap-2">
-                                        <select name="status_online" class="bg-gray-50 border border-gray-100 px-3 py-2.5 text-xs">
+
+                                    <div class="driver-card-top-action">
+                                        <a href="driver.php?edit=<?= h($d['id']) ?>#form-driver">
+                                            Edit
+                                        </a>
+
+                                        <select name="status_online">
                                             <?php foreach ($allowedOnline as $st): ?>
                                                 <option value="<?= h($st) ?>" <?= $d['status_online'] === $st ? 'selected' : '' ?>>
                                                     <?= h(driver_status_online_label($st)) ?>
@@ -1002,7 +1249,7 @@ catat_view_once($pdo, 'Driver Mitra', 'Membuka halaman Driver Mitra');
                                             <?php endforeach; ?>
                                         </select>
 
-                                        <select name="status_aktif" class="bg-gray-50 border border-gray-100 px-3 py-2.5 text-xs">
+                                        <select name="status_aktif">
                                             <?php foreach ($allowedAktif as $st): ?>
                                                 <option value="<?= h($st) ?>" <?= $d['status_aktif'] === $st ? 'selected' : '' ?>>
                                                     <?= h(driver_status_aktif_label($st)) ?>
@@ -1010,8 +1257,9 @@ catat_view_once($pdo, 'Driver Mitra', 'Membuka halaman Driver Mitra');
                                             <?php endforeach; ?>
                                         </select>
                                     </div>
-                                    <button type="submit" class="px-4 py-2.5 bg-black text-white text-[10px] font-black uppercase tracking-widest">
-                                        Simpan
+
+                                    <button type="submit" class="driver-save-btn">
+                                        Simpan Status
                                     </button>
                                 </form>
                             </div>
@@ -1021,23 +1269,6 @@ catat_view_once($pdo, 'Driver Mitra', 'Membuka halaman Driver Mitra');
             </section>
         </main>
     </div>
-
-    <nav class="lg:hidden fixed bottom-0 left-0 right-0 bg-white border-t border-subtle px-6 py-3 flex justify-between items-center z-50 shadow-lg">
-        <button onclick="toggleMobileMenu()" class="flex flex-col items-center p-2">
-            ☰
-            <span class="text-[8px] font-bold mt-1 uppercase">Menu</span>
-        </button>
-
-        <a href="rental_bandara.php" class="flex flex-col items-center bg-black text-white p-3 rounded-full -mt-8 shadow-xl border-4 border-white">
-            ✈️
-        </a>
-
-        <a href="driver.php" class="flex flex-col items-center p-2">
-            🚗
-            <span class="text-[8px] font-bold mt-1 uppercase text-black">Driver</span>
-        </a>
-    </nav>
-
     <script>
         function toggleMobileMenu() {
             const overlay = document.getElementById('mobileMenuOverlay');

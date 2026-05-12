@@ -269,8 +269,10 @@ try {
 
 <head>
     <meta charset="UTF-8">
-    <title>Log Aktivitas - Koperasi BSDK</title>
+    <title>Log Aktivitas</title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="icon" type="image/png" href="assets/sejahub_icon.png">
+    <link rel="shortcut icon" type="image/png" href="assets/sejahub_icon.png">
 
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800;900&display=swap" rel="stylesheet">
@@ -616,7 +618,7 @@ try {
         </main>
     </div>
 
-    <nav class="lg:hidden fixed bottom-0 left-0 right-0 bg-white border-t border-subtle px-6 py-3 flex justify-between items-center z-50 shadow-lg">
+    <!-- <nav class="lg:hidden fixed bottom-0 left-0 right-0 bg-white border-t border-subtle px-6 py-3 flex justify-between items-center z-50 shadow-lg">
         <button onclick="toggleMobileMenu()" class="flex flex-col items-center p-2">
             ☰
             <span class="text-[8px] font-bold mt-1 uppercase">Menu</span>
@@ -630,7 +632,7 @@ try {
         <a href="log_aktivitas.php" class="flex flex-col items-center bg-black text-white p-3 rounded-full -mt-8 shadow-xl border-4 border-white">
             📋
         </a>
-    </nav>
+    </nav> -->
 
     <script>
         function toggleMobileMenu() {

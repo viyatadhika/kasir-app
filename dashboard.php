@@ -6,9 +6,8 @@ $activeMenu = 'dashboard';
 $pageTitle = 'Dashboard';
 $backUrl = '';
 
-
 if (!isset($_SESSION['user'])) {
-    header('Location: index.php'); // balik ke login
+    header('Location: index.php');
     exit;
 }
 
@@ -103,26 +102,22 @@ if (isset($_GET['action']) && $_GET['action'] === 'reprint_data') {
     exit;
 }
 
-// ── Data: Ringkasan Shift Hari Ini ──────────────────────────────────────────
 $today = date('Y-m-d');
 
-// Total Sales & Jumlah Struk hari ini
 $stmtSales = $pdo->prepare("
     SELECT 
-        COALESCE(SUM(total), 0)  AS total_sales,
-        COUNT(*)                 AS jumlah_struk
+        COALESCE(SUM(total), 0) AS total_sales,
+        COUNT(*) AS jumlah_struk
     FROM transaksi
     WHERE DATE(created_at) = :today
 ");
 $stmtSales->execute([':today' => $today]);
 $ringkasan = $stmtSales->fetch();
 
-// Avg per struk
 $avgStruk = $ringkasan['jumlah_struk'] > 0
     ? (int)($ringkasan['total_sales'] / $ringkasan['jumlah_struk'])
     : 0;
 
-// Produk stok limit (stok <= stok_minimum)
 $stmtStok = $pdo->query("
     SELECT id, nama, stok, stok_minimum, kategori
     FROM produk
@@ -131,7 +126,6 @@ $stmtStok = $pdo->query("
 ");
 $produkStokLimit = $stmtStok->fetchAll();
 
-// Struk Terakhir (5 terbaru)
 $stmtStruk = $pdo->query("
     SELECT t.id, t.invoice, t.total, t.bayar, t.kembalian, t.created_at,
            u.nama AS kasir
@@ -142,7 +136,6 @@ $stmtStruk = $pdo->query("
 ");
 $strukTerakhir = $stmtStruk->fetchAll();
 
-// Top Fast Moving hari ini
 $stmtFast = $pdo->prepare("
     SELECT td.nama, SUM(td.qty) AS total_qty
     FROM transaksi_detail td
@@ -155,7 +148,6 @@ $stmtFast = $pdo->prepare("
 $stmtFast->execute([':today' => $today]);
 $fastMoving = $stmtFast->fetchAll();
 
-// Sales per jam (untuk chart)
 $stmtJam = $pdo->prepare("
     SELECT HOUR(created_at) AS jam, COALESCE(SUM(total), 0) AS sales
     FROM transaksi
@@ -166,12 +158,13 @@ $stmtJam = $pdo->prepare("
 $stmtJam->execute([':today' => $today]);
 $salesPerJam = $stmtJam->fetchAll();
 
-// Format data chart
 $chartLabels = [];
-$chartData   = [];
+$chartData = [];
+
 for ($h = 6; $h <= 22; $h++) {
     $chartLabels[] = str_pad($h, 2, '0', STR_PAD_LEFT);
     $found = false;
+
     foreach ($salesPerJam as $row) {
         if ((int)$row['jam'] === $h) {
             $chartData[] = round($row['sales'] / 1000000, 2);
@@ -179,102 +172,84 @@ for ($h = 6; $h <= 22; $h++) {
             break;
         }
     }
+
     if (!$found) $chartData[] = 0;
 }
+
+$title = 'Dashboard – ' . ($_SESSION['nama'] ?? 'SEJAHUB');
 ?>
+
 <!DOCTYPE html>
 <html lang="id">
 
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Dashboard – <?= htmlspecialchars($_SESSION['nama']) ?></title>
-    <link rel="icon" href="assets/sejahub_icon.png" sizes="192x192">
-    <script src="https://cdn.tailwindcss.com"></script>
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700&display=swap" rel="stylesheet">
-    <style>
-        body {
-            font-family: 'Plus Jakarta Sans', sans-serif;
-            background-color: #ffffff;
-            color: #1a1a1a;
+<?php include 'header.php'; ?>
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+<style>
+    .chart-container {
+        position: relative;
+        height: 250px;
+        width: 100%;
+    }
+
+    @media (min-width: 1024px) {
+        .sidebar {
+            width: 220px;
         }
 
-        .border-subtle {
-            border-color: #f0f0f0;
+        .content {
+            margin-left: 220px;
         }
 
         .chart-container {
-            position: relative;
-            height: 250px;
-            width: 100%;
+            height: 280px;
         }
+    }
 
-        @media (min-width: 1024px) {
-            .sidebar {
-                width: 220px;
-            }
+    .no-scrollbar::-webkit-scrollbar {
+        display: none;
+    }
 
-            .content {
-                margin-left: 220px;
-            }
+    .no-scrollbar {
+        -ms-overflow-style: none;
+        scrollbar-width: none;
+    }
 
-            .chart-container {
-                height: 280px;
-            }
+    #mobileMenuOverlay {
+        transition: opacity 0.3s ease, visibility 0.3s ease;
+    }
+
+    #mobileMenuContent {
+        transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+    }
+
+    @media (min-width: 1024px) {
+
+        .app-header,
+        .page-header,
+        .main-wrap,
+        .content,
+        .produk-header,
+        .produk-main,
+        .diskon-header,
+        .diskon-main,
+        .stok-header,
+        .stok-main-wrap,
+        .laporan-header,
+        .laporan-main-wrap {
+            margin-left: 220px;
         }
-
-        .no-scrollbar::-webkit-scrollbar {
-            display: none;
-        }
-
-        .no-scrollbar {
-            -ms-overflow-style: none;
-            scrollbar-width: none;
-        }
-
-        #mobileMenuOverlay {
-            transition: opacity 0.3s ease, visibility 0.3s ease;
-        }
-
-        #mobileMenuContent {
-            transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-        }
-
-        /* Shared layout aliases for sidebar.php/navbar.php */
-        @media (min-width: 1024px) {
-
-            .app-header,
-            .page-header,
-            .main-wrap,
-            .content,
-            .produk-header,
-            .produk-main,
-            .diskon-header,
-            .diskon-main,
-            .stok-header,
-            .stok-main-wrap,
-            .laporan-header,
-            .laporan-main-wrap {
-                margin-left: 220px;
-            }
-        }
-    </style>
-</head>
+    }
+</style>
 
 <body class="antialiased pb-20 lg:pb-0">
 
     <?php require_once 'sidebar.php'; ?>
     <?php require_once 'navbar.php'; ?>
 
-
-    <!-- Mobile Menu Overlay -->
-
-    <!-- Desktop Sidebar -->
-    <!-- Main Content -->
     <main class="content p-5 md:p-8 lg:p-12">
 
-        <!-- Header -->
         <header class="flex flex-col md:flex-row justify-between items-start md:items-end mb-8 md:mb-12 gap-4">
             <div>
                 <h1 class="text-xl md:text-2xl font-light tracking-tight">
@@ -294,7 +269,6 @@ for ($h = 6; $h <= 22; $h++) {
             </div>
         </header>
 
-        <!-- Metrics Grid -->
         <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-6 md:gap-8 mb-8 md:mb-12 border-b border-subtle pb-8 md:pb-12">
             <div class="py-2 border-b sm:border-b-0 border-subtle pb-4 sm:pb-0">
                 <p class="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1">Total Sales (Nett)</p>
@@ -305,6 +279,7 @@ for ($h = 6; $h <= 22; $h++) {
                     Target: Rp 12Jt
                 </span>
             </div>
+
             <div class="py-2 border-b sm:border-b-0 border-subtle pb-4 sm:pb-0">
                 <p class="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1">Jumlah Struk</p>
                 <p class="text-2xl md:text-3xl font-medium">
@@ -315,6 +290,7 @@ for ($h = 6; $h <= 22; $h++) {
                     Avg: <?= formatRp($avgStruk) ?>
                 </span>
             </div>
+
             <div class="py-2 sm:col-span-2 md:col-span-1">
                 <p class="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1">Stok Limit</p>
                 <p class="text-2xl md:text-3xl font-medium text-red-600">
@@ -329,7 +305,6 @@ for ($h = 6; $h <= 22; $h++) {
             </div>
         </div>
 
-        <!-- Charts Row -->
         <div class="grid grid-cols-1 lg:grid-cols-3 gap-10 md:gap-12 mb-8 md:mb-12">
             <div class="lg:col-span-2">
                 <div class="flex items-center justify-between mb-6">
@@ -343,7 +318,6 @@ for ($h = 6; $h <= 22; $h++) {
                 </div>
             </div>
 
-            <!-- Stok Limit -->
             <div class="lg:col-span-1" id="stok-limit">
                 <h3 class="text-xs font-bold uppercase tracking-widest text-red-600 mb-6">
                     Peringatan Stok Limit
@@ -351,6 +325,7 @@ for ($h = 6; $h <= 22; $h++) {
                         <span class="text-gray-400 normal-case font-medium">(aman)</span>
                     <?php endif; ?>
                 </h3>
+
                 <?php if (count($produkStokLimit) > 0): ?>
                     <div class="space-y-4">
                         <?php foreach (array_slice($produkStokLimit, 0, 4) as $p): ?>
@@ -374,6 +349,7 @@ for ($h = 6; $h <= 22; $h++) {
                         <p class="text-xs font-bold text-green-600">Semua stok dalam kondisi aman ✓</p>
                     </div>
                 <?php endif; ?>
+
                 <form action="buat_po.php" method="GET">
                     <button type="submit" class="mt-4 w-full py-3 text-[10px] font-bold bg-black text-white uppercase tracking-widest hover:bg-gray-800 transition-all rounded-sm">
                         BUAT PO BARANG
@@ -382,7 +358,6 @@ for ($h = 6; $h <= 22; $h++) {
             </div>
         </div>
 
-        <!-- Table Row -->
         <div class="grid grid-cols-1 lg:grid-cols-3 gap-10 md:gap-12 mt-12 md:mt-20">
             <div class="lg:col-span-2 overflow-hidden">
                 <h3 class="text-xs font-bold uppercase tracking-widest mb-6">Struk Terakhir</h3>
@@ -417,8 +392,9 @@ for ($h = 6; $h <= 22; $h++) {
                                         </td>
                                         <td class="py-4 text-sm font-medium"><?= formatRp($t['total']) ?></td>
                                         <td class="py-4 text-sm text-right">
-                                            <button type="button" onclick="reprintThermal(<?= (int)$t['id'] ?>, '<?= htmlspecialchars($t['invoice'], ENT_QUOTES) ?>')"
-                                                class="text-[10px] font-bold underline hover:text-blue-600">REPRINT</button>
+                                            <button type="button" onclick="reprintThermal(<?= (int)$t['id'] ?>, '<?= htmlspecialchars($t['invoice'], ENT_QUOTES) ?>')" class="text-[10px] font-bold underline hover:text-blue-600">
+                                                REPRINT
+                                            </button>
                                         </td>
                                     </tr>
                                 <?php endforeach; ?>
@@ -450,7 +426,6 @@ for ($h = 6; $h <= 22; $h++) {
 
     </main>
 
-    <!-- Direct Thermal Reprint Status -->
     <div id="reprint-status" class="fixed bottom-24 right-4 left-4 md:left-auto md:w-96 bg-white border border-subtle shadow-2xl z-[120] p-4 rounded-sm hidden">
         <div class="flex items-start justify-between gap-4">
             <div>
@@ -465,26 +440,28 @@ for ($h = 6; $h <= 22; $h++) {
         </div>
     </div>
 
-    <!-- Mobile Bottom Navigation -->
-    <nav class="lg:hidden fixed bottom-0 left-0 right-0 bg-white border-t border-subtle px-6 py-3 flex justify-between items-center z-50 shadow-lg">
+    <!-- <nav class="lg:hidden fixed bottom-0 left-0 right-0 bg-white border-t border-subtle px-6 py-3 flex justify-between items-center z-50 shadow-lg">
         <button onclick="toggleMobileMenu()" class="flex flex-col items-center p-2">
             <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 text-black" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                 <path d="M3 12h18M3 6h18M3 18h18" />
             </svg>
             <span class="text-[8px] font-bold mt-1 uppercase">Menu</span>
         </button>
+
         <a href="pos.php" class="flex flex-col items-center bg-black text-white p-3 rounded-full -mt-8 shadow-xl border-4 border-white">
             <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
                 <circle cx="12" cy="12" r="10" />
                 <path d="M12 8v8M8 12h8" />
             </svg>
         </a>
+
         <a href="produk.php" class="flex flex-col items-center p-2">
             <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 text-gray-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                 <path d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4" />
             </svg>
             <span class="text-[8px] font-bold mt-1 uppercase text-gray-400">Produk</span>
         </a>
+
         <a href="rental_bandara.php" class="flex flex-col items-center p-2">
             <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 text-gray-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                 <path d="M2 16l20-8-20-8 4 8-4 8z" />
@@ -492,13 +469,14 @@ for ($h = 6; $h <= 22; $h++) {
             </svg>
             <span class="text-[8px] font-bold mt-1 uppercase text-gray-400">Bandara</span>
         </a>
-    </nav>
+    </nav> -->
 
     <script>
         function toggleMobileMenu() {
             const overlay = document.getElementById('mobileMenuOverlay');
             const content = document.getElementById('mobileMenuContent');
             if (!overlay || !content) return;
+
             if (overlay.classList.contains('invisible')) {
                 overlay.classList.remove('invisible');
                 overlay.classList.add('opacity-100');
@@ -577,9 +555,6 @@ for ($h = 6; $h <= 22; $h++) {
             }
         });
 
-        // ════════════════════════════════════════════════════════════════════════════
-        // DIRECT THERMAL REPRINT - Web Bluetooth ESC/POS
-        // ════════════════════════════════════════════════════════════════════════════
         const BT_PRINTER_CONFIG = [{
             service: '000018f0-0000-1000-8000-00805f9b34fb',
             characteristic: '00002af1-0000-1000-8000-00805f9b34fb'
@@ -593,6 +568,7 @@ for ($h = 6; $h <= 22; $h++) {
 
         const ESC_BYTE = 0x1B;
         const GS_BYTE = 0x1D;
+
         const ESCPOS = {
             init: [ESC_BYTE, 0x40],
             alignLeft: [ESC_BYTE, 0x61, 0x00],
@@ -604,6 +580,7 @@ for ($h = 6; $h <= 22; $h++) {
             feed: (n) => [ESC_BYTE, 0x64, n],
             cut: [GS_BYTE, 0x56, 0x41, 0x03]
         };
+
         const PRINT_W = 32;
         let lastReprintFallbackUrl = '#';
 
@@ -611,6 +588,7 @@ for ($h = 6; $h <= 22; $h++) {
             const box = document.getElementById('reprint-status');
             const text = document.getElementById('reprint-status-text');
             if (!box || !text) return;
+
             text.textContent = message;
             text.className = 'text-sm font-bold mt-1 ' + (type === 'error' ? 'text-red-600' : type === 'success' ? 'text-green-600' : 'text-gray-900');
             box.classList.remove('hidden');
@@ -627,7 +605,9 @@ for ($h = 6; $h <= 22; $h++) {
         }
 
         function openLastReceiptFallback() {
-            if (lastReprintFallbackUrl && lastReprintFallbackUrl !== '#') window.open(lastReprintFallbackUrl, '_blank');
+            if (lastReprintFallbackUrl && lastReprintFallbackUrl !== '#') {
+                window.open(lastReprintFallbackUrl, '_blank');
+            }
         }
 
         function _fmt(n) {
@@ -653,10 +633,12 @@ for ($h = 6; $h <= 22; $h++) {
         function _enc(str) {
             const out = [];
             str = String(str || '');
+
             for (let i = 0; i < str.length; i++) {
                 const c = str.charCodeAt(i);
                 out.push(c < 256 ? c : 0x3F);
             }
+
             return out;
         }
 
@@ -682,10 +664,12 @@ for ($h = 6; $h <= 22; $h++) {
             line(_lr('No', d.invoice) + '\n');
             line(_lr('Tgl', d.tanggal) + '\n');
             line(_lr('Kasir', String(d.operator || '').substring(0, 18)) + '\n');
+
             if (d.member_nama) {
                 line(_lr('Member', String(d.member_nama).substring(0, 18)) + '\n');
                 if (d.member_kode) line(_lr('Kode', String(d.member_kode)) + '\n');
             }
+
             line(_dash() + '\n');
 
             (d.items || []).forEach(item => {
@@ -693,6 +677,7 @@ for ($h = 6; $h <= 22; $h++) {
                 text(String(item.nama || 'PRODUK').substring(0, 32));
                 push(ESCPOS.boldOff);
                 line(_lr((item.qty || 0) + ' x ' + _fmt(item.harga_normal), _fmt(item.normal_item)) + '\n');
+
                 if (Number(item.diskon_item || 0) > 0) {
                     if (item.nama_diskon) text('Promo: ' + String(item.nama_diskon).substring(0, 26));
                     line(_lr('Disc/pcs ' + _fmt(item.diskon_satuan) + ' x ' + item.qty, '-' + _fmt(item.diskon_item)) + '\n');
@@ -704,26 +689,32 @@ for ($h = 6; $h <= 22; $h++) {
 
             line(_dash() + '\n');
             line(_lr('SUBTOTAL', _fmt(d.subtotal_normal)) + '\n');
+
             if (Number(d.diskon_barang || 0) > 0) line(_lr('DISKON BARANG', '-' + _fmt(d.diskon_barang)) + '\n');
+
             if (Number(d.diskon_transaksi || 0) > 0) {
                 line(_lr('DISKON PROMO', '-' + _fmt(d.diskon_transaksi)) + '\n');
                 if (d.nama_diskon_trx) text('Promo: ' + String(d.nama_diskon_trx).substring(0, 26));
             }
+
             if (Number(d.point_dipakai || 0) > 0) {
                 line(_lr('POINT DIPAKAI', '-' + d.point_dipakai + ' pt') + '\n');
                 if (Number(d.nilai_point || 0) > 0) line(_lr('NILAI POINT', '-' + _fmt(d.nilai_point)) + '\n');
             }
+
             if (Number(d.total_diskon || 0) > 0) {
                 push(ESCPOS.boldOn);
                 line(_lr('TOTAL DISKON', '-' + _fmt(d.total_diskon)) + '\n');
                 push(ESCPOS.boldOff);
             }
+
             line(_solid() + '\n');
             push(ESCPOS.boldOn);
             line(_lr('TOTAL BAYAR', _fmt(d.total_bayar)) + '\n');
             push(ESCPOS.boldOff);
             line(_lr('TUNAI/QRIS', _fmt(d.bayar)) + '\n');
             line(_lr('KEMBALI', _fmt(d.kembalian)) + '\n');
+
             if (d.member_nama && Number(d.point_dapat || 0) > 0) {
                 line(_dash() + '\n');
                 push(ESCPOS.boldOn);
@@ -732,6 +723,7 @@ for ($h = 6; $h <= 22; $h++) {
                 line(_lr('Point Didapat', '+' + _fmt(d.point_dapat) + ' pt') + '\n');
                 if (d.member_point_total) line(_lr('Total Point', _fmt(d.member_point_total) + ' pt') + '\n');
             }
+
             line(_dash() + '\n');
             push(ESCPOS.alignCenter);
             text('BARANG YANG SUDAH DIBELI');
@@ -741,16 +733,21 @@ for ($h = 6; $h <= 22; $h++) {
             push(ESCPOS.alignLeft);
             push(ESCPOS.feed(5));
             push(ESCPOS.cut);
+
             return new Uint8Array(buf);
         }
 
         function btSendData(characteristic, data) {
             const CHUNK = 100;
             let chain = Promise.resolve();
+
             for (let pos = 0; pos < data.length; pos += CHUNK) {
                 const slice = data.slice(pos, pos + CHUNK);
-                chain = chain.then(() => characteristic.writeValueWithoutResponse(slice)).then(() => new Promise(r => setTimeout(r, 60)));
+                chain = chain
+                    .then(() => characteristic.writeValueWithoutResponse(slice))
+                    .then(() => new Promise(r => setTimeout(r, 60)));
             }
+
             return chain;
         }
 
@@ -758,10 +755,12 @@ for ($h = 6; $h <= 22; $h++) {
             return device.gatt.connect().then(server => {
                 const tryUUID = idx => {
                     if (idx >= BT_PRINTER_CONFIG.length) return Promise.reject(new Error('UUID printer tidak cocok.'));
+
                     return server.getPrimaryService(BT_PRINTER_CONFIG[idx].service)
                         .then(svc => svc.getCharacteristic(BT_PRINTER_CONFIG[idx].characteristic))
                         .catch(() => tryUUID(idx + 1));
                 };
+
                 return tryUUID(0).then(characteristic => btSendData(characteristic, data).then(() => {
                     try {
                         server.disconnect();
@@ -782,6 +781,7 @@ for ($h = 6; $h <= 22; $h++) {
                         'Accept': 'application/json'
                     }
                 });
+
                 const json = await res.json();
                 if (!json.success) throw new Error(json.message || 'Data struk tidak ditemukan.');
 
@@ -794,6 +794,7 @@ for ($h = 6; $h <= 22; $h++) {
                 }
 
                 showReprintStatus('Pilih printer Bluetooth...', 'info');
+
                 const escData = buildEscPos(data);
                 const device = await navigator.bluetooth.requestDevice({
                     acceptAllDevices: true,
@@ -802,14 +803,19 @@ for ($h = 6; $h <= 22; $h++) {
 
                 showReprintStatus('Menghubungkan ke printer...', 'info');
                 await btConnectAndPrint(device, escData);
+
                 showReprintStatus('Struk berhasil dicetak ulang.', 'success');
             } catch (err) {
-                const msg = err && err.name === 'NotFoundError' ? 'Tidak ada printer yang dipilih.' : (err.message || 'Gagal reprint struk.');
+                const msg = err && err.name === 'NotFoundError' ?
+                    'Tidak ada printer yang dipilih.' :
+                    (err.message || 'Gagal reprint struk.');
+
                 setFallbackVisible(true);
                 showReprintStatus(msg, err && err.name === 'NotFoundError' ? 'info' : 'error');
             }
         }
     </script>
+
 </body>
 
 </html>

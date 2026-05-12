@@ -367,8 +367,10 @@ catat_view_once($pdo, 'Stok Opname', 'Membuka halaman Stok Opname');
 
 <head>
     <meta charset="UTF-8">
-    <title>Stok Opname - Koperasi BSDK</title>
+    <title>Stok Opname</title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="icon" type="image/png" href="assets/sejahub_icon.png">
+    <link rel="shortcut icon" type="image/png" href="assets/sejahub_icon.png">
 
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800;900&display=swap" rel="stylesheet">
@@ -886,7 +888,7 @@ catat_view_once($pdo, 'Stok Opname', 'Membuka halaman Stok Opname');
         </main>
     </div>
 
-    <nav class="lg:hidden fixed bottom-0 left-0 right-0 bg-white border-t border-subtle px-6 py-3 flex justify-between items-center z-50 shadow-lg">
+    <!-- <nav class="lg:hidden fixed bottom-0 left-0 right-0 bg-white border-t border-subtle px-6 py-3 flex justify-between items-center z-50 shadow-lg">
         <button onclick="toggleMobileMenu()" class="flex flex-col items-center p-2">
             <svg class="h-5 w-5 text-black" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                 <path d="M3 12h18M3 6h18M3 18h18" />
@@ -907,7 +909,7 @@ catat_view_once($pdo, 'Stok Opname', 'Membuka halaman Stok Opname');
             </svg>
             <span class="text-[8px] font-bold mt-1 uppercase text-black">Produk</span>
         </a>
-    </nav>
+    </nav> -->
 
     <script>
         function toggleMobileMenu() {

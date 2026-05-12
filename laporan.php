@@ -242,7 +242,8 @@ catat_view_once($pdo, 'Laporan Keuangan', 'Membuka halaman Laporan Keuangan');
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Laporan Keuangan</title>
-    <link rel="icon" href="assets/sejahub_icon.png" sizes="192x192">
+    <link rel="icon" type="image/png" href="assets/sejahub_icon.png">
+    <link rel="shortcut icon" type="image/png" href="assets/sejahub_icon.png">
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
     <style>
@@ -1070,7 +1071,7 @@ catat_view_once($pdo, 'Laporan Keuangan', 'Membuka halaman Laporan Keuangan');
     </div>
 
     <!-- ══ Mobile Bottom Navigation (identik produk.php) ═══════════ -->
-    <nav class="lg:hidden fixed bottom-0 left-0 right-0 bg-white border-t border-subtle px-6 py-3 flex justify-between items-center z-50 shadow-lg no-print">
+    <!-- <nav class="lg:hidden fixed bottom-0 left-0 right-0 bg-white border-t border-subtle px-6 py-3 flex justify-between items-center z-50 shadow-lg no-print">
         <button onclick="toggleMobileMenu()" class="flex flex-col items-center p-2">
             <svg class="h-5 w-5 text-black" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                 <path d="M3 12h18M3 6h18M3 18h18" />
@@ -1089,7 +1090,7 @@ catat_view_once($pdo, 'Laporan Keuangan', 'Membuka halaman Laporan Keuangan');
             </svg>
             <span class="text-[8px] font-bold mt-1 uppercase text-black">Laporan</span>
         </a>
-    </nav>
+    </nav> -->
 
     <script>
         function toggleMobileMenu() {

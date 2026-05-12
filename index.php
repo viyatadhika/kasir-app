@@ -1,28 +1,33 @@
 <?php
-// Pastikan file ini ada di direktori yang sama
 require_once 'config.php';
+require_once 'activity_helper.php';
 
-// Cek session - Jika sudah login, lempar ke dashboard
 if (isset($_SESSION['user'])) {
+
+    catat_aktivitas(
+        $pdo,
+        'login_redirect',
+        'Login',
+        'User sudah login dan diarahkan ke dashboard'
+    );
+
     header('Location: dashboard.php');
     exit;
 }
 
 $error = "";
 
-// Proses login
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $username = trim($_POST['username'] ?? '');
     $password = $_POST['password'] ?? '';
 
     try {
-        // Mencari user yang aktif
         $stmt = $pdo->prepare("SELECT * FROM users WHERE username = ? AND status = 'aktif'");
         $stmt->execute([$username]);
         $user = $stmt->fetch();
 
-        // Verifikasi password (menggunakan password_verify untuk keamanan)
         if ($user && password_verify($password, $user['password'])) {
+
             $_SESSION['user'] = [
                 'id'       => $user['id'],
                 'nama'     => $user['nama'],
@@ -34,9 +39,24 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $_SESSION['nama']    = $user['nama'];
             $_SESSION['role']    = $user['role'];
 
+            catat_aktivitas(
+                $pdo,
+                'login',
+                'Login',
+                'User login: ' . $user['username']
+            );
+
             header('Location: dashboard.php');
             exit;
         } else {
+
+            catat_aktivitas(
+                $pdo,
+                'login_gagal',
+                'Login',
+                'Login gagal username: ' . $username
+            );
+
             $error = "Username atau password salah";
         }
     } catch (PDOException $e) {
@@ -45,89 +65,81 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 }
 ?>
 
+<?php
+$title = 'Login | SEJAHUB';
+?>
+
 <!DOCTYPE html>
 <html lang="id">
+<?php include 'header.php'; ?>
+<style>
+    body {
+        @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700&display=swap');
+        font-family: 'Plus Jakarta Sans', sans-serif;
+        background-color: #fcfcfc;
+        color: #1a1a1a;
+    }
 
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Login | SEJAHUB</title>
-    <link rel="icon" href="assets/sejahub_icon.png" sizes="192x192">
+    /* Gaya Input Flat ala POS */
+    .input-flat {
+        background: #f9f9f9;
+        border: 1px solid #f0f0f0;
+        border-radius: 2px;
+        transition: all 0.2s ease;
+    }
 
-    <!-- Framework & Fonts -->
-    <script src="https://cdn.tailwindcss.com"></script>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
-    <!-- Ikon Lucide -->
-    <script src="https://unpkg.com/lucide@latest"></script>
+    .input-flat:focus {
+        outline: none;
+        border-color: #000;
+        background: #fff;
+    }
 
-    <style>
-        body {
-            font-family: 'Inter', sans-serif;
-            background-color: #fcfcfc;
-            color: #1a1a1a;
-        }
+    /* Gaya Tombol Hitam sesuai Gambar Referensi */
+    .btn-black {
+        background: #000;
+        color: #fff;
+        text-transform: uppercase;
+        font-weight: 700;
+        font-size: 12px;
+        letter-spacing: 0.12em;
+        border-radius: 2px;
+        transition: all 0.2s;
+    }
 
-        /* Gaya Input Flat ala POS */
-        .input-flat {
-            background: #f9f9f9;
-            border: 1px solid #f0f0f0;
-            border-radius: 2px;
-            transition: all 0.2s ease;
-        }
+    .btn-black:hover {
+        opacity: 0.85;
+        transform: translateY(-1px);
+    }
 
-        .input-flat:focus {
-            outline: none;
-            border-color: #000;
-            background: #fff;
-        }
+    .btn-black:active {
+        transform: translateY(0px);
+    }
 
-        /* Gaya Tombol Hitam sesuai Gambar Referensi */
-        .btn-black {
-            background: #000;
-            color: #fff;
-            text-transform: uppercase;
-            font-weight: 700;
-            font-size: 12px;
-            letter-spacing: 0.12em;
-            border-radius: 2px;
-            transition: all 0.2s;
-        }
+    /* Gaya Logo Brand */
+    .brand-logo {
+        font-weight: 800;
+        font-size: 1.5rem;
+        letter-spacing: -0.02em;
+        text-transform: uppercase;
+        border-bottom: 3px solid black;
+        display: inline-block;
+        padding-bottom: 2px;
+        line-height: 1;
+    }
 
-        .btn-black:hover {
-            opacity: 0.85;
-            transform: translateY(-1px);
-        }
+    /* Gaya Kotak Pesan Error */
+    .error-box {
+        border-left: 4px solid #ef4444;
+        background: #fff;
+        box-shadow: 0 2px 10px rgba(0, 0, 0, 0.05);
+    }
 
-        .btn-black:active {
-            transform: translateY(0px);
-        }
-
-        /* Gaya Logo Brand */
-        .brand-logo {
-            font-weight: 800;
-            font-size: 1.5rem;
-            letter-spacing: -0.02em;
-            text-transform: uppercase;
-            border-bottom: 3px solid black;
-            display: inline-block;
-            padding-bottom: 2px;
-            line-height: 1;
-        }
-
-        /* Gaya Kotak Pesan Error */
-        .error-box {
-            border-left: 4px solid #ef4444;
-            background: #fff;
-            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.05);
-        }
-
-        /* Menyembunyikan icon bawaan browser (Edge/Chrome) untuk password */
-        input::-ms-reveal,
-        input::-ms-clear {
-            display: none;
-        }
-    </style>
-</head>
+    /* Menyembunyikan icon bawaan browser (Edge/Chrome) untuk password */
+    input::-ms-reveal,
+    input::-ms-clear {
+        display: none;
+    }
+</style>
 
 <body class="min-h-screen flex flex-col justify-center items-center p-4 sm:p-8">
 
