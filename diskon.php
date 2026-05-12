@@ -388,6 +388,50 @@ catat_view_once($pdo, 'Diskon', 'Membuka halaman Diskon');
                 margin-left: 220px;
             }
         }
+
+        /* Clean box style - mengikuti tema halaman lain */
+        .diskon-box {
+            background: #fff;
+            border: 1px solid #f0f0f0;
+            border-radius: 0 !important;
+        }
+
+        .diskon-main .summary-card,
+        .diskon-main .filter-card,
+        .diskon-main .table-card,
+        .diskon-main .diskon-mobile-card {
+            background: #fff;
+            border: 1px solid #f0f0f0;
+            border-radius: 0 !important;
+            box-shadow: none !important;
+        }
+
+        .diskon-main input,
+        .diskon-main select,
+        .diskon-main textarea,
+        .diskon-main button {
+            border-radius: 0 !important;
+        }
+
+        .diskon-main .rounded-xl,
+        .diskon-main .rounded-lg,
+        .diskon-main .rounded-md,
+        .diskon-main .rounded-sm,
+        .diskon-main .rounded-full {
+            border-radius: 0 !important;
+        }
+
+        .diskon-mobile-card:hover {
+            transform: none;
+            box-shadow: none;
+            border-color: #e5e7eb;
+        }
+
+        @media (max-width: 1023px) {
+            .diskon-main {
+                padding-bottom: 5.5rem !important;
+            }
+        }
     </style>
 </head>
 
@@ -426,22 +470,22 @@ catat_view_once($pdo, 'Diskon', 'Membuka halaman Diskon');
 
         <!-- Summary Cards -->
         <div class="grid grid-cols-2 md:grid-cols-4 gap-3 md:gap-4 mb-6 md:mb-8">
-            <div class="bg-white border border-subtle rounded-sm md:rounded-xl p-4 md:p-5">
+            <div class="summary-card p-4 md:p-5">
                 <p class="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1">Total Diskon</p>
                 <p class="text-2xl font-bold"><?= number_format($summary['total']) ?></p>
                 <p class="text-[10px] text-gray-400 mt-1"><?= number_format($summary['aktif']) ?> aktif</p>
             </div>
-            <div class="bg-white border border-subtle rounded-sm md:rounded-xl p-4 md:p-5">
+            <div class="summary-card p-4 md:p-5">
                 <p class="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1">Per Transaksi</p>
                 <p class="text-2xl font-bold text-blue-600"><?= number_format($summary['transaksi']) ?></p>
                 <p class="text-[10px] text-gray-400 mt-1">promo aktif</p>
             </div>
-            <div class="bg-white border border-subtle rounded-sm md:rounded-xl p-4 md:p-5">
+            <div class="summary-card p-4 md:p-5">
                 <p class="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1">Per Produk</p>
                 <p class="text-2xl font-bold text-purple-600"><?= number_format($summary['produk']) ?></p>
                 <p class="text-[10px] text-gray-400 mt-1">promo aktif</p>
             </div>
-            <div class="bg-white border border-subtle rounded-sm md:rounded-xl p-4 md:p-5">
+            <div class="summary-card p-4 md:p-5">
                 <p class="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1">Per Kategori</p>
                 <p class="text-2xl font-bold text-orange-500"><?= number_format($summary['kategori']) ?></p>
                 <p class="text-[10px] text-gray-400 mt-1">promo aktif</p>
@@ -449,7 +493,7 @@ catat_view_once($pdo, 'Diskon', 'Membuka halaman Diskon');
         </div>
 
         <!-- Filter & Search -->
-        <div class="bg-white border border-subtle rounded-sm p-4 mb-4 flex flex-col md:flex-row md:flex-wrap gap-3 items-stretch md:items-center">
+        <div class="filter-card p-4 mb-4 flex flex-col md:flex-row md:flex-wrap gap-3 items-stretch md:items-center">
             <div class="relative flex-1 min-w-[200px]">
                 <svg class="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
@@ -475,7 +519,7 @@ catat_view_once($pdo, 'Diskon', 'Membuka halaman Diskon');
         </div>
 
         <!-- Tabel & Card List -->
-        <div class="bg-white border border-subtle rounded-sm overflow-hidden">
+        <div class="table-card overflow-hidden">
 
             <!-- Desktop Table -->
             <div class="hidden lg:block overflow-x-auto no-scrollbar">
@@ -803,29 +847,6 @@ catat_view_once($pdo, 'Diskon', 'Membuka halaman Diskon');
         <span id="toast-icon"></span>
         <span id="toast-msg" class="text-sm font-medium"></span>
     </div>
-
-    <!-- Mobile Bottom Navigation -->
-    <nav class="lg:hidden fixed bottom-0 left-0 right-0 bg-white border-t border-subtle px-6 py-3 flex justify-between items-center z-50 shadow-lg">
-        <button onclick="toggleMobileMenu()" class="flex flex-col items-center p-2">
-            <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 text-black" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <path d="M3 12h18M3 6h18M3 18h18" />
-            </svg>
-            <span class="text-[8px] font-bold mt-1 uppercase">Menu</span>
-        </button>
-        <a href="pos.php" class="flex flex-col items-center bg-black text-white p-3 rounded-full -mt-8 shadow-xl border-4 border-white">
-            <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
-                <circle cx="12" cy="12" r="10" />
-                <path d="M12 8v8M8 12h8" />
-            </svg>
-        </a>
-        <a href="diskon.php" class="flex flex-col items-center p-2">
-            <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 text-black" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <path d="M7 7h.01M7 3h5c.512 0 1.024.195 1.414.586l7 7a2 2 0 010 2.828l-7 7a2 2 0 01-2.828 0l-7-7A1.994 1.994 0 013 12V7a4 4 0 014-4z" />
-            </svg>
-            <span class="text-[8px] font-bold mt-1 uppercase text-black">Diskon</span>
-        </a>
-    </nav>
-
     <!-- Data untuk JS (edit mode) -->
     <script>
         const DISKON_DATA = <?= json_encode(array_column($diskonList, null, 'id')) ?>;

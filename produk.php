@@ -425,6 +425,44 @@ catat_view_once($pdo, 'Produk', 'Membuka halaman Produk');
                 margin-left: 220px;
             }
         }
+
+        /* Clean box style - mengikuti halaman diskon */
+        .produk-main .summary-card,
+        .produk-main .filter-card,
+        .produk-main .table-card,
+        .produk-main .produk-mobile-card {
+            background: #fff;
+            border: 1px solid #f0f0f0;
+            border-radius: 0 !important;
+            box-shadow: none !important;
+        }
+
+        .produk-main input,
+        .produk-main select,
+        .produk-main textarea,
+        .produk-main button {
+            border-radius: 0 !important;
+        }
+
+        .produk-main .rounded-xl,
+        .produk-main .rounded-lg,
+        .produk-main .rounded-md,
+        .produk-main .rounded-sm,
+        .produk-main .rounded-full {
+            border-radius: 0 !important;
+        }
+
+        .produk-mobile-card:hover {
+            transform: none;
+            box-shadow: none;
+            border-color: #e5e7eb;
+        }
+
+        @media (max-width: 1023px) {
+            .produk-main {
+                padding-bottom: 5.5rem !important;
+            }
+        }
     </style>
 </head>
 
@@ -443,24 +481,24 @@ catat_view_once($pdo, 'Produk', 'Membuka halaman Produk');
 
         <!-- Summary Cards -->
         <div class="produk-summary grid grid-cols-2 md:grid-cols-4 gap-3 md:gap-4 mb-6 md:mb-8">
-            <div class="produk-summary-card bg-white border border-subtle rounded-sm md:rounded-xl p-4 md:p-5">
+            <div class="produk-summary-card summary-card p-4 md:p-5">
                 <p class="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1">Total SKU</p>
                 <p class="text-2xl font-bold"><?= number_format($summary['total']) ?></p>
                 <p class="text-[10px] text-gray-400 mt-1"><?= number_format($summary['aktif']) ?> aktif</p>
             </div>
-            <div class="produk-summary-card bg-white border border-subtle rounded-sm md:rounded-xl p-4 md:p-5">
+            <div class="produk-summary-card summary-card p-4 md:p-5">
                 <p class="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1">Nilai Stok</p>
                 <p class="text-2xl font-bold text-blue-600"><?= rupiah($summary['nilai_stok'] ?? 0) ?></p>
                 <p class="text-[10px] text-gray-400 mt-1">Estimasi HPP</p>
             </div>
-            <div class="produk-summary-card bg-white border <?= $summary['low_stock'] > 0 ? 'border-yellow-200' : 'border-subtle' ?> rounded-sm md:rounded-xl p-4 md:p-5">
+            <div class="produk-summary-card summary-card border <?= $summary['low_stock'] > 0 ? 'border-yellow-200' : 'border-subtle' ?> p-4 md:p-5">
                 <p class="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1">Stok Limit</p>
                 <p class="text-2xl font-bold <?= $summary['low_stock'] > 0 ? 'text-yellow-600' : 'text-gray-800' ?>">
                     <?= number_format($summary['low_stock']) ?>
                 </p>
                 <p class="text-[10px] text-gray-400 mt-1">di bawah minimum</p>
             </div>
-            <div class="produk-summary-card bg-white border <?= $summary['habis'] > 0 ? 'border-red-200' : 'border-subtle' ?> rounded-sm md:rounded-xl p-4 md:p-5">
+            <div class="produk-summary-card summary-card border <?= $summary['habis'] > 0 ? 'border-red-200' : 'border-subtle' ?> p-4 md:p-5">
                 <p class="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1">Stok Habis</p>
                 <p class="text-2xl font-bold <?= $summary['habis'] > 0 ? 'text-red-600' : 'text-gray-800' ?>">
                     <?= number_format($summary['habis']) ?>
@@ -470,7 +508,7 @@ catat_view_once($pdo, 'Produk', 'Membuka halaman Produk');
         </div>
 
         <!-- Filter & Search -->
-        <div class="produk-filter bg-white border border-subtle rounded-sm p-4 mb-4 flex flex-col md:flex-row md:flex-wrap gap-3 items-stretch md:items-center">
+        <div class="produk-filter filter-card p-4 mb-4 flex flex-col md:flex-row md:flex-wrap gap-3 items-stretch md:items-center">
             <div class="filter-control relative flex-1 min-w-[200px]">
                 <svg class="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
@@ -496,7 +534,7 @@ catat_view_once($pdo, 'Produk', 'Membuka halaman Produk');
         </div>
 
         <!-- Tabel Produk -->
-        <div class="bg-white border border-subtle rounded-sm overflow-hidden">
+        <div class="table-card overflow-hidden">
 
             <!-- Desktop Table -->
             <div class="hidden lg:block overflow-x-auto no-scrollbar">
@@ -868,29 +906,6 @@ catat_view_once($pdo, 'Produk', 'Membuka halaman Produk');
         <span id="toast-icon"></span>
         <span id="toast-msg" class="text-sm font-medium"></span>
     </div>
-
-    <!-- Mobile Bottom Navigation -->
-    <nav class="lg:hidden fixed bottom-0 left-0 right-0 bg-white border-t border-subtle px-6 py-3 flex justify-between items-center z-50 shadow-lg">
-        <button onclick="toggleMobileMenu()" class="flex flex-col items-center p-2">
-            <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 text-black" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <path d="M3 12h18M3 6h18M3 18h18" />
-            </svg>
-            <span class="text-[8px] font-bold mt-1 uppercase">Menu</span>
-        </button>
-        <a href="pos.php" class="flex flex-col items-center bg-black text-white p-3 rounded-full -mt-8 shadow-xl border-4 border-white">
-            <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
-                <circle cx="12" cy="12" r="10" />
-                <path d="M12 8v8M8 12h8" />
-            </svg>
-        </a>
-        <a href="produk.php" class="flex flex-col items-center p-2">
-            <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 text-black" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <path d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4" />
-            </svg>
-            <span class="text-[8px] font-bold mt-1 uppercase text-black">Produk</span>
-        </a>
-    </nav>
-
     <script>
         function toggleMobileMenu() {
             const overlay = document.getElementById('mobileMenuOverlay');
