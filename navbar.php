@@ -1,30 +1,27 @@
 <?php
 /*
 |--------------------------------------------------------------------------
-| navbar.php
-|--------------------------------------------------------------------------
-| CLEAN FINAL NAVBAR
-| - Desktop : title + optional action
-| - Mobile  : hamburger + optional back
+| navbar.php — Compatible PHP 7 & 8
 |--------------------------------------------------------------------------
 */
 
-if (!isset($pageTitle)) {
-    $pageTitle = 'Dashboard';
+if (session_status() === PHP_SESSION_NONE) {
+    session_start();
 }
 
-if (!isset($backUrl)) {
-    $backUrl = '';
-}
+if (!isset($pageTitle))       $pageTitle       = 'Dashboard';
+if (!isset($backUrl))         $backUrl         = '';
+if (!isset($rightActionHtml)) $rightActionHtml = '';
 
-if (!isset($rightActionHtml)) {
-    $rightActionHtml = '';
-}
-
+// ── Helper — tanpa type hint agar kompatibel PHP 7 ──────────────────────────
 if (!function_exists('navbar_h')) {
-    function navbar_h(mixed $v): string
+    /**
+     * @param  mixed  $v
+     * @return string
+     */
+    function navbar_h($v)
     {
-        return htmlspecialchars((string)($v ?? ''), ENT_QUOTES, 'UTF-8');
+        return htmlspecialchars((string)(isset($v) ? $v : ''), ENT_QUOTES, 'UTF-8');
     }
 }
 ?>
@@ -42,6 +39,7 @@ if (!function_exists('navbar_h')) {
         font-size: 13px;
         font-weight: 800;
         transition: background .15s ease, border-color .15s ease;
+        cursor: pointer;
     }
 
     .navbar-btn:hover {
@@ -95,7 +93,7 @@ if (!function_exists('navbar_h')) {
     }
 </style>
 
-<header class="app-header page-header sticky top-0 bg-white border-b border-subtle px-4 sm:px-6 py-3 flex justify-between items-center z-40 shadow-sm">
+<header class="app-header page-header sticky top-0 bg-white border-b border-gray-100 px-4 sm:px-6 py-3 flex justify-between items-center z-40 shadow-sm">
 
     <div class="flex items-center gap-2 sm:gap-3 min-w-0">
 
@@ -103,14 +101,14 @@ if (!function_exists('navbar_h')) {
             onclick="toggleMobileMenu()"
             class="navbar-btn mobile-only-btn"
             aria-label="Buka menu">
-            ☰
+            &#9776;
         </button>
 
         <?php if (!empty($backUrl)): ?>
-            <a href="<?= navbar_h($backUrl) ?>"
+            <a href="<?php echo navbar_h($backUrl); ?>"
                 class="navbar-btn mobile-only-btn"
                 aria-label="Kembali">
-                ←
+                &larr;
             </a>
         <?php endif; ?>
 
@@ -118,16 +116,15 @@ if (!function_exists('navbar_h')) {
             <p class="hidden sm:block text-[9px] font-bold text-gray-400 uppercase tracking-widest mb-0.5">
                 SEJAHUB
             </p>
-
             <h1 class="navbar-title header-title page-header-title text-sm font-bold tracking-[0.2em] uppercase">
-                <?= navbar_h($pageTitle) ?>
+                <?php echo navbar_h($pageTitle); ?>
             </h1>
         </div>
 
     </div>
 
     <div class="navbar-actions flex items-center gap-2 sm:gap-3">
-        <?= $rightActionHtml ?>
+        <?php echo $rightActionHtml; ?>
     </div>
 
 </header>
