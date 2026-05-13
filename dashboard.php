@@ -439,26 +439,27 @@ $title = 'Dashboard - ' . (isset($_SESSION['nama']) ? $_SESSION['nama'] : 'SEJAH
         <!-- ── Struk Terakhir + Fast Moving ───────────────────────────────── -->
         <div class="grid grid-cols-1 lg:grid-cols-3 gap-10 md:gap-12 mt-12 md:mt-20">
 
-            <div class="lg:col-span-2 overflow-hidden">
+            <div class="lg:col-span-2">
                 <h3 class="text-xs font-bold uppercase tracking-widest mb-6">Struk Terakhir</h3>
-                <div class="overflow-x-auto no-scrollbar">
-                    <table class="w-full text-left min-w-[500px]">
-                        <thead>
-                            <tr class="border-b border-black">
-                                <th class="py-3 text-[10px] font-bold uppercase tracking-widest">ID Struk</th>
-                                <th class="py-3 text-[10px] font-bold uppercase tracking-widest">Kasir</th>
-                                <th class="py-3 text-[10px] font-bold uppercase tracking-widest">Total</th>
-                                <th class="py-3 text-[10px] font-bold uppercase tracking-widest text-right">Opsi</th>
-                            </tr>
-                        </thead>
-                        <tbody class="divide-y divide-gray-100">
-                            <?php if (empty($strukTerakhir)): ?>
-                                <tr>
-                                    <td colspan="4" class="py-8 text-center text-xs text-gray-400">
-                                        Belum ada transaksi hari ini
-                                    </td>
+
+                <?php if (empty($strukTerakhir)): ?>
+                    <div class="p-6 border border-gray-100 rounded-sm text-center">
+                        <p class="text-xs text-gray-400">Belum ada transaksi hari ini</p>
+                    </div>
+                <?php else: ?>
+
+                    <!-- ── DESKTOP: Tabel (lg ke atas) ─────────────────────── -->
+                    <div class="hidden lg:block overflow-x-auto">
+                        <table class="w-full text-left">
+                            <thead>
+                                <tr class="border-b border-black">
+                                    <th class="py-3 text-[10px] font-bold uppercase tracking-widest">ID Struk</th>
+                                    <th class="py-3 text-[10px] font-bold uppercase tracking-widest">Kasir</th>
+                                    <th class="py-3 text-[10px] font-bold uppercase tracking-widest">Total</th>
+                                    <th class="py-3 text-[10px] font-bold uppercase tracking-widest text-right">Opsi</th>
                                 </tr>
-                            <?php else: ?>
+                            </thead>
+                            <tbody class="divide-y divide-gray-100">
                                 <?php foreach ($strukTerakhir as $t): ?>
                                     <tr>
                                         <td class="py-4 text-sm font-medium">
@@ -481,10 +482,52 @@ $title = 'Dashboard - ' . (isset($_SESSION['nama']) ? $_SESSION['nama'] : 'SEJAH
                                         </td>
                                     </tr>
                                 <?php endforeach; ?>
-                            <?php endif; ?>
-                        </tbody>
-                    </table>
-                </div>
+                            </tbody>
+                        </table>
+                    </div>
+
+                    <!-- ── MOBILE & TABLET: Card (di bawah lg) ─────────────── -->
+                    <div class="lg:hidden space-y-3">
+                        <?php foreach ($strukTerakhir as $t): ?>
+                            <div class="border border-gray-100 rounded-sm p-4 flex items-center justify-between gap-3 hover:border-gray-300 hover:shadow-sm transition-all">
+
+                                <!-- Kiri: Icon + ID + Kasir -->
+                                <div class="flex items-center gap-3 min-w-0">
+                                    <div class="w-9 h-9 bg-gray-50 border border-gray-100 rounded-sm flex items-center justify-center flex-shrink-0">
+                                        <span class="text-[9px] font-black text-gray-400 uppercase">INV</span>
+                                    </div>
+                                    <div class="min-w-0">
+                                        <p class="text-sm font-bold">
+                                            #<?php echo htmlspecialchars(substr($t['invoice'], -6), ENT_QUOTES, 'UTF-8'); ?>
+                                            <span class="text-[10px] text-gray-400 font-normal ml-1">
+                                                <?php echo date('H:i', strtotime($t['created_at'])); ?>
+                                            </span>
+                                        </p>
+                                        <p class="text-[10px] text-gray-400 mt-0.5 truncate">
+                                            <?php echo htmlspecialchars(isset($t['kasir']) ? $t['kasir'] : 'N/A', ENT_QUOTES, 'UTF-8'); ?>
+                                        </p>
+                                    </div>
+                                </div>
+
+                                <!-- Kanan: Total + Tombol Reprint -->
+                                <div class="flex items-center gap-3 flex-shrink-0">
+                                    <div class="text-right">
+                                        <p class="text-sm font-bold"><?php echo formatRp($t['total']); ?></p>
+                                        <p class="text-[10px] text-gray-400 mt-0.5">Total</p>
+                                    </div>
+                                    <button
+                                        type="button"
+                                        onclick="reprintThermal(<?php echo (int)$t['id']; ?>, '<?php echo htmlspecialchars($t['invoice'], ENT_QUOTES, 'UTF-8'); ?>')"
+                                        class="px-3 py-2 text-[10px] font-black uppercase tracking-widest border border-gray-200 hover:bg-black hover:text-white hover:border-black transition-all rounded-sm flex-shrink-0">
+                                        Reprint
+                                    </button>
+                                </div>
+
+                            </div>
+                        <?php endforeach; ?>
+                    </div>
+
+                <?php endif; ?>
             </div>
 
             <div class="lg:col-span-1">
