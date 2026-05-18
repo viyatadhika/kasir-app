@@ -3,6 +3,7 @@ session_start();
 ini_set('display_errors', 1);
 error_reporting(E_ALL);
 require_once 'config.php';
+requireAccess();
 require_once 'activity_helper.php';
 
 $activeMenu = 'laporan';

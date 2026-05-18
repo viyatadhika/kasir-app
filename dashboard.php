@@ -8,6 +8,7 @@ if (session_status() === PHP_SESSION_NONE) {
 }
 
 require_once 'config.php';
+requireAccess();
 
 if (!function_exists('formatRp')) {
     /**

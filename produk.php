@@ -1,22 +1,46 @@
 <?php
-session_start();
+if (session_status() === PHP_SESSION_NONE) {
+    session_start();
+}
 require_once 'config.php';
+requireAccess();
 require_once 'activity_helper.php';
 
 $activeMenu = 'produk';
-$pageTitle = 'Kelola Produk';
-$backUrl = 'dashboard.php';
+$pageTitle  = 'Kelola Produk';
+$backUrl    = 'dashboard.php';
 
+// ── Helper ───────────────────────────────────────────────────────────────────
+if (!function_exists('e')) {
+    /**
+     * @param  mixed  $v
+     * @return string
+     */
+    function e($v)
+    {
+        return htmlspecialchars((string)($v ?? ''), ENT_QUOTES, 'UTF-8');
+    }
+}
 
-// ── API Handler (AJAX) ───────────────────────────────────────────────────────
+if (!function_exists('rupiah')) {
+    /**
+     * @param  mixed  $n
+     * @return string
+     */
+    function rupiah($n)
+    {
+        return 'Rp ' . number_format((float)($n ?? 0), 0, ',', '.');
+    }
+}
+
+// ── API Handler (AJAX) ────────────────────────────────────────────────────────
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_GET['action'])) {
     header('Content-Type: application/json');
 
     switch ($_GET['action']) {
 
-        // Tambah produk baru
         case 'tambah':
-            $input = json_decode(file_get_contents('php://input'), true);
+            $input    = json_decode(file_get_contents('php://input'), true);
             $required = ['kode', 'nama', 'harga_jual'];
             foreach ($required as $field) {
                 if (empty($input[$field])) {
@@ -37,19 +61,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_GET['action'])) {
             $stmt->execute([
                 ':kode'         => trim($input['kode']),
                 ':nama'         => trim($input['nama']),
-                ':kategori'     => trim($input['kategori'] ?? '-'),
-                ':harga_beli'   => (int)($input['harga_beli'] ?? 0),
+                ':kategori'     => trim(isset($input['kategori']) ? $input['kategori'] : '-'),
+                ':harga_beli'   => (int)(isset($input['harga_beli']) ? $input['harga_beli'] : 0),
                 ':harga_jual'   => (int)$input['harga_jual'],
-                ':stok'         => (int)($input['stok'] ?? 0),
-                ':stok_minimum' => (int)($input['stok_minimum'] ?? 5),
-                ':satuan'       => trim($input['satuan'] ?? 'pcs'),
-                ':status'       => in_array($input['status'] ?? 'aktif', ['aktif', 'nonaktif']) ? $input['status'] : 'aktif',
+                ':stok'         => (int)(isset($input['stok']) ? $input['stok'] : 0),
+                ':stok_minimum' => (int)(isset($input['stok_minimum']) ? $input['stok_minimum'] : 5),
+                ':satuan'       => trim(isset($input['satuan']) ? $input['satuan'] : 'pcs'),
+                ':status'       => in_array(isset($input['status']) ? $input['status'] : 'aktif', ['aktif', 'nonaktif']) ? $input['status'] : 'aktif',
             ]);
             catat_aktivitas($pdo, 'create', 'Produk', 'Menambah produk: ' . trim($input['nama']));
             echo json_encode(['success' => true, 'message' => 'Produk berhasil ditambahkan.', 'id' => $pdo->lastInsertId()]);
             exit;
 
-            // Edit produk
         case 'edit':
             $input = json_decode(file_get_contents('php://input'), true);
             if (empty($input['id'])) {
@@ -74,19 +97,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_GET['action'])) {
                 ':id'           => (int)$input['id'],
                 ':kode'         => trim($input['kode']),
                 ':nama'         => trim($input['nama']),
-                ':kategori'     => trim($input['kategori'] ?? '-'),
-                ':harga_beli'   => (int)($input['harga_beli'] ?? 0),
+                ':kategori'     => trim(isset($input['kategori']) ? $input['kategori'] : '-'),
+                ':harga_beli'   => (int)(isset($input['harga_beli']) ? $input['harga_beli'] : 0),
                 ':harga_jual'   => (int)$input['harga_jual'],
-                ':stok'         => (int)($input['stok'] ?? 0),
-                ':stok_minimum' => (int)($input['stok_minimum'] ?? 5),
-                ':satuan'       => trim($input['satuan'] ?? 'pcs'),
-                ':status'       => in_array($input['status'] ?? 'aktif', ['aktif', 'nonaktif']) ? $input['status'] : 'aktif',
+                ':stok'         => (int)(isset($input['stok']) ? $input['stok'] : 0),
+                ':stok_minimum' => (int)(isset($input['stok_minimum']) ? $input['stok_minimum'] : 5),
+                ':satuan'       => trim(isset($input['satuan']) ? $input['satuan'] : 'pcs'),
+                ':status'       => in_array(isset($input['status']) ? $input['status'] : 'aktif', ['aktif', 'nonaktif']) ? $input['status'] : 'aktif',
             ]);
             catat_aktivitas($pdo, 'update', 'Produk', 'Mengubah produk ID: ' . (int)$input['id']);
             echo json_encode(['success' => true, 'message' => 'Produk berhasil diperbarui.']);
             exit;
 
-            // Hapus produk
         case 'hapus':
             $input = json_decode(file_get_contents('php://input'), true);
             if (empty($input['id'])) {
@@ -107,9 +129,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_GET['action'])) {
             }
             exit;
 
-            // Ambil satu produk (untuk form edit)
         case 'get':
-            $id   = (int)($_GET['id'] ?? 0);
+            $id   = (int)(isset($_GET['id']) ? $_GET['id'] : 0);
             $stmt = $pdo->prepare("SELECT * FROM produk WHERE id = :id");
             $stmt->execute([':id' => $id]);
             $row = $stmt->fetch();
@@ -117,7 +138,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_GET['action'])) {
             else      echo json_encode(['success' => false, 'message' => 'Produk tidak ditemukan.']);
             exit;
 
-            // Update stok saja (opname)
         case 'update_stok':
             $input = json_decode(file_get_contents('php://input'), true);
             if (empty($input['id'])) {
@@ -135,10 +155,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_GET['action'])) {
 }
 
 // ── Fetch Data ────────────────────────────────────────────────────────────────
-$search       = trim($_GET['q'] ?? '');
-$katFilter    = $_GET['kat'] ?? '';
-$statusFilter = $_GET['status'] ?? 'aktif';
-$page         = max(1, (int)($_GET['page'] ?? 1));
+$search       = trim(isset($_GET['q'])      ? $_GET['q']      : '');
+$katFilter    = isset($_GET['kat'])          ? $_GET['kat']    : '';
+$statusFilter = isset($_GET['status'])       ? $_GET['status'] : 'aktif';
+$page         = max(1, (int)(isset($_GET['page']) ? $_GET['page'] : 1));
 $perPage      = 15;
 $offset       = ($page - 1) * $perPage;
 
@@ -184,6 +204,18 @@ $summary = $pdo->query("
 ")->fetch();
 
 catat_view_once($pdo, 'Produk', 'Membuka halaman Produk');
+
+// ── Tombol di Navbar ─────────────────────────────────────────────────────────
+$rightActionHtml = '
+<button
+    onclick="openModal(\'tambah\')"
+    class="inline-flex items-center gap-2 px-4 py-2 text-[10px] font-black uppercase tracking-widest bg-black text-white hover:bg-gray-800 transition-all">
+    <svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+        <path stroke-width="2.5" d="M12 4v16m8-8H4" />
+    </svg>
+    <span class="hidden sm:inline">Tambah Produk</span>
+    <span class="sm:hidden">+</span>
+</button>';
 ?>
 <!DOCTYPE html>
 <html lang="id">
@@ -193,7 +225,6 @@ catat_view_once($pdo, 'Produk', 'Membuka halaman Produk');
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Kelola Produk</title>
     <link rel="icon" type="image/png" href="assets/sejahub_icon.png">
-    <link rel="shortcut icon" type="image/png" href="assets/sejahub_icon.png">
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
     <style>
@@ -247,19 +278,6 @@ catat_view_once($pdo, 'Produk', 'Membuka halaman Produk');
             color: #dc2626;
         }
 
-        .modal-overlay {
-            transition: opacity 0.2s ease;
-        }
-
-        .modal-box {
-            transition: transform 0.25s cubic-bezier(0.34, 1.56, 0.64, 1), opacity 0.2s ease;
-        }
-
-        .modal-overlay.hidden .modal-box {
-            transform: scale(0.95);
-            opacity: 0;
-        }
-
         input:focus,
         select:focus,
         textarea:focus {
@@ -295,15 +313,6 @@ catat_view_once($pdo, 'Produk', 'Membuka halaman Produk');
             opacity: 1;
         }
 
-        th.sortable {
-            cursor: pointer;
-            user-select: none;
-        }
-
-        th.sortable:hover {
-            color: #1a1a1a;
-        }
-
         .stok-bar {
             height: 3px;
             border-radius: 2px;
@@ -317,98 +326,6 @@ catat_view_once($pdo, 'Produk', 'Membuka halaman Produk');
             transition: width 0.3s;
         }
 
-        #mobileMenuOverlay {
-            transition: opacity 0.3s ease, visibility 0.3s ease;
-        }
-
-        #mobileMenuContent {
-            transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-        }
-
-        @media (min-width: 1024px) {
-            .sidebar {
-                width: 220px;
-            }
-
-            .produk-header,
-            .produk-main {
-                margin-left: 220px;
-            }
-        }
-
-        .produk-mobile-card {
-            transition: transform 0.15s ease, box-shadow 0.15s ease, border-color 0.15s ease;
-        }
-
-        .produk-mobile-card:hover {
-            transform: translateY(-1px);
-            border-color: #e5e7eb;
-            box-shadow: 0 10px 30px rgba(15, 23, 42, 0.05);
-        }
-
-        @media (max-width: 1023px) {
-            body {
-                padding-bottom: 76px;
-            }
-
-            .produk-header {
-                padding-left: 1rem;
-                padding-right: 1rem;
-            }
-
-            .produk-main {
-                padding: 1rem;
-            }
-
-            .produk-filter {
-                align-items: stretch;
-            }
-
-            .produk-filter .filter-control {
-                width: 100%;
-            }
-
-            .produk-filter select {
-                width: 100%;
-            }
-
-            .produk-summary {
-                gap: 0.75rem;
-                margin-bottom: 1rem;
-            }
-
-            .produk-summary-card {
-                padding: 1rem;
-            }
-
-            .produk-summary-card p:nth-child(2) {
-                font-size: 1.25rem;
-                line-height: 1.75rem;
-            }
-        }
-
-        @media (max-width: 640px) {
-            .produk-header-title {
-                max-width: 150px;
-                overflow: hidden;
-                white-space: nowrap;
-                text-overflow: ellipsis;
-            }
-
-            .produk-add-text,
-            .produk-pos-link {
-                display: none;
-            }
-
-            #toast {
-                left: 1rem;
-                right: 1rem;
-                bottom: 5rem;
-                justify-content: center;
-            }
-        }
-
-        /* Shared layout aliases for sidebar.php/navbar.php */
         @media (min-width: 1024px) {
 
             .app-header,
@@ -427,7 +344,26 @@ catat_view_once($pdo, 'Produk', 'Membuka halaman Produk');
             }
         }
 
-        /* Clean box style - mengikuti halaman diskon */
+        @media (max-width: 1023px) {
+            body {
+                padding-bottom: 76px;
+            }
+
+            .produk-main {
+                padding-bottom: 5.5rem !important;
+            }
+        }
+
+        @media (max-width: 640px) {
+            #toast {
+                left: 1rem;
+                right: 1rem;
+                bottom: 5rem;
+                justify-content: center;
+            }
+        }
+
+        /* Clean box style */
         .produk-main .summary-card,
         .produk-main .filter-card,
         .produk-main .table-card,
@@ -445,24 +381,12 @@ catat_view_once($pdo, 'Produk', 'Membuka halaman Produk');
             border-radius: 0 !important;
         }
 
-        .produk-main .rounded-xl,
-        .produk-main .rounded-lg,
-        .produk-main .rounded-md,
-        .produk-main .rounded-sm,
-        .produk-main .rounded-full {
-            border-radius: 0 !important;
+        .produk-mobile-card {
+            transition: border-color 0.15s ease;
         }
 
         .produk-mobile-card:hover {
-            transform: none;
-            box-shadow: none;
             border-color: #e5e7eb;
-        }
-
-        @media (max-width: 1023px) {
-            .produk-main {
-                padding-bottom: 5.5rem !important;
-            }
         }
     </style>
 </head>
@@ -472,72 +396,66 @@ catat_view_once($pdo, 'Produk', 'Membuka halaman Produk');
     <?php require_once 'sidebar.php'; ?>
     <?php require_once 'navbar.php'; ?>
 
-
-    <!-- Mobile Menu Overlay -->
-
-    <!-- Desktop Sidebar -->
-    <!-- Header -->
-    <!-- Main Content -->
     <main class="produk-main p-4 sm:p-5 md:p-8 lg:p-10">
 
         <!-- Summary Cards -->
-        <div class="produk-summary grid grid-cols-2 md:grid-cols-4 gap-3 md:gap-4 mb-6 md:mb-8">
-            <div class="produk-summary-card summary-card p-4 md:p-5">
+        <div class="grid grid-cols-2 md:grid-cols-4 gap-3 md:gap-4 mb-6 md:mb-8">
+            <div class="summary-card p-4 md:p-5">
                 <p class="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1">Total SKU</p>
-                <p class="text-2xl font-bold"><?= number_format($summary['total']) ?></p>
-                <p class="text-[10px] text-gray-400 mt-1"><?= number_format($summary['aktif']) ?> aktif</p>
+                <p class="text-2xl font-bold"><?php echo number_format($summary['total']); ?></p>
+                <p class="text-[10px] text-gray-400 mt-1"><?php echo number_format($summary['aktif']); ?> aktif</p>
             </div>
-            <div class="produk-summary-card summary-card p-4 md:p-5">
+            <div class="summary-card p-4 md:p-5">
                 <p class="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1">Nilai Stok</p>
-                <p class="text-2xl font-bold text-blue-600"><?= rupiah($summary['nilai_stok'] ?? 0) ?></p>
+                <p class="text-2xl font-bold text-blue-600"><?php echo rupiah($summary['nilai_stok'] ?? 0); ?></p>
                 <p class="text-[10px] text-gray-400 mt-1">Estimasi HPP</p>
             </div>
-            <div class="produk-summary-card summary-card border <?= $summary['low_stock'] > 0 ? 'border-yellow-200' : 'border-subtle' ?> p-4 md:p-5">
+            <div class="summary-card p-4 md:p-5 border <?php echo $summary['low_stock'] > 0 ? 'border-yellow-200' : ''; ?>">
                 <p class="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1">Stok Limit</p>
-                <p class="text-2xl font-bold <?= $summary['low_stock'] > 0 ? 'text-yellow-600' : 'text-gray-800' ?>">
-                    <?= number_format($summary['low_stock']) ?>
+                <p class="text-2xl font-bold <?php echo $summary['low_stock'] > 0 ? 'text-yellow-600' : 'text-gray-800'; ?>">
+                    <?php echo number_format($summary['low_stock']); ?>
                 </p>
                 <p class="text-[10px] text-gray-400 mt-1">di bawah minimum</p>
             </div>
-            <div class="produk-summary-card summary-card border <?= $summary['habis'] > 0 ? 'border-red-200' : 'border-subtle' ?> p-4 md:p-5">
+            <div class="summary-card p-4 md:p-5 border <?php echo $summary['habis'] > 0 ? 'border-red-200' : ''; ?>">
                 <p class="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1">Stok Habis</p>
-                <p class="text-2xl font-bold <?= $summary['habis'] > 0 ? 'text-red-600' : 'text-gray-800' ?>">
-                    <?= number_format($summary['habis']) ?>
+                <p class="text-2xl font-bold <?php echo $summary['habis'] > 0 ? 'text-red-600' : 'text-gray-800'; ?>">
+                    <?php echo number_format($summary['habis']); ?>
                 </p>
                 <p class="text-[10px] text-gray-400 mt-1">perlu restock</p>
             </div>
         </div>
 
         <!-- Filter & Search -->
-        <div class="produk-filter filter-card p-4 mb-4 flex flex-col md:flex-row md:flex-wrap gap-3 items-stretch md:items-center">
-            <div class="filter-control relative flex-1 min-w-[200px]">
+        <div class="filter-card p-4 mb-4 flex flex-col md:flex-row md:flex-wrap gap-3 items-stretch md:items-center">
+            <div class="relative flex-1 min-w-[200px]">
                 <svg class="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
                 </svg>
-                <input type="text" id="search-input" value="<?= e($search) ?>"
+                <input type="text" id="search-input" value="<?php echo e($search); ?>"
                     placeholder="Cari nama, kode, atau kategori..."
                     class="w-full bg-gray-50 border border-gray-100 rounded-sm pl-10 pr-4 py-2.5 text-sm focus:bg-white transition-all">
             </div>
             <select id="filter-kat" class="bg-gray-50 border border-gray-100 rounded-sm px-3 py-2.5 text-xs font-bold uppercase text-gray-500 focus:bg-white transition-all">
                 <option value="">Semua Kategori</option>
                 <?php foreach ($kategoriList as $k): ?>
-                    <option value="<?= e($k) ?>" <?= $katFilter === $k ? 'selected' : '' ?>><?= e($k) ?></option>
+                    <option value="<?php echo e($k); ?>" <?php echo $katFilter === $k ? 'selected' : ''; ?>><?php echo e($k); ?></option>
                 <?php endforeach; ?>
             </select>
             <select id="filter-status" class="bg-gray-50 border border-gray-100 rounded-sm px-3 py-2.5 text-xs font-bold uppercase text-gray-500 focus:bg-white transition-all">
-                <option value="aktif" <?= $statusFilter === 'aktif'    ? 'selected' : '' ?>>Aktif</option>
-                <option value="nonaktif" <?= $statusFilter === 'nonaktif' ? 'selected' : '' ?>>Nonaktif</option>
-                <option value="semua" <?= $statusFilter === 'semua'    ? 'selected' : '' ?>>Semua Status</option>
+                <option value="aktif" <?php echo $statusFilter === 'aktif'    ? 'selected' : ''; ?>>Aktif</option>
+                <option value="nonaktif" <?php echo $statusFilter === 'nonaktif' ? 'selected' : ''; ?>>Nonaktif</option>
+                <option value="semua" <?php echo $statusFilter === 'semua'    ? 'selected' : ''; ?>>Semua Status</option>
             </select>
             <span class="text-xs text-gray-400 font-medium ml-auto hidden sm:block">
-                <?= number_format($totalRows) ?> produk ditemukan
+                <?php echo number_format($totalRows); ?> produk ditemukan
             </span>
         </div>
 
-        <!-- Tabel Produk -->
+        <!-- Tabel & Card -->
         <div class="table-card overflow-hidden">
 
-            <!-- Desktop Table -->
+            <!-- ── DESKTOP: Tabel ──────────────────────────────────────────── -->
             <div class="hidden lg:block overflow-x-auto no-scrollbar">
                 <table class="w-full text-left min-w-[780px]">
                     <thead class="border-b border-subtle bg-gray-50">
@@ -552,7 +470,7 @@ catat_view_once($pdo, 'Produk', 'Membuka halaman Produk');
                             <th class="px-5 py-4 text-[10px] font-bold uppercase tracking-widest text-gray-400 text-right">Aksi</th>
                         </tr>
                     </thead>
-                    <tbody id="tabel-body" class="divide-y divide-[#f5f5f5]">
+                    <tbody class="divide-y divide-[#f5f5f5]">
                         <?php if (empty($produkList)): ?>
                             <tr>
                                 <td colspan="8" class="py-20 text-center">
@@ -566,65 +484,65 @@ catat_view_once($pdo, 'Produk', 'Membuka halaman Produk');
                             </tr>
                         <?php else: ?>
                             <?php foreach ($produkList as $i => $p):
-                                $isLow    = $p['stok'] <= $p['stok_minimum'] && $p['stok'] > 0;
-                                $isHabis  = $p['stok'] <= 0;
-                                $stokPct  = $p['stok_minimum'] > 0 ? min(100, round($p['stok'] / max($p['stok_minimum'] * 2, 1) * 100)) : 100;
+                                $isLow     = $p['stok'] <= $p['stok_minimum'] && $p['stok'] > 0;
+                                $isHabis   = $p['stok'] <= 0;
+                                $stokPct   = $p['stok_minimum'] > 0 ? min(100, round($p['stok'] / max($p['stok_minimum'] * 2, 1) * 100)) : 100;
                                 $stokColor = $isHabis ? 'bg-red-400' : ($isLow ? 'bg-yellow-400' : 'bg-green-400');
-                                $margin   = $p['harga_beli'] > 0 ? round(($p['harga_jual'] - $p['harga_beli']) / $p['harga_jual'] * 100) : 0;
+                                $margin    = $p['harga_beli'] > 0 ? round(($p['harga_jual'] - $p['harga_beli']) / $p['harga_jual'] * 100) : 0;
                             ?>
                                 <tr class="group">
-                                    <td class="px-5 py-4 text-[11px] text-gray-300 font-medium"><?= $offset + $i + 1 ?></td>
+                                    <td class="px-5 py-4 text-[11px] text-gray-300 font-medium"><?php echo $offset + $i + 1; ?></td>
                                     <td class="px-5 py-4">
-                                        <div class="font-semibold text-sm leading-tight"><?= e($p['nama']) ?></div>
-                                        <div class="text-[10px] text-gray-400 font-mono mt-0.5"><?= e($p['kode']) ?> · <?= e($p['satuan']) ?></div>
+                                        <div class="font-semibold text-sm leading-tight"><?php echo e($p['nama']); ?></div>
+                                        <div class="text-[10px] text-gray-400 font-mono mt-0.5"><?php echo e($p['kode']); ?> &middot; <?php echo e($p['satuan']); ?></div>
                                     </td>
                                     <td class="px-5 py-4">
-                                        <span class="text-[10px] font-bold uppercase tracking-wide text-gray-500 bg-gray-100 px-2 py-1 rounded-md">
-                                            <?= e($p['kategori']) ?>
+                                        <span class="text-[10px] font-bold uppercase tracking-wide text-gray-500 bg-gray-100 px-2 py-1">
+                                            <?php echo e($p['kategori']); ?>
                                         </span>
                                     </td>
-                                    <td class="px-5 py-4 text-right text-sm text-gray-500"><?= rupiah($p['harga_beli']) ?></td>
+                                    <td class="px-5 py-4 text-right text-sm text-gray-500"><?php echo rupiah($p['harga_beli']); ?></td>
                                     <td class="px-5 py-4 text-right">
-                                        <span class="text-sm font-bold"><?= rupiah($p['harga_jual']) ?></span>
+                                        <span class="text-sm font-bold"><?php echo rupiah($p['harga_jual']); ?></span>
                                         <?php if ($margin > 0): ?>
-                                            <div class="text-[9px] text-green-500 font-bold text-right">+<?= $margin ?>% margin</div>
+                                            <div class="text-[9px] text-green-500 font-bold text-right">+<?php echo $margin; ?>% margin</div>
                                         <?php endif; ?>
                                     </td>
                                     <td class="px-5 py-4 text-center">
                                         <div class="inline-flex flex-col items-center gap-1 min-w-[60px]">
-                                            <span class="text-sm font-bold <?= $isHabis ? 'text-red-600' : ($isLow ? 'text-yellow-600' : '') ?>">
-                                                <?= number_format($p['stok']) ?>
-                                                <span class="text-[9px] text-gray-400 font-normal"><?= e($p['satuan']) ?></span>
+                                            <span class="text-sm font-bold <?php echo $isHabis ? 'text-red-600' : ($isLow ? 'text-yellow-600' : ''); ?>">
+                                                <?php echo number_format($p['stok']); ?>
+                                                <span class="text-[9px] text-gray-400 font-normal"><?php echo e($p['satuan']); ?></span>
                                             </span>
                                             <div class="stok-bar w-14">
-                                                <div class="stok-bar-fill <?= $stokColor ?>" style="width:<?= $stokPct ?>%"></div>
+                                                <div class="stok-bar-fill <?php echo $stokColor; ?>" style="width:<?php echo $stokPct; ?>%"></div>
                                             </div>
-                                            <span class="text-[9px] text-gray-400">min <?= $p['stok_minimum'] ?></span>
+                                            <span class="text-[9px] text-gray-400">min <?php echo $p['stok_minimum']; ?></span>
                                         </div>
                                     </td>
                                     <td class="px-5 py-4 text-center">
                                         <?php if ($p['status'] === 'aktif'): ?>
-                                            <span class="badge-aktif text-[9px] font-bold uppercase px-2 py-1 rounded-full">Aktif</span>
+                                            <span class="badge-aktif text-[9px] font-bold uppercase px-2 py-1">Aktif</span>
                                         <?php else: ?>
-                                            <span class="badge-nonaktif text-[9px] font-bold uppercase px-2 py-1 rounded-full">Nonaktif</span>
+                                            <span class="badge-nonaktif text-[9px] font-bold uppercase px-2 py-1">Nonaktif</span>
                                         <?php endif; ?>
                                     </td>
                                     <td class="px-5 py-4">
                                         <div class="flex items-center justify-end gap-1">
-                                            <button onclick="openStokModal(<?= $p['id'] ?>, '<?= e(addslashes($p['nama'])) ?>', <?= $p['stok'] ?>)"
-                                                class="p-2 text-gray-400 hover:text-yellow-600 hover:bg-yellow-50 rounded-sm transition-all" title="Update Stok">
+                                            <button onclick="openStokModal(<?php echo $p['id']; ?>, '<?php echo e(addslashes($p['nama'])); ?>', <?php echo $p['stok']; ?>)"
+                                                class="p-2 text-gray-400 hover:text-yellow-600 hover:bg-yellow-50 transition-all" title="Update Stok">
                                                 <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16V4m0 0L3 8m4-4l4 4m6 4v8m0 0l4-4m-4 4l-4-4" />
                                                 </svg>
                                             </button>
-                                            <button onclick="editProduk(<?= $p['id'] ?>)"
-                                                class="p-2 text-gray-400 hover:text-blue-600 hover:bg-blue-50 rounded-sm transition-all" title="Edit Produk">
+                                            <button onclick="editProduk(<?php echo $p['id']; ?>)"
+                                                class="p-2 text-gray-400 hover:text-blue-600 hover:bg-blue-50 transition-all" title="Edit">
                                                 <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
                                                 </svg>
                                             </button>
-                                            <button onclick="hapusProduk(<?= $p['id'] ?>, '<?= e(addslashes($p['nama'])) ?>')"
-                                                class="p-2 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded-sm transition-all" title="Hapus Produk">
+                                            <button onclick="hapusProduk(<?php echo $p['id']; ?>, '<?php echo e(addslashes($p['nama'])); ?>')"
+                                                class="p-2 text-gray-400 hover:text-red-600 hover:bg-red-50 transition-all" title="Hapus">
                                                 <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
                                                 </svg>
@@ -638,8 +556,8 @@ catat_view_once($pdo, 'Produk', 'Membuka halaman Produk');
                 </table>
             </div>
 
-            <!-- Mobile & Tablet Card List -->
-            <div class="lg:hidden divide-y divide-[#f5f5f5]">
+            <!-- ── MOBILE & TABLET: Card ───────────────────────────────────── -->
+            <div class="lg:hidden">
                 <?php if (empty($produkList)): ?>
                     <div class="py-16 text-center">
                         <div class="inline-flex flex-col items-center gap-3 opacity-30">
@@ -652,69 +570,69 @@ catat_view_once($pdo, 'Produk', 'Membuka halaman Produk');
                 <?php else: ?>
                     <div class="grid grid-cols-1 md:grid-cols-2 gap-3 p-3 md:p-4">
                         <?php foreach ($produkList as $i => $p):
-                            $isLow    = $p['stok'] <= $p['stok_minimum'] && $p['stok'] > 0;
-                            $isHabis  = $p['stok'] <= 0;
-                            $stokPct  = $p['stok_minimum'] > 0 ? min(100, round($p['stok'] / max($p['stok_minimum'] * 2, 1) * 100)) : 100;
+                            $isLow     = $p['stok'] <= $p['stok_minimum'] && $p['stok'] > 0;
+                            $isHabis   = $p['stok'] <= 0;
+                            $stokPct   = $p['stok_minimum'] > 0 ? min(100, round($p['stok'] / max($p['stok_minimum'] * 2, 1) * 100)) : 100;
                             $stokColor = $isHabis ? 'bg-red-400' : ($isLow ? 'bg-yellow-400' : 'bg-green-400');
-                            $margin   = $p['harga_beli'] > 0 ? round(($p['harga_jual'] - $p['harga_beli']) / $p['harga_jual'] * 100) : 0;
+                            $margin    = $p['harga_beli'] > 0 ? round(($p['harga_jual'] - $p['harga_beli']) / $p['harga_jual'] * 100) : 0;
                         ?>
-                            <div class="produk-mobile-card bg-white border border-subtle rounded-sm p-4">
+                            <div class="produk-mobile-card bg-white border border-subtle p-4">
                                 <div class="flex items-start justify-between gap-3 mb-3">
                                     <div class="min-w-0">
                                         <div class="flex items-center gap-2 mb-1">
-                                            <span class="text-[10px] text-gray-300 font-bold">#<?= $offset + $i + 1 ?></span>
-                                            <span class="text-[10px] font-bold uppercase tracking-wide text-gray-500 bg-gray-100 px-2 py-1 rounded-sm">
-                                                <?= e($p['kategori']) ?>
+                                            <span class="text-[10px] text-gray-300 font-bold">#<?php echo $offset + $i + 1; ?></span>
+                                            <span class="text-[10px] font-bold uppercase tracking-wide text-gray-500 bg-gray-100 px-2 py-0.5">
+                                                <?php echo e($p['kategori']); ?>
                                             </span>
                                         </div>
-                                        <h3 class="font-bold text-sm leading-tight text-gray-900 truncate"><?= e($p['nama']) ?></h3>
-                                        <p class="text-[10px] text-gray-400 font-mono mt-1 truncate"><?= e($p['kode']) ?> · <?= e($p['satuan']) ?></p>
+                                        <h3 class="font-bold text-sm leading-tight text-gray-900 truncate"><?php echo e($p['nama']); ?></h3>
+                                        <p class="text-[10px] text-gray-400 font-mono mt-1 truncate"><?php echo e($p['kode']); ?> &middot; <?php echo e($p['satuan']); ?></p>
                                     </div>
                                     <div class="shrink-0">
                                         <?php if ($p['status'] === 'aktif'): ?>
-                                            <span class="badge-aktif text-[9px] font-bold uppercase px-2 py-1 rounded-full">Aktif</span>
+                                            <span class="badge-aktif text-[9px] font-bold uppercase px-2 py-1">Aktif</span>
                                         <?php else: ?>
-                                            <span class="badge-nonaktif text-[9px] font-bold uppercase px-2 py-1 rounded-full">Nonaktif</span>
+                                            <span class="badge-nonaktif text-[9px] font-bold uppercase px-2 py-1">Nonaktif</span>
                                         <?php endif; ?>
                                     </div>
                                 </div>
                                 <div class="grid grid-cols-2 gap-3 mb-4">
-                                    <div class="border border-subtle bg-gray-50/60 rounded-sm p-3">
+                                    <div class="border border-subtle bg-gray-50 p-3">
                                         <p class="text-[9px] font-bold text-gray-400 uppercase tracking-widest mb-1">Harga Jual</p>
-                                        <p class="text-sm font-black"><?= rupiah($p['harga_jual']) ?></p>
+                                        <p class="text-sm font-black"><?php echo rupiah($p['harga_jual']); ?></p>
                                         <?php if ($margin > 0): ?>
-                                            <p class="text-[9px] text-green-500 font-bold mt-1">+<?= $margin ?>% margin</p>
+                                            <p class="text-[9px] text-green-500 font-bold mt-1">+<?php echo $margin; ?>% margin</p>
                                         <?php endif; ?>
                                     </div>
-                                    <div class="border border-subtle bg-gray-50/60 rounded-sm p-3">
+                                    <div class="border border-subtle bg-gray-50 p-3">
                                         <p class="text-[9px] font-bold text-gray-400 uppercase tracking-widest mb-1">Harga Beli</p>
-                                        <p class="text-sm font-bold text-gray-600"><?= rupiah($p['harga_beli']) ?></p>
+                                        <p class="text-sm font-bold text-gray-600"><?php echo rupiah($p['harga_beli']); ?></p>
                                     </div>
                                 </div>
                                 <div class="mb-4">
                                     <div class="flex items-center justify-between mb-2">
                                         <p class="text-[9px] font-bold text-gray-400 uppercase tracking-widest">Stok</p>
-                                        <span class="text-sm font-black <?= $isHabis ? 'text-red-600' : ($isLow ? 'text-yellow-600' : 'text-gray-900') ?>">
-                                            <?= number_format($p['stok']) ?>
-                                            <span class="text-[9px] text-gray-400 font-normal"><?= e($p['satuan']) ?></span>
+                                        <span class="text-sm font-black <?php echo $isHabis ? 'text-red-600' : ($isLow ? 'text-yellow-600' : 'text-gray-900'); ?>">
+                                            <?php echo number_format($p['stok']); ?>
+                                            <span class="text-[9px] text-gray-400 font-normal"><?php echo e($p['satuan']); ?></span>
                                         </span>
                                     </div>
                                     <div class="stok-bar w-full">
-                                        <div class="stok-bar-fill <?= $stokColor ?>" style="width:<?= $stokPct ?>%"></div>
+                                        <div class="stok-bar-fill <?php echo $stokColor; ?>" style="width:<?php echo $stokPct; ?>%"></div>
                                     </div>
-                                    <p class="text-[9px] text-gray-400 mt-1">Minimum <?= $p['stok_minimum'] ?></p>
+                                    <p class="text-[9px] text-gray-400 mt-1">Minimum <?php echo $p['stok_minimum']; ?></p>
                                 </div>
-                                <div class="flex items-center justify-between gap-2 pt-3 border-t border-subtle">
-                                    <button onclick="openStokModal(<?= $p['id'] ?>, '<?= e(addslashes($p['nama'])) ?>', <?= $p['stok'] ?>)"
-                                        class="flex-1 inline-flex items-center justify-center gap-2 px-3 py-2 text-[10px] font-black uppercase tracking-widest border border-yellow-100 text-yellow-700 hover:bg-yellow-50 rounded-sm transition-all">
+                                <div class="flex items-center gap-2 pt-3 border-t border-subtle">
+                                    <button onclick="openStokModal(<?php echo $p['id']; ?>, '<?php echo e(addslashes($p['nama'])); ?>', <?php echo $p['stok']; ?>)"
+                                        class="flex-1 py-2 text-[10px] font-black uppercase tracking-widest border border-yellow-100 text-yellow-700 hover:bg-yellow-50 transition-all">
                                         Stok
                                     </button>
-                                    <button onclick="editProduk(<?= $p['id'] ?>)"
-                                        class="flex-1 inline-flex items-center justify-center gap-2 px-3 py-2 text-[10px] font-black uppercase tracking-widest border border-blue-100 text-blue-700 hover:bg-blue-50 rounded-sm transition-all">
+                                    <button onclick="editProduk(<?php echo $p['id']; ?>)"
+                                        class="flex-1 py-2 text-[10px] font-black uppercase tracking-widest border border-blue-100 text-blue-700 hover:bg-blue-50 transition-all">
                                         Edit
                                     </button>
-                                    <button onclick="hapusProduk(<?= $p['id'] ?>, '<?= e(addslashes($p['nama'])) ?>')"
-                                        class="flex-1 inline-flex items-center justify-center gap-2 px-3 py-2 text-[10px] font-black uppercase tracking-widest border border-red-100 text-red-700 hover:bg-red-50 rounded-sm transition-all">
+                                    <button onclick="hapusProduk(<?php echo $p['id']; ?>, '<?php echo e(addslashes($p['nama'])); ?>')"
+                                        class="flex-1 py-2 text-[10px] font-black uppercase tracking-widest border border-red-100 text-red-700 hover:bg-red-50 transition-all">
                                         Hapus
                                     </button>
                                 </div>
@@ -726,24 +644,24 @@ catat_view_once($pdo, 'Produk', 'Membuka halaman Produk');
 
             <!-- Pagination -->
             <?php if ($totalPages > 1): ?>
-                <div class="px-4 md:px-5 py-4 border-t border-subtle flex flex-col sm:flex-row gap-3 sm:items-center sm:justify-between bg-gray-50/50">
+                <div class="px-4 md:px-5 py-4 border-t border-subtle flex flex-col sm:flex-row gap-3 sm:items-center sm:justify-between bg-gray-50">
                     <span class="text-xs text-gray-400">
-                        Halaman <?= $page ?> dari <?= $totalPages ?> (<?= number_format($totalRows) ?> total)
+                        Halaman <?php echo $page; ?> dari <?php echo $totalPages; ?> (<?php echo number_format($totalRows); ?> total)
                     </span>
                     <div class="flex flex-wrap gap-2">
                         <?php if ($page > 1): ?>
-                            <a href="?page=<?= $page - 1 ?>&q=<?= urlencode($search) ?>&kat=<?= urlencode($katFilter) ?>&status=<?= urlencode($statusFilter) ?>"
-                                class="px-3 py-1.5 text-xs font-bold border border-subtle rounded-sm hover:bg-white transition-all">← Prev</a>
+                            <a href="?page=<?php echo $page - 1; ?>&q=<?php echo urlencode($search); ?>&kat=<?php echo urlencode($katFilter); ?>&status=<?php echo urlencode($statusFilter); ?>"
+                                class="px-3 py-1.5 text-xs font-bold border border-subtle hover:bg-white transition-all">&larr; Prev</a>
                         <?php endif; ?>
                         <?php for ($pg = max(1, $page - 2); $pg <= min($totalPages, $page + 2); $pg++): ?>
-                            <a href="?page=<?= $pg ?>&q=<?= urlencode($search) ?>&kat=<?= urlencode($katFilter) ?>&status=<?= urlencode($statusFilter) ?>"
-                                class="px-3 py-1.5 text-xs font-bold rounded-sm transition-all <?= $pg === $page ? 'bg-black text-white' : 'border border-subtle hover:bg-white' ?>">
-                                <?= $pg ?>
+                            <a href="?page=<?php echo $pg; ?>&q=<?php echo urlencode($search); ?>&kat=<?php echo urlencode($katFilter); ?>&status=<?php echo urlencode($statusFilter); ?>"
+                                class="px-3 py-1.5 text-xs font-bold transition-all <?php echo $pg === $page ? 'bg-black text-white' : 'border border-subtle hover:bg-white'; ?>">
+                                <?php echo $pg; ?>
                             </a>
                         <?php endfor; ?>
                         <?php if ($page < $totalPages): ?>
-                            <a href="?page=<?= $page + 1 ?>&q=<?= urlencode($search) ?>&kat=<?= urlencode($katFilter) ?>&status=<?= urlencode($statusFilter) ?>"
-                                class="px-3 py-1.5 text-xs font-bold border border-subtle rounded-sm hover:bg-white transition-all">Next →</a>
+                            <a href="?page=<?php echo $page + 1; ?>&q=<?php echo urlencode($search); ?>&kat=<?php echo urlencode($katFilter); ?>&status=<?php echo urlencode($statusFilter); ?>"
+                                class="px-3 py-1.5 text-xs font-bold border border-subtle hover:bg-white transition-all">Next &rarr;</a>
                         <?php endif; ?>
                     </div>
                 </div>
@@ -752,17 +670,15 @@ catat_view_once($pdo, 'Produk', 'Membuka halaman Produk');
 
     </main>
 
-    <!-- ══════════════════════════════════════════════════════════════
-     MODAL: Tambah / Edit Produk
-    ══════════════════════════════════════════════════════════════ -->
-    <div id="modal-produk" class="fixed inset-0 z-[100] bg-black/40 backdrop-blur-sm hidden items-center justify-center p-4" style="display:none!important">
-        <div class="modal-box bg-white w-full max-w-lg rounded-sm md:rounded-2xl shadow-2xl overflow-hidden">
+    <!-- ── MODAL: Tambah / Edit Produk ─────────────────────────────────────── -->
+    <div id="modal-produk" class="fixed inset-0 z-[100] bg-black/40 backdrop-blur-sm items-center justify-center p-4" style="display:none">
+        <div class="bg-white w-full max-w-lg shadow-2xl overflow-hidden">
             <div class="flex items-center justify-between px-5 md:px-7 py-5 border-b border-subtle">
                 <div>
                     <h2 class="text-sm font-black uppercase tracking-widest" id="modal-title">Tambah Produk</h2>
                     <p class="text-[10px] text-gray-400 mt-0.5" id="modal-subtitle">Isi form di bawah dengan benar</p>
                 </div>
-                <button onclick="closeModal()" class="p-2 hover:bg-gray-100 rounded-full transition-colors">
+                <button onclick="closeModal()" class="p-2 hover:bg-gray-100 transition-colors">
                     <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
                     </svg>
@@ -774,11 +690,11 @@ catat_view_once($pdo, 'Produk', 'Membuka halaman Produk');
                     <div>
                         <label class="block text-[10px] font-bold uppercase tracking-widest text-gray-500 mb-1.5">Kode Produk *</label>
                         <input type="text" id="form-kode" placeholder="contoh: 899100111001"
-                            class="w-full bg-gray-50 border border-gray-200 rounded-lg px-3 py-2.5 text-sm font-mono transition-all">
+                            class="w-full bg-gray-50 border border-gray-200 px-3 py-2.5 text-sm font-mono transition-all">
                     </div>
                     <div>
                         <label class="block text-[10px] font-bold uppercase tracking-widest text-gray-500 mb-1.5">Satuan</label>
-                        <select id="form-satuan" class="w-full bg-gray-50 border border-gray-200 rounded-lg px-3 py-2.5 text-sm transition-all">
+                        <select id="form-satuan" class="w-full bg-gray-50 border border-gray-200 px-3 py-2.5 text-sm transition-all">
                             <option value="pcs">pcs</option>
                             <option value="botol">botol</option>
                             <option value="kotak">kotak</option>
@@ -793,20 +709,18 @@ catat_view_once($pdo, 'Produk', 'Membuka halaman Produk');
                 <div>
                     <label class="block text-[10px] font-bold uppercase tracking-widest text-gray-500 mb-1.5">Nama Produk *</label>
                     <input type="text" id="form-nama" placeholder="Nama lengkap produk"
-                        class="w-full bg-gray-50 border border-gray-200 rounded-lg px-3 py-2.5 text-sm transition-all">
+                        class="w-full bg-gray-50 border border-gray-200 px-3 py-2.5 text-sm transition-all">
                 </div>
                 <div>
                     <label class="block text-[10px] font-bold uppercase tracking-widest text-gray-500 mb-1.5">Kategori</label>
-                    <div class="flex gap-2">
-                        <input type="text" id="form-kategori" placeholder="Minuman, Snack, Sembako..."
-                            list="kat-list"
-                            class="flex-1 bg-gray-50 border border-gray-200 rounded-lg px-3 py-2.5 text-sm transition-all">
-                        <datalist id="kat-list">
-                            <?php foreach ($kategoriList as $k): ?>
-                                <option value="<?= e($k) ?>">
-                                <?php endforeach; ?>
-                        </datalist>
-                    </div>
+                    <input type="text" id="form-kategori" placeholder="Minuman, Snack, Sembako..."
+                        list="kat-list"
+                        class="w-full bg-gray-50 border border-gray-200 px-3 py-2.5 text-sm transition-all">
+                    <datalist id="kat-list">
+                        <?php foreach ($kategoriList as $k): ?>
+                            <option value="<?php echo e($k); ?>">
+                            <?php endforeach; ?>
+                    </datalist>
                 </div>
                 <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
                     <div>
@@ -814,7 +728,7 @@ catat_view_once($pdo, 'Produk', 'Membuka halaman Produk');
                         <div class="relative">
                             <span class="absolute left-3 top-1/2 -translate-y-1/2 text-xs text-gray-400 font-bold">Rp</span>
                             <input type="number" id="form-harga-beli" placeholder="0" min="0"
-                                class="w-full bg-gray-50 border border-gray-200 rounded-lg pl-9 pr-3 py-2.5 text-sm transition-all">
+                                class="w-full bg-gray-50 border border-gray-200 pl-9 pr-3 py-2.5 text-sm transition-all">
                         </div>
                     </div>
                     <div>
@@ -822,7 +736,7 @@ catat_view_once($pdo, 'Produk', 'Membuka halaman Produk');
                         <div class="relative">
                             <span class="absolute left-3 top-1/2 -translate-y-1/2 text-xs text-gray-400 font-bold">Rp</span>
                             <input type="number" id="form-harga-jual" placeholder="0" min="0"
-                                class="w-full bg-gray-50 border border-gray-200 rounded-lg pl-9 pr-3 py-2.5 text-sm transition-all">
+                                class="w-full bg-gray-50 border border-gray-200 pl-9 pr-3 py-2.5 text-sm transition-all">
                         </div>
                         <p class="text-[9px] text-green-500 font-bold mt-1" id="margin-info"></p>
                     </div>
@@ -831,12 +745,12 @@ catat_view_once($pdo, 'Produk', 'Membuka halaman Produk');
                     <div>
                         <label class="block text-[10px] font-bold uppercase tracking-widest text-gray-500 mb-1.5">Stok Awal</label>
                         <input type="number" id="form-stok" placeholder="0" min="0"
-                            class="w-full bg-gray-50 border border-gray-200 rounded-lg px-3 py-2.5 text-sm transition-all">
+                            class="w-full bg-gray-50 border border-gray-200 px-3 py-2.5 text-sm transition-all">
                     </div>
                     <div>
                         <label class="block text-[10px] font-bold uppercase tracking-widest text-gray-500 mb-1.5">Stok Minimum</label>
                         <input type="number" id="form-stok-min" placeholder="5" min="0"
-                            class="w-full bg-gray-50 border border-gray-200 rounded-lg px-3 py-2.5 text-sm transition-all">
+                            class="w-full bg-gray-50 border border-gray-200 px-3 py-2.5 text-sm transition-all">
                         <p class="text-[9px] text-gray-400 mt-1">Batas peringatan stok limit</p>
                     </div>
                 </div>
@@ -854,89 +768,55 @@ catat_view_once($pdo, 'Produk', 'Membuka halaman Produk');
                     </div>
                 </div>
             </div>
-            <div class="px-5 md:px-7 py-5 border-t border-subtle bg-gray-50/50 flex gap-3">
-                <button onclick="closeModal()" class="flex-1 py-3 text-xs font-bold uppercase border border-subtle rounded-sm hover:bg-white transition-all">
-                    Batal
-                </button>
+            <div class="px-5 md:px-7 py-5 border-t border-subtle bg-gray-50 flex gap-3">
+                <button onclick="closeModal()" class="flex-1 py-3 text-xs font-bold uppercase border border-subtle hover:bg-white transition-all">Batal</button>
                 <button onclick="simpanProduk()" id="btn-simpan"
-                    class="flex-1 py-3 text-xs font-bold uppercase bg-black text-white rounded-sm hover:bg-gray-800 transition-all">
-                    Simpan
-                </button>
+                    class="flex-1 py-3 text-xs font-bold uppercase bg-black text-white hover:bg-gray-800 transition-all">Simpan</button>
             </div>
         </div>
     </div>
 
-    <!-- ══════════════════════════════════════════════════════════════
-     MODAL: Update Stok Cepat
-    ══════════════════════════════════════════════════════════════ -->
-    <div id="modal-stok" class="fixed inset-0 z-[100] bg-black/40 backdrop-blur-sm hidden items-center justify-center p-4" style="display:none!important">
-        <div class="modal-box bg-white w-full max-w-sm rounded-sm md:rounded-2xl shadow-2xl overflow-hidden">
+    <!-- ── MODAL: Update Stok ───────────────────────────────────────────────── -->
+    <div id="modal-stok" class="fixed inset-0 z-[100] bg-black/40 backdrop-blur-sm items-center justify-center p-4" style="display:none">
+        <div class="bg-white w-full max-w-sm shadow-2xl overflow-hidden">
             <div class="px-7 py-5 border-b border-subtle">
                 <h2 class="text-sm font-black uppercase tracking-widest">Update Stok</h2>
-                <p class="text-xs text-gray-500 mt-0.5 font-medium" id="stok-nama-label">—</p>
+                <p class="text-xs text-gray-500 mt-0.5 font-medium" id="stok-nama-label">&mdash;</p>
             </div>
             <div class="px-7 py-6 space-y-4">
                 <input type="hidden" id="stok-id">
                 <div>
                     <label class="block text-[10px] font-bold uppercase tracking-widest text-gray-500 mb-1.5">Jumlah Stok Baru</label>
                     <input type="number" id="stok-baru" min="0"
-                        class="w-full bg-gray-50 border border-gray-200 rounded-lg px-4 py-3 text-lg font-bold text-center transition-all">
+                        class="w-full bg-gray-50 border border-gray-200 px-4 py-3 text-lg font-bold text-center transition-all">
                 </div>
                 <div class="flex gap-2">
                     <?php foreach ([5, 10, 20, 50] as $jml): ?>
-                        <button onclick="document.getElementById('stok-baru').value = <?= $jml ?>"
-                            class="flex-1 py-2 text-xs font-bold border border-subtle rounded-sm hover:bg-gray-100 transition-all">
-                            +<?= $jml ?>
+                        <button onclick="document.getElementById('stok-baru').value = <?php echo $jml; ?>"
+                            class="flex-1 py-2 text-xs font-bold border border-subtle hover:bg-gray-100 transition-all">
+                            +<?php echo $jml; ?>
                         </button>
                     <?php endforeach; ?>
                 </div>
             </div>
-            <div class="px-7 py-5 border-t border-subtle bg-gray-50/50 flex gap-3">
-                <button onclick="closeStokModal()" class="flex-1 py-3 text-xs font-bold uppercase border border-subtle rounded-sm hover:bg-white transition-all">
-                    Batal
-                </button>
-                <button onclick="simpanStok()" class="flex-1 py-3 text-xs font-bold uppercase bg-yellow-500 text-white rounded-sm hover:bg-yellow-600 transition-all">
-                    Update Stok
-                </button>
+            <div class="px-7 py-5 border-t border-subtle bg-gray-50 flex gap-3">
+                <button onclick="closeStokModal()" class="flex-1 py-3 text-xs font-bold uppercase border border-subtle hover:bg-white transition-all">Batal</button>
+                <button onclick="simpanStok()" class="flex-1 py-3 text-xs font-bold uppercase bg-yellow-500 text-white hover:bg-yellow-600 transition-all">Update Stok</button>
             </div>
         </div>
     </div>
 
-    <!-- Toast Notification -->
-    <div id="toast" class="fixed bottom-6 right-6 z-[200] flex items-center gap-3 bg-gray-900 text-white px-5 py-3 rounded-xl shadow-2xl pointer-events-none">
+    <!-- Toast -->
+    <div id="toast" class="fixed bottom-6 right-6 z-[200] flex items-center gap-3 bg-gray-900 text-white px-5 py-3 shadow-2xl pointer-events-none">
         <span id="toast-icon"></span>
         <span id="toast-msg" class="text-sm font-medium"></span>
     </div>
+
     <script>
-        function toggleMobileMenu() {
-            const overlay = document.getElementById('mobileMenuOverlay');
-            const content = document.getElementById('mobileMenuContent');
-            if (!overlay || !content) return;
-            if (overlay.classList.contains('invisible')) {
-                overlay.classList.remove('invisible');
-                overlay.classList.add('opacity-100');
-                content.classList.remove('translate-x-full');
-            } else {
-                overlay.classList.add('invisible');
-                overlay.classList.remove('opacity-100');
-                content.classList.add('translate-x-full');
-            }
-        }
+        var editMode = false;
 
-        document.addEventListener('DOMContentLoaded', function() {
-            const overlay = document.getElementById('mobileMenuOverlay');
-            if (overlay) {
-                overlay.addEventListener('click', function(e) {
-                    if (e.target === this) toggleMobileMenu();
-                });
-            }
-        });
-
-        // ── State ──────────────────────────────────────────────────────────────────
-        let editMode = false;
-
-        // ── Live Search + Filter ───────────────────────────────────────────────────
-        let searchTimer;
+        // ── Live Filter ─────────────────────────────────────────────────────────────
+        var searchTimer;
         document.getElementById('search-input').addEventListener('input', function() {
             clearTimeout(searchTimer);
             searchTimer = setTimeout(applyFilter, 400);
@@ -945,19 +825,17 @@ catat_view_once($pdo, 'Produk', 'Membuka halaman Produk');
         document.getElementById('filter-status').addEventListener('change', applyFilter);
 
         function applyFilter() {
-            const q = document.getElementById('search-input').value;
-            const kat = document.getElementById('filter-kat').value;
-            const status = document.getElementById('filter-status').value;
-            const url = new URL(window.location.href);
-            url.searchParams.set('q', q);
-            url.searchParams.set('kat', kat);
-            url.searchParams.set('status', status);
+            var url = new URL(window.location.href);
+            url.searchParams.set('q', document.getElementById('search-input').value);
+            url.searchParams.set('kat', document.getElementById('filter-kat').value);
+            url.searchParams.set('status', document.getElementById('filter-status').value);
             url.searchParams.set('page', '1');
             window.location.href = url.toString();
         }
 
-        // ── Modal Produk ───────────────────────────────────────────────────────────
-        function openModal(mode = 'tambah') {
+        // ── Modal Produk ─────────────────────────────────────────────────────────────
+        function openModal(mode) {
+            mode = mode || 'tambah';
             editMode = mode === 'edit';
             document.getElementById('modal-title').innerText = editMode ? 'Edit Produk' : 'Tambah Produk';
             document.getElementById('modal-subtitle').innerText = editMode ? 'Ubah data produk di bawah' : 'Isi form di bawah dengan benar';
@@ -970,7 +848,7 @@ catat_view_once($pdo, 'Produk', 'Membuka halaman Produk');
         }
 
         function resetForm() {
-            ['form-id', 'form-kode', 'form-nama', 'form-kategori', 'form-harga-beli', 'form-harga-jual', 'form-stok', 'form-stok-min'].forEach(id => {
+            ['form-id', 'form-kode', 'form-nama', 'form-kategori', 'form-harga-beli', 'form-harga-jual', 'form-stok', 'form-stok-min'].forEach(function(id) {
                 document.getElementById(id).value = '';
             });
             document.getElementById('form-satuan').value = 'pcs';
@@ -980,15 +858,15 @@ catat_view_once($pdo, 'Produk', 'Membuka halaman Produk');
 
         async function editProduk(id) {
             try {
-                const res = await fetch(`produk.php?action=get&id=${id}`, {
+                var res = await fetch('produk.php?action=get&id=' + id, {
                     method: 'POST'
                 });
-                const data = await res.json();
+                var data = await res.json();
                 if (!data.success) {
                     showToast(data.message, 'error');
                     return;
                 }
-                const p = data.data;
+                var p = data.data;
                 document.getElementById('form-id').value = p.id;
                 document.getElementById('form-kode').value = p.kode;
                 document.getElementById('form-nama').value = p.nama;
@@ -998,7 +876,7 @@ catat_view_once($pdo, 'Produk', 'Membuka halaman Produk');
                 document.getElementById('form-stok').value = p.stok;
                 document.getElementById('form-stok-min').value = p.stok_minimum;
                 document.getElementById('form-satuan').value = p.satuan;
-                document.querySelector(`input[name="form-status"][value="${p.status}"]`).checked = true;
+                document.querySelector('input[name="form-status"][value="' + p.status + '"]').checked = true;
                 hitungMargin();
                 openModal('edit');
             } catch (e) {
@@ -1007,13 +885,13 @@ catat_view_once($pdo, 'Produk', 'Membuka halaman Produk');
         }
 
         async function simpanProduk() {
-            const id = document.getElementById('form-id').value;
-            const action = id ? 'edit' : 'tambah';
-            const btn = document.getElementById('btn-simpan');
+            var id = document.getElementById('form-id').value;
+            var action = id ? 'edit' : 'tambah';
+            var btn = document.getElementById('btn-simpan');
             btn.disabled = true;
             btn.innerHTML = '<span class="spinner"></span>';
 
-            const payload = {
+            var payload = {
                 id: id || undefined,
                 kode: document.getElementById('form-kode').value.trim(),
                 nama: document.getElementById('form-nama').value.trim(),
@@ -1027,18 +905,20 @@ catat_view_once($pdo, 'Produk', 'Membuka halaman Produk');
             };
 
             try {
-                const res = await fetch(`produk.php?action=${action}`, {
+                var res = await fetch('produk.php?action=' + action, {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json'
                     },
                     body: JSON.stringify(payload)
                 });
-                const data = await res.json();
+                var data = await res.json();
                 if (data.success) {
                     showToast(data.message, 'success');
                     closeModal();
-                    setTimeout(() => location.reload(), 800);
+                    setTimeout(function() {
+                        location.reload();
+                    }, 800);
                 } else {
                     showToast(data.message, 'error');
                 }
@@ -1051,21 +931,23 @@ catat_view_once($pdo, 'Produk', 'Membuka halaman Produk');
         }
 
         async function hapusProduk(id, nama) {
-            if (!confirm(`Hapus produk "${nama}"?\n\nJika pernah ada di transaksi, produk akan dinonaktifkan.`)) return;
+            if (!confirm('Hapus produk "' + nama + '"?\n\nJika pernah ada di transaksi, produk akan dinonaktifkan.')) return;
             try {
-                const res = await fetch('produk.php?action=hapus', {
+                var res = await fetch('produk.php?action=hapus', {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json'
                     },
                     body: JSON.stringify({
-                        id
+                        id: id
                     })
                 });
-                const data = await res.json();
+                var data = await res.json();
                 if (data.success) {
                     showToast(data.message, 'success');
-                    setTimeout(() => location.reload(), 800);
+                    setTimeout(function() {
+                        location.reload();
+                    }, 800);
                 } else {
                     showToast(data.message, 'error');
                 }
@@ -1074,13 +956,15 @@ catat_view_once($pdo, 'Produk', 'Membuka halaman Produk');
             }
         }
 
-        // ── Modal Stok Cepat ───────────────────────────────────────────────────────
+        // ── Modal Stok ───────────────────────────────────────────────────────────────
         function openStokModal(id, nama, stokSekarang) {
             document.getElementById('stok-id').value = id;
             document.getElementById('stok-nama-label').innerText = nama;
             document.getElementById('stok-baru').value = stokSekarang;
             document.getElementById('modal-stok').style.display = 'flex';
-            setTimeout(() => document.getElementById('stok-baru').select(), 100);
+            setTimeout(function() {
+                document.getElementById('stok-baru').select();
+            }, 100);
         }
 
         function closeStokModal() {
@@ -1088,28 +972,30 @@ catat_view_once($pdo, 'Produk', 'Membuka halaman Produk');
         }
 
         async function simpanStok() {
-            const id = document.getElementById('stok-id').value;
-            const stok = document.getElementById('stok-baru').value;
+            var id = document.getElementById('stok-id').value;
+            var stok = document.getElementById('stok-baru').value;
             if (stok === '' || stok < 0) {
                 showToast('Masukkan jumlah stok yang valid.', 'error');
                 return;
             }
             try {
-                const res = await fetch('produk.php?action=update_stok', {
+                var res = await fetch('produk.php?action=update_stok', {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json'
                     },
                     body: JSON.stringify({
-                        id,
+                        id: id,
                         stok: parseInt(stok)
                     })
                 });
-                const data = await res.json();
+                var data = await res.json();
                 if (data.success) {
                     showToast(data.message, 'success');
                     closeStokModal();
-                    setTimeout(() => location.reload(), 800);
+                    setTimeout(function() {
+                        location.reload();
+                    }, 800);
                 } else {
                     showToast(data.message, 'error');
                 }
@@ -1118,15 +1004,15 @@ catat_view_once($pdo, 'Produk', 'Membuka halaman Produk');
             }
         }
 
-        // ── Hitung Margin ──────────────────────────────────────────────────────────
+        // ── Hitung Margin ────────────────────────────────────────────────────────────
         function hitungMargin() {
-            const beli = parseInt(document.getElementById('form-harga-beli').value || 0);
-            const jual = parseInt(document.getElementById('form-harga-jual').value || 0);
-            const info = document.getElementById('margin-info');
+            var beli = parseInt(document.getElementById('form-harga-beli').value || 0);
+            var jual = parseInt(document.getElementById('form-harga-jual').value || 0);
+            var info = document.getElementById('margin-info');
             if (beli > 0 && jual > 0) {
-                const margin = Math.round((jual - beli) / jual * 100);
-                info.innerText = margin >= 0 ? `Margin: +${margin}%` : `Margin: ${margin}% (rugi)`;
-                info.className = `text-[9px] font-bold mt-1 ${margin >= 0 ? 'text-green-500' : 'text-red-500'}`;
+                var margin = Math.round((jual - beli) / jual * 100);
+                info.innerText = margin >= 0 ? 'Margin: +' + margin + '%' : 'Margin: ' + margin + '% (rugi)';
+                info.className = 'text-[9px] font-bold mt-1 ' + (margin >= 0 ? 'text-green-500' : 'text-red-500');
             } else {
                 info.innerText = '';
             }
@@ -1134,22 +1020,25 @@ catat_view_once($pdo, 'Produk', 'Membuka halaman Produk');
         document.getElementById('form-harga-beli').addEventListener('input', hitungMargin);
         document.getElementById('form-harga-jual').addEventListener('input', hitungMargin);
 
-        // ── Toast ──────────────────────────────────────────────────────────────────
-        let toastTimer;
+        // ── Toast ────────────────────────────────────────────────────────────────────
+        var toastTimer;
 
-        function showToast(msg, type = 'success') {
-            const toast = document.getElementById('toast');
-            const icon = document.getElementById('toast-icon');
+        function showToast(msg, type) {
+            type = type || 'success';
+            var toast = document.getElementById('toast');
+            var icon = document.getElementById('toast-icon');
             document.getElementById('toast-msg').innerText = msg;
             icon.innerHTML = type === 'success' ?
                 '<svg class="w-4 h-4 text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 13l4 4L19 7"/></svg>' :
                 '<svg class="w-4 h-4 text-red-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>';
             toast.classList.add('show');
             clearTimeout(toastTimer);
-            toastTimer = setTimeout(() => toast.classList.remove('show'), 3000);
+            toastTimer = setTimeout(function() {
+                toast.classList.remove('show');
+            }, 3000);
         }
 
-        // ── Close modal on overlay click ───────────────────────────────────────────
+        // ── Close on overlay click ───────────────────────────────────────────────────
         document.getElementById('modal-produk').addEventListener('click', function(e) {
             if (e.target === this) closeModal();
         });

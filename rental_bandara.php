@@ -1,6 +1,7 @@
 <?php
 session_start();
 require_once 'config.php';
+requireAccess();
 require_once 'activity_helper.php';
 
 $activeMenu = 'rental';

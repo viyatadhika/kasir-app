@@ -1,12 +1,17 @@
 <?php
 /*
 |--------------------------------------------------------------------------
-| sidebar.php — Compatible PHP 7 & 8
+| sidebar.php — Role-Based Menu Filter, Compatible PHP 7 & 8
 |--------------------------------------------------------------------------
 */
 
 if (session_status() === PHP_SESSION_NONE) {
     session_start();
+}
+
+// Load RBAC helper jika belum di-include
+if (!function_exists('canSeeMenu')) {
+    require_once __DIR__ . '/config_roles.php';
 }
 
 if (!isset($activeMenu)) {
@@ -28,13 +33,9 @@ if (!isset($activeMenu)) {
     $activeMenu = isset($map[$file]) ? $map[$file] : '';
 }
 
-// ── Helper — tanpa type hint agar kompatibel PHP 7 ──────────────────────────
+// ── Helper ───────────────────────────────────────────────────────────────
 if (!function_exists('sidebar_h')) {
-    /**
-     * @param  mixed  $v
-     * @return string
-     */
-    function sidebar_h($v)
+    function sidebar_h(string $v): string
     {
         return htmlspecialchars((string)(isset($v) ? $v : ''), ENT_QUOTES, 'UTF-8');
     }
@@ -44,7 +45,10 @@ $loginNama = isset($_SESSION['nama'])
     ? $_SESSION['nama']
     : (isset($_SESSION['user']['nama']) ? $_SESSION['user']['nama'] : '-');
 
-$menus = [
+$currentRole = getCurrentRole();
+
+// ── Semua menu yang mungkin ada ───────────────────────────────────────────
+$allMenus = [
     ['key' => 'dashboard', 'href' => 'dashboard.php',      'label' => 'Dashboard'],
     ['key' => 'pos',       'href' => 'pos.php',            'label' => 'Mesin Kasir (POS)'],
     ['key' => 'produk',    'href' => 'produk.php',         'label' => 'Kelola Produk'],
@@ -55,6 +59,21 @@ $menus = [
     ['key' => 'laporan',   'href' => 'laporan.php',        'label' => 'Laporan Keuangan'],
     ['key' => 'log',       'href' => 'log_aktivitas.php',  'label' => 'Log Aktivitas'],
 ];
+
+// ── Filter menu berdasarkan role ──────────────────────────────────────────
+$menus = array_values(array_filter($allMenus, function ($menu) use ($currentRole) {
+    return canSeeMenu($currentRole, $menu['key']);
+}));
+
+// ── Label badge role ──────────────────────────────────────────────────────
+$roleBadge = [
+    'admin'  => ['label' => 'Admin',  'color' => 'bg-black text-white'],
+    'kasir'  => ['label' => 'Kasir',  'color' => 'bg-blue-100 text-blue-700'],
+    'rental' => ['label' => 'Rental', 'color' => 'bg-purple-100 text-purple-700'],
+];
+$badge = isset($roleBadge[$currentRole])
+    ? $roleBadge[$currentRole]
+    : ['label' => strtoupper($currentRole), 'color' => 'bg-gray-100 text-gray-600'];
 ?>
 
 <style>
@@ -211,10 +230,14 @@ $menus = [
         </nav>
 
         <div class="px-6 py-5 border-t border-gray-100">
-            <p class="text-[10px] text-gray-400 font-medium uppercase">Login</p>
+            <p class="text-[10px] text-gray-400 font-medium uppercase">Login sebagai</p>
             <p class="text-xs font-bold text-gray-700 mt-1 truncate">
                 <?php echo sidebar_h($loginNama); ?>
             </p>
+            <!-- Badge role -->
+            <span class="inline-block mt-2 px-2 py-0.5 text-[9px] font-black uppercase tracking-widest rounded-sm <?php echo sidebar_h($badge['color']); ?>">
+                <?php echo sidebar_h($badge['label']); ?>
+            </span>
             <a href="logout.php"
                 onclick="return confirm('Yakin mau logout?')"
                 class="block mt-4 text-[10px] text-red-500 hover:text-red-700 uppercase font-bold tracking-widest">
@@ -245,8 +268,12 @@ $menus = [
 
     <div class="mt-auto pt-6 border-t border-gray-100">
         <p class="text-[10px] text-gray-400 font-medium truncate mt-1">
-            Login: <?php echo sidebar_h($loginNama); ?>
+            <?php echo sidebar_h($loginNama); ?>
         </p>
+        <!-- Badge role -->
+        <span class="inline-block mt-1 px-2 py-0.5 text-[9px] font-black uppercase tracking-widest rounded-sm <?php echo sidebar_h($badge['color']); ?>">
+            <?php echo sidebar_h($badge['label']); ?>
+        </span>
         <a href="logout.php"
             onclick="return confirm('Yakin mau logout?')"
             class="block mt-4 text-[10px] text-red-500 hover:text-red-700 uppercase font-bold tracking-widest">
