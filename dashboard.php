@@ -20,6 +20,58 @@ if (!function_exists('formatRp')) {
     }
 }
 
+if (!function_exists('dashboard_pinjaman_status_label')) {
+    function dashboard_pinjaman_status_label(string $status): string
+    {
+        $status = strtolower(trim((string)$status));
+
+        if ($status === '') {
+            return 'Batal Pengajuan';
+        }
+
+        $map = [
+            'pending' => 'Pending',
+            'diseleksi' => 'Diseleksi',
+            'diproses' => 'Diproses',
+            'disetujui' => 'Disetujui',
+            'ditolak' => 'Ditolak',
+            'dibatalkan' => 'Batal Pengajuan',
+            'dicairkan' => 'Dicairkan',
+            'aktif' => 'Aktif',
+            'berjalan' => 'Aktif',
+            'lunas' => 'Lunas',
+        ];
+
+        return $map[$status] ?? ucfirst($status);
+    }
+}
+
+if (!function_exists('dashboard_pinjaman_status_class')) {
+    function dashboard_pinjaman_status_class(string $status): string
+    {
+        $status = strtolower(trim((string)$status));
+
+        if ($status === 'pending') {
+            return 'bg-amber-50 text-amber-700 border-amber-200';
+        }
+
+        if (in_array($status, ['diseleksi', 'diproses'], true)) {
+            return 'bg-blue-50 text-blue-700 border-blue-200';
+        }
+
+        if (in_array($status, ['disetujui', 'dicairkan', 'aktif', 'berjalan', 'lunas'], true)) {
+            return 'bg-green-50 text-green-700 border-green-200';
+        }
+
+        if (in_array($status, ['ditolak', 'dibatalkan', ''], true)) {
+            return 'bg-red-50 text-red-700 border-red-200';
+        }
+
+        return 'bg-gray-50 text-gray-700 border-gray-200';
+    }
+}
+
+
 $activeMenu  = 'dashboard';
 $pageTitle   = 'Dashboard';
 $backUrl     = '';
@@ -44,6 +96,7 @@ $kspPengajuanSummary = [
     'diseleksi' => 0,
     'disetujui' => 0,
     'ditolak' => 0,
+    'dibatalkan' => 0,
     'dicairkan' => 0,
 ];
 $kspTotalPengajuanNilai = 0;
@@ -287,14 +340,19 @@ if (has_role('ksp', 'admin')) {
             GROUP BY status
         ");
         foreach ($stmtKspStatus->fetchAll(PDO::FETCH_ASSOC) as $row) {
-            $st = (string)($row['status'] ?? '');
+            $st = strtolower(trim((string)($row['status'] ?? '')));
+            if ($st === '') {
+                $st = 'dibatalkan';
+            }
+
             if (array_key_exists($st, $kspPengajuanSummary)) {
                 $kspPengajuanSummary[$st] = (int)$row['total'];
             }
+
             $kspTotalPengajuanNilai += (float)($row['nilai'] ?? 0);
         }
     } catch (Throwable $e) {
-        $kspPengajuanSummary = ['pending' => 0, 'diseleksi' => 0, 'disetujui' => 0, 'ditolak' => 0, 'dicairkan' => 0];
+        $kspPengajuanSummary = ['pending' => 0, 'diseleksi' => 0, 'disetujui' => 0, 'ditolak' => 0, 'dibatalkan' => 0, 'dicairkan' => 0];
         $kspTotalPengajuanNilai = 0;
     }
 
@@ -314,7 +372,7 @@ if (has_role('ksp', 'admin')) {
     try {
         $stmtKspJatuh = $pdo->prepare("
             SELECT COUNT(*) AS total, COALESCE(SUM(jumlah_total), 0) AS nilai
-            FROM pinjaman_angsuran
+            FROM angsuran_pinjaman
             WHERE status IN ('belum_bayar', 'pending', 'menunggak')
               AND jatuh_tempo <= DATE_ADD(:today, INTERVAL 7 DAY)
         ");
@@ -329,7 +387,7 @@ if (has_role('ksp', 'admin')) {
             SELECT pp.*, m.nama AS member_nama, m.kode AS member_kode
             FROM pengajuan_pinjaman pp
             LEFT JOIN member m ON m.id = pp.member_id
-            ORDER BY pp.created_at DESC, pp.id DESC
+            ORDER BY FIELD(COALESCE(NULLIF(pp.status, ''), 'dibatalkan'), 'pending', 'diseleksi', 'disetujui', 'ditolak', 'dibatalkan', 'dicairkan'), pp.created_at DESC, pp.id DESC
             LIMIT 6
         ");
         $kspPengajuanTerbaru = $stmtKspTerbaru->fetchAll(PDO::FETCH_ASSOC);
@@ -397,6 +455,86 @@ $title = 'Dashboard - ' . ($_SESSION['nama'] ?? 'SEJAHUB');
             -ms-overflow-style: none;
             scrollbar-width: none;
         }
+
+        .dashboard-role-section {
+            margin-top: 56px;
+            padding-top: 48px;
+            border-top: 1px solid #f0f0f0;
+        }
+
+        .dashboard-role-section:first-of-type {
+            margin-top: 0;
+            padding-top: 0;
+            border-top: 0;
+        }
+
+        .dashboard-section-title {
+            margin-bottom: 24px;
+        }
+
+        .dashboard-kpi-block {
+            margin-bottom: 56px;
+        }
+
+        @media (max-width: 768px) {
+            .dashboard-role-section {
+                margin-top: 40px;
+                padding-top: 32px;
+            }
+
+            .dashboard-kpi-block {
+                margin-bottom: 40px;
+            }
+        }
+
+
+        /* Mobile dashboard action buttons */
+        .dashboard-action-wrap {
+            display: flex;
+            gap: 8px;
+            align-items: stretch;
+            flex-wrap: nowrap;
+            overflow-x: auto;
+            padding-bottom: 2px;
+        }
+
+        .dashboard-action-btn {
+            min-width: 142px;
+            height: 56px;
+            padding: 0 14px;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            text-align: center;
+            line-height: 1.15;
+            white-space: normal;
+        }
+
+        .dashboard-action-btn svg {
+            width: 14px;
+            height: 14px;
+            flex-shrink: 0;
+        }
+
+        @media (max-width: 640px) {
+            .dashboard-action-wrap {
+                display: grid;
+                grid-template-columns: 1fr;
+                gap: 6px;
+                overflow: visible;
+                width: 100%;
+            }
+
+            .dashboard-action-btn {
+                width: 100%;
+                min-width: 0;
+                height: 42px;
+                padding: 0 10px;
+                font-size: 9px;
+                letter-spacing: .04em;
+            }
+        }
     </style>
 </head>
 
@@ -425,29 +563,29 @@ $title = 'Dashboard - ' . ($_SESSION['nama'] ?? 'SEJAHUB');
             </div>
 
             <!-- Tombol aksi sesuai role -->
-            <div class="w-full md:w-auto flex gap-2">
+            <div class="dashboard-action-wrap w-full md:w-auto">
                 <?php if (has_role('admin', 'kasir')): ?>
-                    <a href="pos.php" class="inline-flex w-full md:w-auto justify-center text-xs font-bold bg-black text-white px-6 py-3 hover:bg-gray-800 transition-all items-center gap-2 rounded-sm shadow-sm">
+                    <a href="pos.php" class="dashboard-action-btn text-xs font-bold bg-black text-white hover:bg-gray-800 transition-all rounded-sm shadow-sm">
                         <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                             <path stroke-width="2" d="M12 4v16m8-8H4" />
                         </svg>
-                        MESIN KASIR (POS)
+                        <span>MESIN KASIR<br class="sm:hidden">(POS)</span>
                     </a>
                 <?php endif; ?>
                 <?php if (has_role('admin', 'rental')): ?>
-                    <a href="rental_bandara.php" class="inline-flex w-full md:w-auto justify-center text-xs font-bold bg-black text-white px-6 py-3 hover:bg-gray-800 transition-all items-center gap-2 rounded-sm shadow-sm">
+                    <a href="rental_bandara.php" class="dashboard-action-btn text-xs font-bold bg-black text-white hover:bg-gray-800 transition-all rounded-sm shadow-sm">
                         <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                             <path stroke-width="2" d="M12 4v16m8-8H4" />
                         </svg>
-                        RENTAL BANDARA
+                        <span>RENTAL<br class="sm:hidden">BANDARA</span>
                     </a>
                 <?php endif; ?>
                 <?php if (has_role('admin', 'ksp')): ?>
-                    <a href="pinjaman.php" class="inline-flex w-full md:w-auto justify-center text-xs font-bold bg-black text-white px-6 py-3 hover:bg-gray-800 transition-all items-center gap-2 rounded-sm shadow-sm">
+                    <a href="pinjaman.php" class="dashboard-action-btn text-xs font-bold bg-black text-white hover:bg-gray-800 transition-all rounded-sm shadow-sm">
                         <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                             <path stroke-width="2" d="M12 4v16m8-8H4" />
                         </svg>
-                        PENGAJUAN PINJAMAN
+                        <span>PENGAJUAN<br class="sm:hidden">PINJAMAN</span>
                     </a>
                 <?php endif; ?>
             </div>
@@ -458,444 +596,459 @@ $title = 'Dashboard - ' . ($_SESSION['nama'] ?? 'SEJAHUB');
             <!-- ════════════════════════════════════════════════════════════════════ -->
             <!-- KONTEN ADMIN & KASIR                                                -->
             <!-- ════════════════════════════════════════════════════════════════════ -->
+            <section class="dashboard-role-section">
 
-            <!-- KPI Cards -->
-            <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-6 md:gap-8 mb-8 md:mb-12 border-b border-subtle pb-8 md:pb-12">
+                <!-- KPI Cards -->
+                <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-6 md:gap-8 dashboard-kpi-block border-b border-subtle pb-10 md:pb-14">
 
-                <div class="py-2 border-b sm:border-b-0 border-subtle pb-4 sm:pb-0">
-                    <p class="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1">Total Sales (Nett)</p>
-                    <p class="text-2xl md:text-3xl font-medium text-blue-600">
-                        <?php echo formatRp($ringkasan['total_sales']); ?>
-                    </p>
-                    <span class="text-[10px] font-bold text-gray-400 bg-gray-50 px-2 py-0.5 mt-2 inline-block italic">Target: Rp 12Jt</span>
-                </div>
-
-                <div class="py-2 border-b sm:border-b-0 border-subtle pb-4 sm:pb-0">
-                    <p class="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1">Jumlah Struk</p>
-                    <p class="text-2xl md:text-3xl font-medium">
-                        <?php echo number_format($ringkasan['jumlah_struk']); ?>
-                        <span class="text-sm text-gray-300 font-bold">INV</span>
-                    </p>
-                    <span class="text-[10px] font-bold text-green-600 bg-green-50 px-2 py-0.5 mt-2 inline-block">
-                        Avg: <?php echo formatRp($avgStruk); ?>
-                    </span>
-                </div>
-
-                <div class="py-2 sm:col-span-2 md:col-span-1">
-                    <p class="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1">Stok Limit</p>
-                    <p class="text-2xl md:text-3xl font-medium text-red-600">
-                        <?php echo count($produkStokLimit); ?>
-                        <span class="text-sm text-red-200 uppercase font-bold">SKU</span>
-                    </p>
-                    <?php if (count($produkStokLimit) > 0): ?>
-                        <a href="#stok-limit" class="text-[10px] font-bold text-red-600 bg-red-50 px-2 py-0.5 mt-2 inline-block underline cursor-pointer">Cek Detail</a>
-                    <?php endif; ?>
-                </div>
-
-            </div>
-
-            <!-- Chart + Stok Limit -->
-            <div class="grid grid-cols-1 lg:grid-cols-3 gap-10 md:gap-12 mb-8 md:mb-12">
-
-                <div class="lg:col-span-2">
-                    <div class="flex items-center justify-between mb-6">
-                        <div>
-                            <h3 class="text-xs font-bold uppercase tracking-widest">Realisasi Sales (Per Jam)</h3>
-                            <p class="text-[10px] text-gray-400 italic mt-1">*Satuan dalam Juta Rupiah</p>
-                        </div>
+                    <div class="py-2 border-b sm:border-b-0 border-subtle pb-4 sm:pb-0">
+                        <p class="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1">Total Sales (Nett)</p>
+                        <p class="text-2xl md:text-3xl font-medium text-blue-600">
+                            <?php echo formatRp($ringkasan['total_sales']); ?>
+                        </p>
+                        <span class="text-[10px] font-bold text-gray-400 bg-gray-50 px-2 py-0.5 mt-2 inline-block italic">Target: Rp 12Jt</span>
                     </div>
-                    <div class="chart-container">
-                        <canvas id="salesChart"></canvas>
-                    </div>
-                </div>
 
-                <div class="lg:col-span-1" id="stok-limit">
-                    <h3 class="text-xs font-bold uppercase tracking-widest text-red-600 mb-6">
-                        Peringatan Stok Limit
-                        <?php if (count($produkStokLimit) === 0): ?>
-                            <span class="text-gray-400 normal-case font-medium">(aman)</span>
+                    <div class="py-2 border-b sm:border-b-0 border-subtle pb-4 sm:pb-0">
+                        <p class="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1">Jumlah Struk</p>
+                        <p class="text-2xl md:text-3xl font-medium">
+                            <?php echo number_format($ringkasan['jumlah_struk']); ?>
+                            <span class="text-sm text-gray-300 font-bold">INV</span>
+                        </p>
+                        <span class="text-[10px] font-bold text-green-600 bg-green-50 px-2 py-0.5 mt-2 inline-block">
+                            Avg: <?php echo formatRp($avgStruk); ?>
+                        </span>
+                    </div>
+
+                    <div class="py-2 sm:col-span-2 md:col-span-1">
+                        <p class="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1">Stok Limit</p>
+                        <p class="text-2xl md:text-3xl font-medium text-red-600">
+                            <?php echo count($produkStokLimit); ?>
+                            <span class="text-sm text-red-200 uppercase font-bold">SKU</span>
+                        </p>
+                        <?php if (count($produkStokLimit) > 0): ?>
+                            <a href="#stok-limit" class="text-[10px] font-bold text-red-600 bg-red-50 px-2 py-0.5 mt-2 inline-block underline cursor-pointer">Cek Detail</a>
                         <?php endif; ?>
-                    </h3>
+                    </div>
 
-                    <?php if (count($produkStokLimit) > 0): ?>
-                        <div class="space-y-4">
-                            <?php foreach (array_slice($produkStokLimit, 0, 4) as $p): ?>
-                                <?php $pct = $p['stok_minimum'] > 0 ? min(100, round($p['stok'] / $p['stok_minimum'] * 100)) : 0; ?>
-                                <div class="p-3 border border-red-100 bg-red-50 rounded-sm">
-                                    <div class="flex justify-between items-start mb-1">
-                                        <span class="text-sm font-bold block leading-tight"><?php echo htmlspecialchars($p['nama'], ENT_QUOTES, 'UTF-8'); ?></span>
-                                        <span class="text-[10px] font-black text-red-600 uppercase">Sisa <?php echo $p['stok']; ?></span>
-                                    </div>
-                                    <p class="text-[9px] text-gray-400 uppercase mb-2">
-                                        <?php echo htmlspecialchars($p['kategori'], ENT_QUOTES, 'UTF-8'); ?> | Min: <?php echo $p['stok_minimum']; ?>
-                                    </p>
-                                    <div class="w-full bg-gray-100 h-1">
-                                        <div class="bg-red-500 h-1" style="width:<?php echo $pct; ?>%"></div>
-                                    </div>
-                                </div>
-                            <?php endforeach; ?>
-                        </div>
-                    <?php else: ?>
-                        <div class="p-4 bg-green-50 border border-green-100 rounded-sm text-center">
-                            <p class="text-xs font-bold text-green-600">Semua stok dalam kondisi aman &#10003;</p>
-                        </div>
-                    <?php endif; ?>
-
-                    <?php if (has_role('admin', 'kasir')): ?>
-                        <a href="buat_po.php">
-                            <button type="button" class="mt-4 w-full py-3 text-[10px] font-bold bg-black text-white uppercase tracking-widest hover:bg-gray-800 transition-all rounded-sm">
-                                BUAT PO BARANG
-                            </button>
-                        </a>
-                    <?php endif; ?>
                 </div>
 
-            </div>
+                <!-- Chart + Stok Limit -->
+                <div class="grid grid-cols-1 lg:grid-cols-3 gap-10 md:gap-12 mb-8 md:mb-12">
 
-            <!-- Struk Terakhir + Fast Moving -->
-            <div class="grid grid-cols-1 lg:grid-cols-3 gap-10 md:gap-12 mt-12 md:mt-20">
-
-                <div class="lg:col-span-2">
-                    <h3 class="text-xs font-bold uppercase tracking-widest mb-6">Struk Terakhir</h3>
-
-                    <?php if (empty($strukTerakhir)): ?>
-                        <div class="p-6 border border-gray-100 rounded-sm text-center">
-                            <p class="text-xs text-gray-400">Belum ada transaksi hari ini</p>
+                    <div class="lg:col-span-2">
+                        <div class="flex items-center justify-between mb-6">
+                            <div>
+                                <h3 class="text-xs font-bold uppercase tracking-widest">Realisasi Sales (Per Jam)</h3>
+                                <p class="text-[10px] text-gray-400 italic mt-1">*Satuan dalam Juta Rupiah</p>
+                            </div>
                         </div>
-                    <?php else: ?>
-
-                        <!-- Desktop -->
-                        <div class="hidden lg:block overflow-x-auto">
-                            <table class="w-full text-left">
-                                <thead>
-                                    <tr class="border-b border-black">
-                                        <th class="py-3 text-[10px] font-bold uppercase tracking-widest">ID Struk</th>
-                                        <th class="py-3 text-[10px] font-bold uppercase tracking-widest">Kasir</th>
-                                        <th class="py-3 text-[10px] font-bold uppercase tracking-widest">Total</th>
-                                        <th class="py-3 text-[10px] font-bold uppercase tracking-widest text-right">Opsi</th>
-                                    </tr>
-                                </thead>
-                                <tbody class="divide-y divide-gray-100">
-                                    <?php foreach ($strukTerakhir as $t): ?>
-                                        <tr>
-                                            <td class="py-4 text-sm font-medium">
-                                                #<?php echo htmlspecialchars(substr($t['invoice'], -6), ENT_QUOTES, 'UTF-8'); ?>
-                                                <span class="text-[10px] text-gray-400 ml-2"><?php echo date('H:i', strtotime($t['created_at'])); ?></span>
-                                            </td>
-                                            <td class="py-4 text-sm font-medium text-gray-600">
-                                                <?php echo htmlspecialchars($t['kasir'] ?? 'N/A', ENT_QUOTES, 'UTF-8'); ?>
-                                            </td>
-                                            <td class="py-4 text-sm font-medium"><?php echo formatRp($t['total']); ?></td>
-                                            <td class="py-4 text-sm text-right">
-                                                <button type="button"
-                                                    onclick="reprintThermal(<?php echo (int)$t['id']; ?>, '<?php echo htmlspecialchars($t['invoice'], ENT_QUOTES, 'UTF-8'); ?>')"
-                                                    class="text-[10px] font-bold underline hover:text-blue-600">REPRINT</button>
-                                            </td>
-                                        </tr>
-                                    <?php endforeach; ?>
-                                </tbody>
-                            </table>
+                        <div class="chart-container">
+                            <canvas id="salesChart"></canvas>
                         </div>
+                    </div>
 
-                        <!-- Mobile -->
-                        <div class="lg:hidden space-y-3">
-                            <?php foreach ($strukTerakhir as $t): ?>
-                                <div class="border border-gray-100 rounded-sm p-4 flex items-center justify-between gap-3 hover:border-gray-300 transition-all">
-                                    <div class="flex items-center gap-3 min-w-0">
-                                        <div class="w-9 h-9 bg-gray-50 border border-gray-100 rounded-sm flex items-center justify-center flex-shrink-0">
-                                            <span class="text-[9px] font-black text-gray-400 uppercase">INV</span>
+                    <div class="lg:col-span-1" id="stok-limit">
+                        <h3 class="text-xs font-bold uppercase tracking-widest text-red-600 mb-6">
+                            Peringatan Stok Limit
+                            <?php if (count($produkStokLimit) === 0): ?>
+                                <span class="text-gray-400 normal-case font-medium">(aman)</span>
+                            <?php endif; ?>
+                        </h3>
+
+                        <?php if (count($produkStokLimit) > 0): ?>
+                            <div class="space-y-4">
+                                <?php foreach (array_slice($produkStokLimit, 0, 4) as $p): ?>
+                                    <?php $pct = $p['stok_minimum'] > 0 ? min(100, round($p['stok'] / $p['stok_minimum'] * 100)) : 0; ?>
+                                    <div class="p-3 border border-red-100 bg-red-50 rounded-sm">
+                                        <div class="flex justify-between items-start mb-1">
+                                            <span class="text-sm font-bold block leading-tight"><?php echo htmlspecialchars($p['nama'], ENT_QUOTES, 'UTF-8'); ?></span>
+                                            <span class="text-[10px] font-black text-red-600 uppercase">Sisa <?php echo $p['stok']; ?></span>
                                         </div>
-                                        <div class="min-w-0">
-                                            <p class="text-sm font-bold">
-                                                #<?php echo htmlspecialchars(substr($t['invoice'], -6), ENT_QUOTES, 'UTF-8'); ?>
-                                                <span class="text-[10px] text-gray-400 font-normal ml-1"><?php echo date('H:i', strtotime($t['created_at'])); ?></span>
-                                            </p>
-                                            <p class="text-[10px] text-gray-400 mt-0.5 truncate"><?php echo htmlspecialchars($t['kasir'] ?? 'N/A', ENT_QUOTES, 'UTF-8'); ?></p>
+                                        <p class="text-[9px] text-gray-400 uppercase mb-2">
+                                            <?php echo htmlspecialchars($p['kategori'], ENT_QUOTES, 'UTF-8'); ?> | Min: <?php echo $p['stok_minimum']; ?>
+                                        </p>
+                                        <div class="w-full bg-gray-100 h-1">
+                                            <div class="bg-red-500 h-1" style="width:<?php echo $pct; ?>%"></div>
                                         </div>
                                     </div>
-                                    <div class="flex items-center gap-3 flex-shrink-0">
-                                        <div class="text-right">
-                                            <p class="text-sm font-bold"><?php echo formatRp($t['total']); ?></p>
-                                            <p class="text-[10px] text-gray-400 mt-0.5">Total</p>
-                                        </div>
-                                        <button type="button"
-                                            onclick="reprintThermal(<?php echo (int)$t['id']; ?>, '<?php echo htmlspecialchars($t['invoice'], ENT_QUOTES, 'UTF-8'); ?>')"
-                                            class="px-3 py-2 text-[10px] font-black uppercase tracking-widest border border-gray-200 hover:bg-black hover:text-white hover:border-black transition-all rounded-sm">
-                                            Reprint
-                                        </button>
-                                    </div>
-                                </div>
-                            <?php endforeach; ?>
-                        </div>
-
-                    <?php endif; ?>
-                </div>
-
-                <div class="lg:col-span-1">
-                    <h3 class="text-xs font-bold uppercase tracking-widest mb-6">Top Fast Moving</h3>
-                    <div class="space-y-4">
-                        <?php if (empty($fastMoving)): ?>
-                            <p class="text-xs text-gray-400">Belum ada data penjualan hari ini</p>
+                                <?php endforeach; ?>
+                            </div>
                         <?php else: ?>
-                            <?php foreach ($fastMoving as $i => $fm): ?>
-                                <div class="flex justify-between items-center pb-3 border-b border-gray-100">
-                                    <div class="flex items-center gap-3">
-                                        <span class="text-[10px] font-black text-gray-300 w-4"><?php echo $i + 1; ?></span>
-                                        <span class="text-sm font-medium"><?php echo htmlspecialchars($fm['nama'], ENT_QUOTES, 'UTF-8'); ?></span>
-                                    </div>
-                                    <span class="text-sm font-bold text-gray-400"><?php echo number_format($fm['total_qty']); ?>x</span>
-                                </div>
-                            <?php endforeach; ?>
+                            <div class="p-4 bg-green-50 border border-green-100 rounded-sm text-center">
+                                <p class="text-xs font-bold text-green-600">Semua stok dalam kondisi aman &#10003;</p>
+                            </div>
+                        <?php endif; ?>
+
+                        <?php if (has_role('admin', 'kasir')): ?>
+                            <a href="buat_po.php">
+                                <button type="button" class="mt-4 w-full py-3 text-[10px] font-bold bg-black text-white uppercase tracking-widest hover:bg-gray-800 transition-all rounded-sm">
+                                    BUAT PO BARANG
+                                </button>
+                            </a>
                         <?php endif; ?>
                     </div>
+
                 </div>
 
-            </div>
+                <!-- Struk Terakhir + Fast Moving -->
+                <div class="grid grid-cols-1 lg:grid-cols-3 gap-10 md:gap-12 mt-12 md:mt-20">
+
+                    <div class="lg:col-span-2">
+                        <h3 class="text-xs font-bold uppercase tracking-widest mb-6">Struk Terakhir</h3>
+
+                        <?php if (empty($strukTerakhir)): ?>
+                            <div class="p-6 border border-gray-100 rounded-sm text-center">
+                                <p class="text-xs text-gray-400">Belum ada transaksi hari ini</p>
+                            </div>
+                        <?php else: ?>
+
+                            <!-- Desktop -->
+                            <div class="hidden lg:block overflow-x-auto">
+                                <table class="w-full text-left">
+                                    <thead>
+                                        <tr class="border-b border-black">
+                                            <th class="py-3 text-[10px] font-bold uppercase tracking-widest">ID Struk</th>
+                                            <th class="py-3 text-[10px] font-bold uppercase tracking-widest">Kasir</th>
+                                            <th class="py-3 text-[10px] font-bold uppercase tracking-widest">Total</th>
+                                            <th class="py-3 text-[10px] font-bold uppercase tracking-widest text-right">Opsi</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody class="divide-y divide-gray-100">
+                                        <?php foreach ($strukTerakhir as $t): ?>
+                                            <tr>
+                                                <td class="py-4 text-sm font-medium">
+                                                    #<?php echo htmlspecialchars(substr($t['invoice'], -6), ENT_QUOTES, 'UTF-8'); ?>
+                                                    <span class="text-[10px] text-gray-400 ml-2"><?php echo date('H:i', strtotime($t['created_at'])); ?></span>
+                                                </td>
+                                                <td class="py-4 text-sm font-medium text-gray-600">
+                                                    <?php echo htmlspecialchars($t['kasir'] ?? 'N/A', ENT_QUOTES, 'UTF-8'); ?>
+                                                </td>
+                                                <td class="py-4 text-sm font-medium"><?php echo formatRp($t['total']); ?></td>
+                                                <td class="py-4 text-sm text-right">
+                                                    <button type="button"
+                                                        onclick="reprintThermal(<?php echo (int)$t['id']; ?>, '<?php echo htmlspecialchars($t['invoice'], ENT_QUOTES, 'UTF-8'); ?>')"
+                                                        class="text-[10px] font-bold underline hover:text-blue-600">REPRINT</button>
+                                                </td>
+                                            </tr>
+                                        <?php endforeach; ?>
+                                    </tbody>
+                                </table>
+                            </div>
+
+                            <!-- Mobile -->
+                            <div class="lg:hidden space-y-3">
+                                <?php foreach ($strukTerakhir as $t): ?>
+                                    <div class="border border-gray-100 rounded-sm p-4 flex items-center justify-between gap-3 hover:border-gray-300 transition-all">
+                                        <div class="flex items-center gap-3 min-w-0">
+                                            <div class="w-9 h-9 bg-gray-50 border border-gray-100 rounded-sm flex items-center justify-center flex-shrink-0">
+                                                <span class="text-[9px] font-black text-gray-400 uppercase">INV</span>
+                                            </div>
+                                            <div class="min-w-0">
+                                                <p class="text-sm font-bold">
+                                                    #<?php echo htmlspecialchars(substr($t['invoice'], -6), ENT_QUOTES, 'UTF-8'); ?>
+                                                    <span class="text-[10px] text-gray-400 font-normal ml-1"><?php echo date('H:i', strtotime($t['created_at'])); ?></span>
+                                                </p>
+                                                <p class="text-[10px] text-gray-400 mt-0.5 truncate"><?php echo htmlspecialchars($t['kasir'] ?? 'N/A', ENT_QUOTES, 'UTF-8'); ?></p>
+                                            </div>
+                                        </div>
+                                        <div class="flex items-center gap-3 flex-shrink-0">
+                                            <div class="text-right">
+                                                <p class="text-sm font-bold"><?php echo formatRp($t['total']); ?></p>
+                                                <p class="text-[10px] text-gray-400 mt-0.5">Total</p>
+                                            </div>
+                                            <button type="button"
+                                                onclick="reprintThermal(<?php echo (int)$t['id']; ?>, '<?php echo htmlspecialchars($t['invoice'], ENT_QUOTES, 'UTF-8'); ?>')"
+                                                class="px-3 py-2 text-[10px] font-black uppercase tracking-widest border border-gray-200 hover:bg-black hover:text-white hover:border-black transition-all rounded-sm">
+                                                Reprint
+                                            </button>
+                                        </div>
+                                    </div>
+                                <?php endforeach; ?>
+                            </div>
+
+                        <?php endif; ?>
+                    </div>
+
+                    <div class="lg:col-span-1">
+                        <h3 class="text-xs font-bold uppercase tracking-widest mb-6">Top Fast Moving</h3>
+                        <div class="space-y-4">
+                            <?php if (empty($fastMoving)): ?>
+                                <p class="text-xs text-gray-400">Belum ada data penjualan hari ini</p>
+                            <?php else: ?>
+                                <?php foreach ($fastMoving as $i => $fm): ?>
+                                    <div class="flex justify-between items-center pb-3 border-b border-gray-100">
+                                        <div class="flex items-center gap-3">
+                                            <span class="text-[10px] font-black text-gray-300 w-4"><?php echo $i + 1; ?></span>
+                                            <span class="text-sm font-medium"><?php echo htmlspecialchars($fm['nama'], ENT_QUOTES, 'UTF-8'); ?></span>
+                                        </div>
+                                        <span class="text-sm font-bold text-gray-400"><?php echo number_format($fm['total_qty']); ?>x</span>
+                                    </div>
+                                <?php endforeach; ?>
+                            <?php endif; ?>
+                        </div>
+                    </div>
+
+                </div>
+            </section>
         <?php endif; // end has_role admin|kasir 
         ?>
 
 
-        <?php if (has_role('rental') && !has_role('admin')): ?>
+        <?php if (has_role('rental', 'admin')): ?>
             <!-- ════════════════════════════════════════════════════════════════════ -->
-            <!-- KONTEN RENTAL (murni role rental, bukan admin)                      -->
+            <!-- KONTEN RENTAL                                                       -->
             <!-- ════════════════════════════════════════════════════════════════════ -->
+            <section class="dashboard-role-section">
 
-            <!-- KPI Cards Rental -->
-            <div class="grid grid-cols-1 sm:grid-cols-2 gap-6 md:gap-8 mb-8 md:mb-12 border-b border-subtle pb-8 md:pb-12">
+                <!-- KPI Cards Rental -->
+                <div class="grid grid-cols-1 sm:grid-cols-2 gap-6 md:gap-8 mb-8 md:mb-12 border-b border-subtle pb-8 md:pb-12">
 
-                <div class="py-2">
-                    <p class="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1">Order Hari Ini</p>
-                    <p class="text-2xl md:text-3xl font-medium text-blue-600">
-                        <?php echo number_format($ringkasanRental['total_order'] ?? 0); ?>
-                        <span class="text-sm text-gray-300 font-bold">ORDER</span>
-                    </p>
-                </div>
-
-                <div class="py-2">
-                    <p class="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1">Pendapatan Hari Ini</p>
-                    <p class="text-2xl md:text-3xl font-medium text-green-600">
-                        <?php echo formatRp($ringkasanRental['total_pendapatan'] ?? 0); ?>
-                    </p>
-                </div>
-
-                <div class="py-2">
-                    <p class="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1">Driver Aktif</p>
-                    <p class="text-2xl md:text-3xl font-medium">
-                        <?php echo number_format($totalDriver ?? 0); ?>
-                        <span class="text-sm text-gray-300 font-bold">DRIVER</span>
-                    </p>
-                    <a href="driver.php" class="text-[10px] font-bold text-blue-600 bg-blue-50 px-2 py-0.5 mt-2 inline-block">
-                        Kelola Driver
-                    </a>
-                </div>
-
-            </div>
-
-            <!-- Order Rental Terbaru -->
-            <div class="mt-4">
-                <h3 class="text-xs font-bold uppercase tracking-widest mb-6">Order Rental Terbaru</h3>
-
-                <?php if (empty($orderRentalTerbaru)): ?>
-                    <div class="p-6 border border-gray-100 rounded-sm text-center">
-                        <p class="text-xs text-gray-400">Belum ada order rental hari ini</p>
-                    </div>
-                <?php else: ?>
-                    <div class="space-y-3">
-                        <?php foreach ($orderRentalTerbaru as $r): ?>
-                            <div class="border border-gray-100 rounded-sm p-4 flex items-center justify-between gap-3 hover:border-gray-300 transition-all">
-                                <div class="min-w-0">
-                                    <p class="text-sm font-bold truncate">
-                                        <?php echo htmlspecialchars($r['nama_penumpang'] ?? $r['nama'] ?? 'Penumpang', ENT_QUOTES, 'UTF-8'); ?>
-                                    </p>
-                                    <p class="text-[10px] text-gray-400 mt-0.5">
-                                        Driver: <?php echo htmlspecialchars($r['nama_driver'] ?? 'Belum assign', ENT_QUOTES, 'UTF-8'); ?>
-                                        &bull; <?php echo date('H:i', strtotime($r['created_at'] ?? 'now')); ?>
-                                    </p>
-                                </div>
-                                <div class="text-right flex-shrink-0">
-                                    <p class="text-sm font-bold"><?php echo formatRp($r['total_bayar'] ?? 0); ?></p>
-                                    <span class="text-[9px] font-black uppercase px-2 py-0.5 rounded-sm
-                                <?php echo ($r['status'] ?? '') === 'selesai' ? 'bg-green-100 text-green-700' : 'bg-yellow-100 text-yellow-700'; ?>">
-                                        <?php echo htmlspecialchars($r['status'] ?? 'proses', ENT_QUOTES, 'UTF-8'); ?>
-                                    </span>
-                                </div>
-                            </div>
-                        <?php endforeach; ?>
-                    </div>
-                <?php endif; ?>
-
-                <a href="rental_bandara.php">
-                    <button type="button" class="mt-4 w-full py-3 text-[10px] font-bold bg-black text-white uppercase tracking-widest hover:bg-gray-800 transition-all rounded-sm">
-                        LIHAT SEMUA ORDER RENTAL
-                    </button>
-                </a>
-            </div>
-
-        <?php endif; // end has_role rental 
-        ?>
-
-
-        <?php if (has_role('ksp') && !has_role('admin')): ?>
-            <!-- ════════════════════════════════════════════════════════════════════ -->
-            <!-- KONTEN KSP / SIMPAN PINJAM                                          -->
-            <!-- ════════════════════════════════════════════════════════════════════ -->
-
-            <div class="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-6 md:gap-8 mb-8 md:mb-12 border-b border-subtle pb-8 md:pb-12">
-
-                <div class="py-2 border-b sm:border-b-0 border-subtle pb-4 sm:pb-0">
-                    <p class="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1">Pengajuan Pending</p>
-                    <p class="text-2xl md:text-3xl font-medium text-amber-600">
-                        <?php echo number_format((int)$kspPengajuanSummary['pending']); ?>
-                        <span class="text-sm text-amber-200 font-bold">REQ</span>
-                    </p>
-                    <a href="pinjaman.php?status=pending" class="text-[10px] font-bold text-amber-600 bg-amber-50 px-2 py-0.5 mt-2 inline-block">Proses Pengajuan</a>
-                </div>
-
-                <div class="py-2 border-b sm:border-b-0 border-subtle pb-4 sm:pb-0">
-                    <p class="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1">Disetujui Belum Cair</p>
-                    <p class="text-2xl md:text-3xl font-medium text-green-600">
-                        <?php echo number_format((int)$kspPengajuanSummary['disetujui']); ?>
-                        <span class="text-sm text-green-200 font-bold">ACC</span>
-                    </p>
-                    <a href="pinjaman.php?status=disetujui" class="text-[10px] font-bold text-green-600 bg-green-50 px-2 py-0.5 mt-2 inline-block">Cairkan</a>
-                </div>
-
-                <div class="py-2 border-b sm:border-b-0 border-subtle pb-4 sm:pb-0">
-                    <p class="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1">Pinjaman Aktif</p>
-                    <p class="text-2xl md:text-3xl font-medium text-blue-600">
-                        <?php echo number_format((int)($kspPinjamanAktif['total'] ?? 0)); ?>
-                        <span class="text-sm text-blue-200 font-bold">AKTIF</span>
-                    </p>
-                    <span class="text-[10px] font-bold text-blue-600 bg-blue-50 px-2 py-0.5 mt-2 inline-block">
-                        <?php echo formatRp($kspPinjamanAktif['pokok'] ?? 0); ?>
-                    </span>
-                </div>
-
-                <div class="py-2">
-                    <p class="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1">Jatuh Tempo 7 Hari</p>
-                    <p class="text-2xl md:text-3xl font-medium text-red-600">
-                        <?php echo number_format((int)($kspAngsuranJatuhTempo['total'] ?? 0)); ?>
-                        <span class="text-sm text-red-200 font-bold">ANGS</span>
-                    </p>
-                    <span class="text-[10px] font-bold text-red-600 bg-red-50 px-2 py-0.5 mt-2 inline-block">
-                        <?php echo formatRp($kspAngsuranJatuhTempo['nilai'] ?? 0); ?>
-                    </span>
-                </div>
-
-            </div>
-
-            <div class="grid grid-cols-1 lg:grid-cols-3 gap-10 md:gap-12 mb-8 md:mb-12">
-
-                <div class="lg:col-span-2">
-                    <div class="flex items-center justify-between mb-6">
-                        <div>
-                            <h3 class="text-xs font-bold uppercase tracking-widest">Pengajuan Terbaru</h3>
-                            <p class="text-[10px] text-gray-400 italic mt-1">Data terbaru dari member yang mengajukan pinjaman</p>
-                        </div>
-                        <a href="pinjaman.php" class="text-[10px] font-black uppercase tracking-widest underline">Lihat Semua</a>
+                    <div class="py-2">
+                        <p class="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1">Order Hari Ini</p>
+                        <p class="text-2xl md:text-3xl font-medium text-blue-600">
+                            <?php echo number_format($ringkasanRental['total_order'] ?? 0); ?>
+                            <span class="text-sm text-gray-300 font-bold">ORDER</span>
+                        </p>
                     </div>
 
-                    <?php if (empty($kspPengajuanTerbaru)): ?>
+                    <div class="py-2">
+                        <p class="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1">Pendapatan Hari Ini</p>
+                        <p class="text-2xl md:text-3xl font-medium text-green-600">
+                            <?php echo formatRp($ringkasanRental['total_pendapatan'] ?? 0); ?>
+                        </p>
+                    </div>
+
+                    <div class="py-2">
+                        <p class="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1">Driver Aktif</p>
+                        <p class="text-2xl md:text-3xl font-medium">
+                            <?php echo number_format($totalDriver ?? 0); ?>
+                            <span class="text-sm text-gray-300 font-bold">DRIVER</span>
+                        </p>
+                        <a href="driver.php" class="text-[10px] font-bold text-blue-600 bg-blue-50 px-2 py-0.5 mt-2 inline-block">
+                            Kelola Driver
+                        </a>
+                    </div>
+
+                </div>
+
+                <!-- Order Rental Terbaru -->
+                <div class="mt-4">
+                    <h3 class="text-xs font-bold uppercase tracking-widest mb-6">Order Rental Terbaru</h3>
+
+                    <?php if (empty($orderRentalTerbaru)): ?>
                         <div class="p-6 border border-gray-100 rounded-sm text-center">
-                            <p class="text-xs text-gray-400">Belum ada pengajuan pinjaman</p>
+                            <p class="text-xs text-gray-400">Belum ada order rental hari ini</p>
                         </div>
                     <?php else: ?>
-                        <div class="hidden lg:block overflow-x-auto">
-                            <table class="w-full text-left">
-                                <thead>
-                                    <tr class="border-b border-black">
-                                        <th class="py-3 text-[10px] font-bold uppercase tracking-widest">Member</th>
-                                        <th class="py-3 text-[10px] font-bold uppercase tracking-widest">Jenis</th>
-                                        <th class="py-3 text-[10px] font-bold uppercase tracking-widest text-right">Jumlah</th>
-                                        <th class="py-3 text-[10px] font-bold uppercase tracking-widest text-center">Tenor</th>
-                                        <th class="py-3 text-[10px] font-bold uppercase tracking-widest text-right">Status</th>
-                                    </tr>
-                                </thead>
-                                <tbody class="divide-y divide-gray-100">
-                                    <?php foreach ($kspPengajuanTerbaru as $p): ?>
-                                        <tr>
-                                            <td class="py-4 text-sm font-medium">
-                                                <?php echo htmlspecialchars($p['member_nama'] ?? '-', ENT_QUOTES, 'UTF-8'); ?>
-                                                <span class="block text-[10px] text-gray-400 font-mono"><?php echo htmlspecialchars($p['member_kode'] ?? '-', ENT_QUOTES, 'UTF-8'); ?></span>
-                                            </td>
-                                            <td class="py-4 text-sm font-bold uppercase"><?php echo htmlspecialchars($p['jenis'] ?? '-', ENT_QUOTES, 'UTF-8'); ?></td>
-                                            <td class="py-4 text-sm font-bold text-right"><?php echo formatRp($p['jumlah'] ?? 0); ?></td>
-                                            <td class="py-4 text-sm text-center"><?php echo number_format((int)($p['tenor'] ?? 0)); ?> bln</td>
-                                            <td class="py-4 text-right">
-                                                <span class="text-[9px] font-black uppercase px-2 py-1 border border-gray-200 bg-gray-50">
-                                                    <?php echo htmlspecialchars($p['status'] ?? '-', ENT_QUOTES, 'UTF-8'); ?>
-                                                </span>
-                                            </td>
-                                        </tr>
-                                    <?php endforeach; ?>
-                                </tbody>
-                            </table>
-                        </div>
-
-                        <div class="lg:hidden space-y-3">
-                            <?php foreach ($kspPengajuanTerbaru as $p): ?>
-                                <div class="border border-gray-100 rounded-sm p-4">
-                                    <div class="flex items-start justify-between gap-3">
-                                        <div>
-                                            <p class="text-sm font-bold"><?php echo htmlspecialchars($p['member_nama'] ?? '-', ENT_QUOTES, 'UTF-8'); ?></p>
-                                            <p class="text-[10px] text-gray-400 font-mono mt-0.5"><?php echo htmlspecialchars($p['member_kode'] ?? '-', ENT_QUOTES, 'UTF-8'); ?></p>
-                                        </div>
-                                        <span class="text-[9px] font-black uppercase px-2 py-1 border border-gray-200 bg-gray-50">
-                                            <?php echo htmlspecialchars($p['status'] ?? '-', ENT_QUOTES, 'UTF-8'); ?>
-                                        </span>
+                        <div class="space-y-3">
+                            <?php foreach ($orderRentalTerbaru as $r): ?>
+                                <div class="border border-gray-100 rounded-sm p-4 flex items-center justify-between gap-3 hover:border-gray-300 transition-all">
+                                    <div class="min-w-0">
+                                        <p class="text-sm font-bold truncate">
+                                            <?php echo htmlspecialchars($r['nama_penumpang'] ?? $r['nama'] ?? 'Penumpang', ENT_QUOTES, 'UTF-8'); ?>
+                                        </p>
+                                        <p class="text-[10px] text-gray-400 mt-0.5">
+                                            Driver: <?php echo htmlspecialchars($r['nama_driver'] ?? 'Belum assign', ENT_QUOTES, 'UTF-8'); ?>
+                                            &bull; <?php echo date('H:i', strtotime($r['created_at'] ?? 'now')); ?>
+                                        </p>
                                     </div>
-                                    <div class="grid grid-cols-3 gap-2 mt-4">
-                                        <div class="bg-gray-50 border border-gray-100 p-2">
-                                            <p class="text-[9px] text-gray-400 font-bold uppercase">Jenis</p>
-                                            <p class="text-xs font-bold uppercase"><?php echo htmlspecialchars($p['jenis'] ?? '-', ENT_QUOTES, 'UTF-8'); ?></p>
-                                        </div>
-                                        <div class="bg-gray-50 border border-gray-100 p-2">
-                                            <p class="text-[9px] text-gray-400 font-bold uppercase">Jumlah</p>
-                                            <p class="text-xs font-bold"><?php echo formatRp($p['jumlah'] ?? 0); ?></p>
-                                        </div>
-                                        <div class="bg-gray-50 border border-gray-100 p-2">
-                                            <p class="text-[9px] text-gray-400 font-bold uppercase">Tenor</p>
-                                            <p class="text-xs font-bold"><?php echo number_format((int)($p['tenor'] ?? 0)); ?> bln</p>
-                                        </div>
+                                    <div class="text-right flex-shrink-0">
+                                        <p class="text-sm font-bold"><?php echo formatRp($r['total_bayar'] ?? 0); ?></p>
+                                        <span class="text-[9px] font-black uppercase px-2 py-0.5 rounded-sm
+                                <?php echo ($r['status'] ?? '') === 'selesai' ? 'bg-green-100 text-green-700' : 'bg-yellow-100 text-yellow-700'; ?>">
+                                            <?php echo htmlspecialchars($r['status'] ?? 'proses', ENT_QUOTES, 'UTF-8'); ?>
+                                        </span>
                                     </div>
                                 </div>
                             <?php endforeach; ?>
                         </div>
                     <?php endif; ?>
+
+                    <a href="rental_bandara.php">
+                        <button type="button" class="mt-6 w-full py-3 text-[10px] font-bold bg-black text-white uppercase tracking-widest hover:bg-gray-800 transition-all rounded-sm">
+                            LIHAT SEMUA ORDER RENTAL
+                        </button>
+                    </a>
                 </div>
 
-                <div class="lg:col-span-1">
-                    <h3 class="text-xs font-bold uppercase tracking-widest mb-6">Konfigurasi SP Aktif</h3>
-                    <div class="space-y-4">
-                        <div class="p-4 border border-gray-100 bg-gray-50 rounded-sm">
-                            <p class="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1">Bunga Uang</p>
-                            <p class="text-2xl font-medium text-green-600"><?php echo number_format((float)($kspKonfig['bunga_uang'] ?? 0), 2, ',', '.'); ?>%</p>
+            </section>
+        <?php endif; // end has_role rental 
+        ?>
+
+
+        <?php if (has_role('ksp', 'admin')): ?>
+            <!-- ════════════════════════════════════════════════════════════════════ -->
+            <!-- KONTEN KSP / SIMPAN PINJAM                                          -->
+            <!-- ════════════════════════════════════════════════════════════════════ -->
+            <section class="dashboard-role-section">
+
+                <div class="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-5 gap-6 md:gap-8 mb-8 md:mb-12 border-b border-subtle pb-8 md:pb-12">
+
+                    <div class="py-2 border-b sm:border-b-0 border-subtle pb-4 sm:pb-0">
+                        <p class="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1">Pengajuan Pending</p>
+                        <p class="text-2xl md:text-3xl font-medium text-amber-600">
+                            <?php echo number_format((int)$kspPengajuanSummary['pending']); ?>
+                            <span class="text-sm text-amber-200 font-bold">REQ</span>
+                        </p>
+                        <a href="pinjaman.php?status=pending" class="text-[10px] font-bold text-amber-600 bg-amber-50 px-2 py-0.5 mt-2 inline-block">Proses Pengajuan</a>
+                    </div>
+
+                    <div class="py-2 border-b sm:border-b-0 border-subtle pb-4 sm:pb-0">
+                        <p class="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1">Disetujui Belum Cair</p>
+                        <p class="text-2xl md:text-3xl font-medium text-green-600">
+                            <?php echo number_format((int)$kspPengajuanSummary['disetujui']); ?>
+                            <span class="text-sm text-green-200 font-bold">ACC</span>
+                        </p>
+                        <a href="pinjaman.php?status=disetujui" class="text-[10px] font-bold text-green-600 bg-green-50 px-2 py-0.5 mt-2 inline-block">Cairkan</a>
+                    </div>
+
+                    <div class="py-2 border-b sm:border-b-0 border-subtle pb-4 sm:pb-0">
+                        <p class="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1">Batal Pengajuan</p>
+                        <p class="text-2xl md:text-3xl font-medium text-red-600">
+                            <?php echo number_format((int)$kspPengajuanSummary['dibatalkan']); ?>
+                            <span class="text-sm text-red-200 font-bold">BTL</span>
+                        </p>
+                        <a href="pinjaman.php?status=dibatalkan" class="text-[10px] font-bold text-red-600 bg-red-50 px-2 py-0.5 mt-2 inline-block">Lihat Batal</a>
+                    </div>
+
+                    <div class="py-2 border-b sm:border-b-0 border-subtle pb-4 sm:pb-0">
+                        <p class="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1">Pinjaman Aktif</p>
+                        <p class="text-2xl md:text-3xl font-medium text-blue-600">
+                            <?php echo number_format((int)($kspPinjamanAktif['total'] ?? 0)); ?>
+                            <span class="text-sm text-blue-200 font-bold">AKTIF</span>
+                        </p>
+                        <span class="text-[10px] font-bold text-blue-600 bg-blue-50 px-2 py-0.5 mt-2 inline-block">
+                            <?php echo formatRp($kspPinjamanAktif['pokok'] ?? 0); ?>
+                        </span>
+                    </div>
+
+                    <div class="py-2">
+                        <p class="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1">Jatuh Tempo 7 Hari</p>
+                        <p class="text-2xl md:text-3xl font-medium text-red-600">
+                            <?php echo number_format((int)($kspAngsuranJatuhTempo['total'] ?? 0)); ?>
+                            <span class="text-sm text-red-200 font-bold">ANGS</span>
+                        </p>
+                        <span class="text-[10px] font-bold text-red-600 bg-red-50 px-2 py-0.5 mt-2 inline-block">
+                            <?php echo formatRp($kspAngsuranJatuhTempo['nilai'] ?? 0); ?>
+                        </span>
+                    </div>
+
+                </div>
+
+                <div class="grid grid-cols-1 lg:grid-cols-3 gap-10 md:gap-12 mb-8 md:mb-12">
+
+                    <div class="lg:col-span-2">
+                        <div class="flex items-center justify-between mb-6">
+                            <div>
+                                <h3 class="text-xs font-bold uppercase tracking-widest">Pengajuan Terbaru</h3>
+                                <p class="text-[10px] text-gray-400 italic mt-1">Data terbaru dari member yang mengajukan pinjaman</p>
+                            </div>
+                            <a href="pinjaman.php" class="text-[10px] font-black uppercase tracking-widest underline">Lihat Semua</a>
                         </div>
-                        <div class="p-4 border border-gray-100 bg-gray-50 rounded-sm">
-                            <p class="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1">Bunga Barang</p>
-                            <p class="text-2xl font-medium text-blue-600"><?php echo number_format((float)($kspKonfig['bunga_barang'] ?? 0), 2, ',', '.'); ?>%</p>
+
+                        <?php if (empty($kspPengajuanTerbaru)): ?>
+                            <div class="p-6 border border-gray-100 rounded-sm text-center">
+                                <p class="text-xs text-gray-400">Belum ada pengajuan pinjaman</p>
+                            </div>
+                        <?php else: ?>
+                            <div class="hidden lg:block overflow-x-auto">
+                                <table class="w-full text-left">
+                                    <thead>
+                                        <tr class="border-b border-black">
+                                            <th class="py-3 text-[10px] font-bold uppercase tracking-widest">Member</th>
+                                            <th class="py-3 text-[10px] font-bold uppercase tracking-widest">Jenis</th>
+                                            <th class="py-3 text-[10px] font-bold uppercase tracking-widest text-right">Jumlah</th>
+                                            <th class="py-3 text-[10px] font-bold uppercase tracking-widest text-center">Tenor</th>
+                                            <th class="py-3 text-[10px] font-bold uppercase tracking-widest text-right">Status</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody class="divide-y divide-gray-100">
+                                        <?php foreach ($kspPengajuanTerbaru as $p): ?>
+                                            <tr>
+                                                <td class="py-4 text-sm font-medium">
+                                                    <?php echo htmlspecialchars($p['member_nama'] ?? '-', ENT_QUOTES, 'UTF-8'); ?>
+                                                    <span class="block text-[10px] text-gray-400 font-mono"><?php echo htmlspecialchars($p['member_kode'] ?? '-', ENT_QUOTES, 'UTF-8'); ?></span>
+                                                </td>
+                                                <td class="py-4 text-sm font-bold uppercase"><?php echo htmlspecialchars($p['jenis'] ?? '-', ENT_QUOTES, 'UTF-8'); ?></td>
+                                                <td class="py-4 text-sm font-bold text-right"><?php echo formatRp($p['jumlah'] ?? 0); ?></td>
+                                                <td class="py-4 text-sm text-center"><?php echo number_format((int)($p['tenor'] ?? 0)); ?> bln</td>
+                                                <td class="py-4 text-right">
+                                                    <span class="text-[9px] font-black uppercase px-2 py-1 border <?php echo dashboard_pinjaman_status_class((string)($p['status'] ?? '')); ?>">
+                                                        <?php echo htmlspecialchars(strtoupper(dashboard_pinjaman_status_label((string)($p['status'] ?? ''))), ENT_QUOTES, 'UTF-8'); ?>
+                                                    </span>
+                                                </td>
+                                            </tr>
+                                        <?php endforeach; ?>
+                                    </tbody>
+                                </table>
+                            </div>
+
+                            <div class="lg:hidden space-y-3">
+                                <?php foreach ($kspPengajuanTerbaru as $p): ?>
+                                    <div class="border border-gray-100 rounded-sm p-4">
+                                        <div class="flex items-start justify-between gap-3">
+                                            <div>
+                                                <p class="text-sm font-bold"><?php echo htmlspecialchars($p['member_nama'] ?? '-', ENT_QUOTES, 'UTF-8'); ?></p>
+                                                <p class="text-[10px] text-gray-400 font-mono mt-0.5"><?php echo htmlspecialchars($p['member_kode'] ?? '-', ENT_QUOTES, 'UTF-8'); ?></p>
+                                            </div>
+                                            <span class="text-[9px] font-black uppercase px-2 py-1 border <?php echo dashboard_pinjaman_status_class((string)($p['status'] ?? '')); ?>">
+                                                <?php echo htmlspecialchars(strtoupper(dashboard_pinjaman_status_label((string)($p['status'] ?? ''))), ENT_QUOTES, 'UTF-8'); ?>
+                                            </span>
+                                        </div>
+                                        <div class="grid grid-cols-3 gap-2 mt-4">
+                                            <div class="bg-gray-50 border border-gray-100 p-2">
+                                                <p class="text-[9px] text-gray-400 font-bold uppercase">Jenis</p>
+                                                <p class="text-xs font-bold uppercase"><?php echo htmlspecialchars($p['jenis'] ?? '-', ENT_QUOTES, 'UTF-8'); ?></p>
+                                            </div>
+                                            <div class="bg-gray-50 border border-gray-100 p-2">
+                                                <p class="text-[9px] text-gray-400 font-bold uppercase">Jumlah</p>
+                                                <p class="text-xs font-bold"><?php echo formatRp($p['jumlah'] ?? 0); ?></p>
+                                            </div>
+                                            <div class="bg-gray-50 border border-gray-100 p-2">
+                                                <p class="text-[9px] text-gray-400 font-bold uppercase">Tenor</p>
+                                                <p class="text-xs font-bold"><?php echo number_format((int)($p['tenor'] ?? 0)); ?> bln</p>
+                                            </div>
+                                        </div>
+                                    </div>
+                                <?php endforeach; ?>
+                            </div>
+                        <?php endif; ?>
+                    </div>
+
+                    <div class="lg:col-span-1">
+                        <h3 class="text-xs font-bold uppercase tracking-widest mb-6">Konfigurasi SP Aktif</h3>
+                        <div class="space-y-4">
+                            <div class="p-4 border border-gray-100 bg-gray-50 rounded-sm">
+                                <p class="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1">Bunga Uang</p>
+                                <p class="text-2xl font-medium text-green-600"><?php echo number_format((float)($kspKonfig['bunga_uang'] ?? 0), 2, ',', '.'); ?>%</p>
+                            </div>
+                            <div class="p-4 border border-gray-100 bg-gray-50 rounded-sm">
+                                <p class="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1">Bunga Barang</p>
+                                <p class="text-2xl font-medium text-blue-600"><?php echo number_format((float)($kspKonfig['bunga_barang'] ?? 0), 2, ',', '.'); ?>%</p>
+                            </div>
+                            <div class="p-4 border border-gray-100 bg-gray-50 rounded-sm">
+                                <p class="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1">Tenor Maksimal</p>
+                                <p class="text-sm font-bold">Uang <?php echo number_format((int)($kspKonfig['tenor_maks_uang'] ?? 0)); ?> bln · Barang <?php echo number_format((int)($kspKonfig['tenor_maks_barang'] ?? 0)); ?> bln</p>
+                            </div>
                         </div>
-                        <div class="p-4 border border-gray-100 bg-gray-50 rounded-sm">
-                            <p class="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1">Tenor Maksimal</p>
-                            <p class="text-sm font-bold">Uang <?php echo number_format((int)($kspKonfig['tenor_maks_uang'] ?? 0)); ?> bln · Barang <?php echo number_format((int)($kspKonfig['tenor_maks_barang'] ?? 0)); ?> bln</p>
+
+                        <div class="grid grid-cols-1 gap-2 mt-4">
+                            <a href="pinjaman.php" class="w-full py-3 text-[10px] font-bold bg-black text-white uppercase tracking-widest hover:bg-gray-800 transition-all rounded-sm text-center">
+                                KELOLA PENGAJUAN
+                            </a>
+                            <a href="sp.php" class="w-full py-3 text-[10px] font-bold border border-gray-200 uppercase tracking-widest hover:bg-gray-50 transition-all rounded-sm text-center">
+                                KONFIGURASI SP
+                            </a>
+                            <a href="laporan.php" class="w-full py-3 text-[10px] font-bold border border-gray-200 uppercase tracking-widest hover:bg-gray-50 transition-all rounded-sm text-center">
+                                LAPORAN SP
+                            </a>
                         </div>
                     </div>
 
-                    <div class="grid grid-cols-1 gap-2 mt-4">
-                        <a href="pinjaman.php" class="w-full py-3 text-[10px] font-bold bg-black text-white uppercase tracking-widest hover:bg-gray-800 transition-all rounded-sm text-center">
-                            KELOLA PENGAJUAN
-                        </a>
-                        <a href="sp.php" class="w-full py-3 text-[10px] font-bold border border-gray-200 uppercase tracking-widest hover:bg-gray-50 transition-all rounded-sm text-center">
-                            KONFIGURASI SP
-                        </a>
-                        <a href="laporan.php" class="w-full py-3 text-[10px] font-bold border border-gray-200 uppercase tracking-widest hover:bg-gray-50 transition-all rounded-sm text-center">
-                            LAPORAN SP
-                        </a>
-                    </div>
                 </div>
 
-            </div>
-
+            </section>
         <?php endif; // end has_role ksp 
         ?>
 

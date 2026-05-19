@@ -651,7 +651,7 @@ catat_view_once($pdo, 'Member Dashboard', 'Membuka halaman Member Dashboard');
 
 <head>
     <meta charset="UTF-8">
-    <title>Dashboard Member — Koperasi BSDK</title>
+    <title>Dashboard Member — SEJAHUB</title>
     <link rel="icon" type="image/png" href="assets/sejahub_icon.png">
     <meta name="viewport" content="width=device-width,initial-scale=1.0,viewport-fit=cover">
     <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800;900&display=swap" rel="stylesheet">
@@ -3103,6 +3103,40 @@ catat_view_once($pdo, 'Member Dashboard', 'Membuka halaman Member Dashboard');
         .transport-status-green {
             border-radius: 0 !important;
         }
+
+
+        .bottom-nav .nav-btn {
+            min-width: 0;
+        }
+
+        .bottom-nav .nav-label {
+            font-size: 8.5px;
+            letter-spacing: .06em;
+        }
+
+
+        .page {
+            display: none;
+        }
+
+        .page.active {
+            display: block;
+        }
+
+        .bottom-nav .nav-btn.active {
+            color: var(--black);
+            font-weight: 900;
+        }
+
+        .bottom-nav .nav-btn.active .nav-icon svg {
+            stroke: var(--black);
+            stroke-width: 2.5;
+        }
+
+        .bottom-nav .nav-btn.active .nav-label {
+            color: var(--black);
+            font-weight: 900;
+        }
     </style>
 </head>
 
@@ -3236,14 +3270,6 @@ catat_view_once($pdo, 'Member Dashboard', 'Membuka halaman Member Dashboard');
                                 </svg></div>
                             <span class="quick-label">Riwayat Point</span>
                         </button>
-                        <button class="quick-item" onclick="openModal('modal-bantuan')">
-                            <div class="quick-ico"><svg viewBox="0 0 24 24">
-                                    <circle cx="12" cy="12" r="10" />
-                                    <path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3" />
-                                    <line x1="12" y1="17" x2="12.01" y2="17" />
-                                </svg></div>
-                            <span class="quick-label">Bantuan</span>
-                        </button>
 
                         <button class="quick-item" onclick="goTo('pinjaman')">
                             <div class="quick-ico">
@@ -3272,6 +3298,15 @@ catat_view_once($pdo, 'Member Dashboard', 'Membuka halaman Member Dashboard');
                                     <circle cx="12" cy="10" r="3" />
                                 </svg></div>
                             <span class="quick-label">Kontak</span>
+                        </button>
+
+                        <button class="quick-item" onclick="openModal('modal-bantuan')">
+                            <div class="quick-ico"><svg viewBox="0 0 24 24">
+                                    <circle cx="12" cy="12" r="10" />
+                                    <path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3" />
+                                    <line x1="12" y1="17" x2="12.01" y2="17" />
+                                </svg></div>
+                            <span class="quick-label">Bantuan</span>
                         </button>
                     </div>
                 </div>
@@ -3757,6 +3792,34 @@ catat_view_once($pdo, 'Member Dashboard', 'Membuka halaman Member Dashboard');
 
             </div><!-- /page-pesanan -->
 
+
+
+
+
+            <!-- ══════════════════════════════
+             PAGE: SIMPANAN
+        ══════════════════════════════ -->
+            <div class="page" id="page-simpanan">
+                <div class="promo-hero-bar">
+                    <div style="font-size:10px;font-weight:900;text-transform:uppercase;letter-spacing:.15em;opacity:.4;margin-bottom:8px;">Layanan Simpanan</div>
+                    <h2>Simpanan<br>Member</h2>
+                    <p>Ringkasan simpanan anggota koperasi.</p>
+                </div>
+
+                <div class="transport-card-box">
+                    <div class="transport-section-head">
+                        <div>
+                            <h3>Informasi Simpanan</h3>
+                            <div style="font-size:11px;font-weight:600;color:var(--g4);margin-top:4px;">Fitur simpanan member tetap mengikuti data dari halaman simpanan.</div>
+                        </div>
+                        <span>SP</span>
+                    </div>
+
+                    <div class="transport-empty">
+                        Data simpanan member belum ditampilkan di dashboard ini
+                    </div>
+                </div>
+            </div><!-- /page-simpanan -->
 
 
             <!-- ══════════════════════════════
@@ -4335,33 +4398,43 @@ catat_view_once($pdo, 'Member Dashboard', 'Membuka halaman Member Dashboard');
          BOTTOM NAV
     ══════════════════════════════ -->
         <nav class="bottom-nav">
-            <button class="nav-btn active" id="nav-beranda" onclick="goTo('beranda')">
-                <div class="nav-icon"><svg viewBox="0 0 24 24">
-                        <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
-                        <polyline points="9 22 9 12 15 12 15 22" />
-                    </svg></div>
+            <button class="nav-btn active" onclick="goTo('beranda')" data-page="beranda">
+                <div class="nav-icon">
+                    <svg viewBox="0 0 24 24">
+                        <path d="M3 11l9-8 9 8" />
+                        <path d="M5 10v10h14V10" />
+                        <path d="M9 20v-6h6v6" />
+                    </svg>
+                </div>
                 <span class="nav-label">Beranda</span>
             </button>
-            <button class="nav-btn" id="nav-belanja" onclick="goTo('belanja')">
-                <div class="nav-icon"><svg viewBox="0 0 24 24">
-                        <circle cx="9" cy="21" r="1" />
-                        <circle cx="20" cy="21" r="1" />
-                        <path d="M1 1h4l2.68 13.39a2 2 0 0 0 2 1.61h9.72a2 2 0 0 0 2-1.61L23 6H6" />
-                    </svg></div>
-                <span class="nav-label">Belanja</span>
+
+            <button class="nav-btn" onclick="goTo('simpanan')" data-page="simpanan">
+                <div class="nav-icon">
+                    <svg viewBox="0 0 24 24">
+                        <rect x="3" y="6" width="18" height="14" rx="2" />
+                        <path d="M7 10h10" />
+                        <path d="M7 14h6" />
+                        <path d="M17 17h.01" />
+                    </svg>
+                </div>
+                <span class="nav-label">Simpanan</span>
             </button>
-            <button class="nav-btn" id="nav-promo" onclick="goTo('promo')">
-                <div class="nav-icon"><svg viewBox="0 0 24 24">
-                        <polyline points="20 12 20 22 4 22 4 12" />
-                        <rect x="2" y="7" width="20" height="5" />
-                        <line x1="12" y1="22" x2="12" y2="7" />
-                        <path d="M12 7H7.5a2.5 2.5 0 0 1 0-5C11 2 12 7 12 7z" />
-                        <path d="M12 7h4.5a2.5 2.5 0 0 0 0-5C13 2 12 7 12 7z" />
-                    </svg></div>
-                <span class="nav-label">Promo</span>
+
+            <button class="nav-btn" onclick="goTo('pinjaman')" data-page="pinjaman">
+                <div class="nav-icon">
+                    <svg viewBox="0 0 24 24">
+                        <rect x="3" y="4" width="18" height="16" rx="2" />
+                        <path d="M7 8h10" />
+                        <path d="M7 12h7" />
+                        <path d="M7 16h4" />
+                    </svg>
+                </div>
+                <span class="nav-label">Pinjaman</span>
             </button>
-            <button class="nav-btn" id="nav-pesanan" onclick="goTo('pesanan')">
-                <div class="nav-icon" style="position:relative;">
+
+            <button class="nav-btn" onclick="goTo('pesanan')" data-page="pesanan">
+                <div class="nav-icon">
                     <svg viewBox="0 0 24 24">
                         <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z" />
                         <polyline points="3.27 6.96 12 12.01 20.73 6.96" />
@@ -4371,28 +4444,13 @@ catat_view_once($pdo, 'Member Dashboard', 'Membuka halaman Member Dashboard');
                 <span class="nav-label">Pesanan</span>
             </button>
 
-            <button class="nav-btn" id="nav-pinjaman" onclick="goTo('pinjaman')">
-                <div class="nav-icon"><svg viewBox="0 0 24 24">
-                        <rect x="3" y="4" width="18" height="16" rx="2" />
-                        <path d="M7 8h10" />
-                        <path d="M7 12h7" />
-                        <path d="M7 16h4" />
-                    </svg></div>
-                <span class="nav-label">Pinjaman</span>
-            </button>
-
-            <button class="nav-btn" id="nav-transport" onclick="goTo('transport')">
-                <div class="nav-icon"><svg viewBox="0 0 24 24">
-                        <path d="M2 16l20-8-20-8 4 8-4 8z" />
-                        <path d="M6 8h16" />
-                    </svg></div>
-                <span class="nav-label">Bandara</span>
-            </button>
-            <button class="nav-btn" id="nav-akun" onclick="goTo('akun')">
-                <div class="nav-icon"><svg viewBox="0 0 24 24">
+            <button class="nav-btn" onclick="goTo('akun')" data-page="akun">
+                <div class="nav-icon">
+                    <svg viewBox="0 0 24 24">
                         <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
                         <circle cx="12" cy="7" r="4" />
-                    </svg></div>
+                    </svg>
+                </div>
                 <span class="nav-label">Akun</span>
             </button>
         </nav>
@@ -4783,20 +4841,35 @@ catat_view_once($pdo, 'Member Dashboard', 'Membuka halaman Member Dashboard');
         /* ── Navigation ───────────────────────────────────────────────────────────── */
         function goTo(page) {
             // Nonaktifkan semua halaman
-            document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
-            // Nonaktifkan semua tombol nav (visual saja)
-            document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
+            document.querySelectorAll('.page').forEach(function(p) {
+                p.classList.remove('active');
+            });
+
+            // Nonaktifkan semua tombol nav
+            document.querySelectorAll('.nav-btn').forEach(function(b) {
+                b.classList.remove('active');
+            });
 
             // Aktifkan halaman tujuan
             var pg = document.getElementById('page-' + page);
             if (pg) {
                 pg.classList.add('active');
-                pg.scrollTop = 0;
+                window.scrollTo({
+                    top: 0,
+                    behavior: 'smooth'
+                });
             }
 
-            // Aktifkan tombol nav tujuan
-            var nb = document.getElementById('nav-' + page);
-            if (nb) nb.classList.add('active');
+            // Aktifkan tombol nav sesuai data-page
+            var btn = document.querySelector('.nav-btn[data-page="' + page + '"]');
+            if (btn) {
+                btn.classList.add('active');
+            }
+
+            // Simpan halaman terakhir
+            try {
+                localStorage.setItem('member_dashboard_active_page', page);
+            } catch (e) {}
         }
 
         /* ── Category chips ── */
@@ -5042,6 +5115,24 @@ catat_view_once($pdo, 'Member Dashboard', 'Membuka halaman Member Dashboard');
             var targetHash = (window.location.hash || '').replace('#', '');
             if (targetHash && typeof goTo === 'function') {
                 goTo(targetHash);
+            }
+        });
+
+        document.addEventListener('DOMContentLoaded', function() {
+            var savedPage = 'beranda';
+
+            try {
+                savedPage = localStorage.getItem('member_dashboard_active_page') || 'beranda';
+            } catch (e) {
+                savedPage = 'beranda';
+            }
+
+            if (!document.getElementById('page-' + savedPage)) {
+                savedPage = 'beranda';
+            }
+
+            if (typeof goTo === 'function') {
+                goTo(savedPage);
             }
         });
     </script>
