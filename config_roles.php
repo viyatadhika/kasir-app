@@ -59,6 +59,23 @@ define('ROLE_ACCESS', [
         ],
     ],
 
+    'ksp' => [
+        'pages' => [
+            'dashboard.php',
+            'simpanan.php',
+            'pinjaman.php',
+            'anggota.php',
+            'laporan.php',
+        ],
+        'menus' => [
+            'dashboard',
+            'simpanan',
+            'pinjaman',
+            'anggota',
+            'laporan',
+        ],
+    ],
+
 ]);
 
 // ── Halaman yang boleh diakses siapa saja (tanpa login sekalipun) ─────────

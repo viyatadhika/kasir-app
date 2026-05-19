@@ -23,9 +23,11 @@ if (!isset($activeMenu)) {
         'pos.php'            => 'pos',
         'produk.php'         => 'produk',
         'stok_opname.php'    => 'stok',
+        'diskon.php'         => 'diskon',
         'rental_bandara.php' => 'rental',
         'driver.php'         => 'driver',
-        'diskon.php'         => 'diskon',
+        'simpanan.php'       => 'simpanan',
+        'pinjaman.php'       => 'pinjaman',
         'laporan.php'        => 'laporan',
         'log_aktivitas.php'  => 'log',
     ];
@@ -53,9 +55,11 @@ $allMenus = [
     ['key' => 'pos',       'href' => 'pos.php',            'label' => 'Mesin Kasir (POS)'],
     ['key' => 'produk',    'href' => 'produk.php',         'label' => 'Kelola Produk'],
     ['key' => 'stok',      'href' => 'stok_opname.php',    'label' => 'Stok Opname'],
+    ['key' => 'diskon',    'href' => 'diskon.php',         'label' => 'Kelola Diskon'],
     ['key' => 'rental',    'href' => 'rental_bandara.php', 'label' => 'Rental Bandara'],
     ['key' => 'driver',    'href' => 'driver.php',         'label' => 'Driver Mitra'],
-    ['key' => 'diskon',    'href' => 'diskon.php',         'label' => 'Kelola Diskon'],
+    ['key' => 'simpanan',    'href' => 'simpanan.php',     'label' => 'Kelola Simpanan'],
+    ['key' => 'pinjaman',    'href' => 'pinjaman.php',     'label' => 'Kelola Pinjaman'],
     ['key' => 'laporan',   'href' => 'laporan.php',        'label' => 'Laporan Keuangan'],
     ['key' => 'log',       'href' => 'log_aktivitas.php',  'label' => 'Log Aktivitas'],
 ];
@@ -70,6 +74,7 @@ $roleBadge = [
     'admin'  => ['label' => 'Admin',  'color' => 'bg-black text-white'],
     'kasir'  => ['label' => 'Kasir',  'color' => 'bg-blue-100 text-blue-700'],
     'rental' => ['label' => 'Rental', 'color' => 'bg-purple-100 text-purple-700'],
+    'ksp' => ['label' => 'KSP', 'color' => 'bg-green-100 text-green-700'],
 ];
 $badge = isset($roleBadge[$currentRole])
     ? $roleBadge[$currentRole]

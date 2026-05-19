@@ -147,6 +147,49 @@ function has_column_member(PDO $pdo, string $table, string $column): bool
     }
 }
 
+function has_table_member(PDO $pdo, string $table): bool
+{
+    try {
+        $stmt = $pdo->prepare("SHOW TABLES LIKE :t");
+        $stmt->execute([':t' => $table]);
+        return (bool)$stmt->fetch(PDO::FETCH_NUM);
+    } catch (Throwable $e) {
+        return false;
+    }
+}
+
+/**
+ * @param mixed $status
+ */
+function pinjaman_status_label_member($status): string
+{
+    $status = strtolower(trim((string)$status));
+    $map = [
+        'pending' => 'Pending',
+        'diseleksi' => 'Diseleksi',
+        'diproses' => 'Diproses',
+        'disetujui' => 'Disetujui',
+        'ditolak' => 'Ditolak',
+        'dicairkan' => 'Dicairkan',
+        'aktif' => 'Aktif',
+        'lunas' => 'Lunas',
+        'selesai' => 'Selesai',
+    ];
+    return $map[$status] ?? ucfirst($status ?: '-');
+}
+
+/**
+ * @param mixed $status
+ */
+function pinjaman_status_class_member($status): string
+{
+    $status = strtolower(trim((string)$status));
+    if (in_array($status, ['disetujui', 'dicairkan', 'aktif', 'lunas', 'selesai'], true)) return 'transport-status-green';
+    if (in_array($status, ['diseleksi', 'diproses'], true)) return 'transport-status-blue';
+    if ($status === 'ditolak') return 'transport-status-red';
+    return 'transport-status-orange';
+}
+
 $memberId = (int)$_SESSION['member_id'];
 $transportTarif = get_transport_tarif_from_driver($pdo);
 
@@ -226,6 +269,145 @@ try {
     $transaksi = $stmtTrx->fetchAll(PDO::FETCH_ASSOC);
 } catch (Throwable $e) {
     die('Gagal memuat dashboard: ' . h($e->getMessage()));
+}
+
+$pinjamanMsg = '';
+$pinjamanErr = '';
+$konfigSp = [
+    'bunga_uang' => 1.00,
+    'bunga_barang' => 1.50,
+    'tenor_maks_uang' => 24,
+    'tenor_maks_barang' => 36,
+];
+$tenorUang = [];
+$tenorBarang = [];
+$pengajuanPinjaman = [];
+$pinjamanAktif = [];
+
+try {
+    // Ambil konfigurasi bunga langsung dari tabel konfigurasi_sp.
+    // Tidak bergantung ke has_table_member agar nilai bunga selalu mengikuti database.
+    $rowKonfig = $pdo->query("
+        SELECT bunga_uang, bunga_barang, tenor_maks_uang, tenor_maks_barang
+        FROM konfigurasi_sp
+        ORDER BY id ASC
+        LIMIT 1
+    ")->fetch(PDO::FETCH_ASSOC);
+
+    if ($rowKonfig) {
+        $konfigSp['bunga_uang'] = (float)($rowKonfig['bunga_uang'] ?? $konfigSp['bunga_uang']);
+        $konfigSp['bunga_barang'] = (float)($rowKonfig['bunga_barang'] ?? $konfigSp['bunga_barang']);
+        $konfigSp['tenor_maks_uang'] = (int)($rowKonfig['tenor_maks_uang'] ?? $konfigSp['tenor_maks_uang']);
+        $konfigSp['tenor_maks_barang'] = (int)($rowKonfig['tenor_maks_barang'] ?? $konfigSp['tenor_maks_barang']);
+    }
+
+    // Ambil pilihan tenor langsung dari tabel konfigurasi_tenor.
+    // Tidak memakai fallback hardcode agar pilihan di member selalu sama dengan database.
+    $stmtTenor = $pdo->query("
+        SELECT jenis, tenor
+        FROM konfigurasi_tenor
+        WHERE jenis IN ('uang', 'barang')
+          AND tenor IS NOT NULL
+          AND tenor > 0
+        ORDER BY jenis ASC, tenor ASC
+    ");
+
+    foreach ($stmtTenor->fetchAll(PDO::FETCH_ASSOC) as $row) {
+        $jenisTenor = strtolower(trim((string)($row['jenis'] ?? '')));
+        $nilaiTenor = (int)($row['tenor'] ?? 0);
+
+        if ($nilaiTenor < 1) {
+            continue;
+        }
+
+        if ($jenisTenor === 'uang') {
+            $tenorUang[] = $nilaiTenor;
+        } elseif ($jenisTenor === 'barang') {
+            $tenorBarang[] = $nilaiTenor;
+        }
+    }
+
+    $tenorUang = array_values(array_unique($tenorUang));
+    $tenorBarang = array_values(array_unique($tenorBarang));
+    sort($tenorUang, SORT_NUMERIC);
+    sort($tenorBarang, SORT_NUMERIC);
+} catch (Throwable $e) {
+    $pinjamanErr = 'Konfigurasi pinjaman belum siap: ' . $e->getMessage();
+}
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['action'] === 'ajukan_pinjaman') {
+    $jenis       = strtolower(trim((string)($_POST['jenis'] ?? '')));
+    $tenor       = (int)($_POST['tenor'] ?? 0);
+    $keperluan   = trim((string)($_POST['keperluan'] ?? ''));
+    $namaBarang  = trim((string)($_POST['nama_barang'] ?? ''));
+    $jumlahInput = (float)str_replace(['.', ','], ['', '.'], (string)($_POST['jumlah'] ?? '0'));
+
+    if (!in_array($jenis, ['uang', 'barang'], true)) {
+        $pinjamanErr = 'Jenis pinjaman tidak valid.';
+    } elseif ($jumlahInput <= 0) {
+        $pinjamanErr = $jenis === 'barang' ? 'Harga barang wajib diisi.' : 'Nominal pinjaman wajib diisi.';
+    } elseif ($jenis === 'barang' && $namaBarang === '') {
+        $pinjamanErr = 'Nama barang wajib diisi untuk pinjaman barang.';
+    } elseif (!in_array($tenor, $jenis === 'barang' ? $tenorBarang : $tenorUang, true)) {
+        $pinjamanErr = 'Tenor tidak tersedia dalam konfigurasi.';
+    } else {
+        try {
+            $stmt = $pdo->prepare("
+                INSERT INTO pengajuan_pinjaman
+                    (member_id, jenis, jumlah, tenor, keperluan, nama_barang, harga_barang, status, created_at, updated_at)
+                VALUES
+                    (:member_id, :jenis, :jumlah, :tenor, :keperluan, :nama_barang, :harga_barang, 'pending', NOW(), NOW())
+            ");
+            $stmt->execute([
+                ':member_id' => $memberId,
+                ':jenis' => $jenis,
+                ':jumlah' => $jumlahInput,
+                ':tenor' => $tenor,
+                ':keperluan' => $keperluan,
+                ':nama_barang' => $jenis === 'barang' ? $namaBarang : null,
+                ':harga_barang' => $jenis === 'barang' ? $jumlahInput : null,
+            ]);
+
+            if (function_exists('catat_aktivitas')) {
+                catat_aktivitas($pdo, 'create', 'Pengajuan Pinjaman', 'Member mengajukan pinjaman ' . $jenis . ' sebesar ' . rupiah_member($jumlahInput));
+            }
+
+            header('Location: member_dashboard.php#pinjaman');
+            exit;
+        } catch (Throwable $e) {
+            $pinjamanErr = 'Gagal mengirim pengajuan pinjaman: ' . $e->getMessage();
+        }
+    }
+}
+
+try {
+    if (has_table_member($pdo, 'pengajuan_pinjaman')) {
+        $stmtPengajuan = $pdo->prepare("
+            SELECT *
+            FROM pengajuan_pinjaman
+            WHERE member_id = :member_id
+            ORDER BY created_at DESC, id DESC
+            LIMIT 20
+        ");
+        $stmtPengajuan->execute([':member_id' => $memberId]);
+        $pengajuanPinjaman = $stmtPengajuan->fetchAll(PDO::FETCH_ASSOC);
+    }
+
+    if (has_table_member($pdo, 'pinjaman')) {
+        $stmtPinjaman = $pdo->prepare("
+            SELECT *
+            FROM pinjaman
+            WHERE member_id = :member_id
+            ORDER BY created_at DESC, id DESC
+            LIMIT 20
+        ");
+        $stmtPinjaman->execute([':member_id' => $memberId]);
+        $pinjamanAktif = $stmtPinjaman->fetchAll(PDO::FETCH_ASSOC);
+    }
+} catch (Throwable $e) {
+    if (!$pinjamanErr) {
+        $pinjamanErr = 'Gagal memuat data pinjaman: ' . $e->getMessage();
+    }
 }
 
 $jumlahTransaksi         = (int)($summary['jumlah_transaksi']           ?? 0);
@@ -2482,6 +2664,80 @@ catat_view_once($pdo, 'Member Dashboard', 'Membuka halaman Member Dashboard');
         }
 
 
+        /* ── Pinjaman Member ── */
+        .loan-type-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 10px;
+            margin-top: 8px;
+        }
+
+        .loan-type-option {
+            position: relative;
+        }
+
+        .loan-type-option input {
+            position: absolute;
+            opacity: 0;
+            pointer-events: none;
+        }
+
+        .loan-type-card {
+            border: 0.5px solid var(--g6);
+            background: var(--white);
+            padding: 14px;
+            min-height: 86px;
+            cursor: pointer;
+            transition: .15s ease;
+        }
+
+        .loan-type-option input:checked+.loan-type-card {
+            border-color: var(--black);
+            background: var(--g8);
+            box-shadow: inset 0 0 0 1px var(--black);
+        }
+
+        .loan-type-name {
+            font-size: 12px;
+            font-weight: 900;
+            color: var(--black);
+            margin-bottom: 5px;
+        }
+
+        .loan-type-meta {
+            font-size: 10px;
+            font-weight: 700;
+            color: var(--g4);
+            line-height: 1.5;
+        }
+
+        .loan-summary-box {
+            border: 0.5px solid var(--g6);
+            background: var(--g8);
+            padding: 14px;
+            margin-top: 4px;
+        }
+
+        .loan-summary-row {
+            display: flex;
+            justify-content: space-between;
+            gap: 12px;
+            padding: 6px 0;
+            border-bottom: 0.5px solid var(--g6);
+            font-size: 11px;
+            font-weight: 700;
+            color: var(--g3);
+        }
+
+        .loan-summary-row:last-child {
+            border-bottom: none;
+        }
+
+        .loan-summary-row strong {
+            color: var(--black);
+            font-weight: 900;
+        }
+
         /* ── Responsive ── */
         @media(min-width:640px) {
             .stats-grid {
@@ -2775,6 +3031,18 @@ catat_view_once($pdo, 'Member Dashboard', 'Membuka halaman Member Dashboard');
                                     <line x1="12" y1="17" x2="12.01" y2="17" />
                                 </svg></div>
                             <span class="quick-label">Bantuan</span>
+                        </button>
+
+                        <button class="quick-item" onclick="goTo('pinjaman')">
+                            <div class="quick-ico">
+                                <svg viewBox="0 0 24 24">
+                                    <rect x="3" y="4" width="18" height="16" rx="2" />
+                                    <path d="M7 8h10" />
+                                    <path d="M7 12h7" />
+                                    <path d="M7 16h4" />
+                                </svg>
+                            </div>
+                            <span class="quick-label">Pinjaman</span>
                         </button>
 
                         <button class="quick-item" onclick="goTo('transport')">
@@ -3280,6 +3548,245 @@ catat_view_once($pdo, 'Member Dashboard', 'Membuka halaman Member Dashboard');
 
 
             <!-- ══════════════════════════════
+             PAGE: PINJAMAN
+        ══════════════════════════════ -->
+            <div class="page" id="page-pinjaman">
+                <div class="promo-hero-bar">
+                    <div style="font-size:10px;font-weight:900;text-transform:uppercase;letter-spacing:.15em;opacity:.4;margin-bottom:8px;">Layanan Simpan Pinjam</div>
+                    <h2>Pengajuan<br>Pinjaman</h2>
+                    <p>Ajukan pinjaman uang atau barang dan pantau statusnya di sini.</p>
+                </div>
+
+                <?php if ($pinjamanMsg): ?>
+                    <div class="transport-alert transport-alert-success">
+                        <span class="transport-alert-icon">✓</span>
+                        <span><?= h($pinjamanMsg) ?></span>
+                    </div>
+                <?php endif; ?>
+
+                <?php if ($pinjamanErr): ?>
+                    <div class="transport-alert transport-alert-error">
+                        <span class="transport-alert-icon">!</span>
+                        <span><?= h($pinjamanErr) ?></span>
+                    </div>
+                <?php endif; ?>
+
+                <div class="transport-card-box">
+                    <div class="transport-section-head">
+                        <div>
+                            <h3>Form Pengajuan</h3>
+                            <div style="font-size:11px;font-weight:600;color:var(--g4);margin-top:4px;">Pilih jenis, nominal/harga barang, dan tenor</div>
+                            <div style="font-size:10px;font-weight:700;color:var(--g4);margin-top:6px;line-height:1.6;">
+                                Tenor uang: <?= $tenorUang ? h(implode(', ', $tenorUang)) . ' bulan' : 'belum dikonfigurasi' ?><br>
+                                Tenor barang: <?= $tenorBarang ? h(implode(', ', $tenorBarang)) . ' bulan' : 'belum dikonfigurasi' ?>
+                            </div>
+                        </div>
+                        <span>SP</span>
+                    </div>
+
+                    <form method="POST" class="transport-form" id="form-pinjaman-member">
+                        <input type="hidden" name="action" value="ajukan_pinjaman">
+
+                        <div class="transport-form-group">
+                            <label>Jenis Pinjaman</label>
+                            <div class="loan-type-grid">
+                                <label class="loan-type-option">
+                                    <input type="radio" name="jenis" value="uang" checked onchange="updateLoanForm()">
+                                    <div class="loan-type-card">
+                                        <div class="loan-type-name">Pinjaman Uang</div>
+                                        <div class="loan-type-meta">Bunga <?= h($konfigSp['bunga_uang']) ?>%/bulan flat</div>
+                                    </div>
+                                </label>
+                                <label class="loan-type-option">
+                                    <input type="radio" name="jenis" value="barang" onchange="updateLoanForm()">
+                                    <div class="loan-type-card">
+                                        <div class="loan-type-name">Pinjaman Barang</div>
+                                        <div class="loan-type-meta">Bunga <?= h($konfigSp['bunga_barang']) ?>%/bulan flat</div>
+                                    </div>
+                                </label>
+                            </div>
+                        </div>
+
+                        <div class="transport-form-group" id="nama-barang-wrap" style="display:none;">
+                            <label>Nama Barang</label>
+                            <input type="text" name="nama_barang" id="loan-nama-barang" class="transport-input" placeholder="Contoh: Laptop, HP, kulkas">
+                        </div>
+
+                        <div class="transport-form-group">
+                            <label id="loan-jumlah-label">Nominal Pinjaman</label>
+                            <input type="text" name="jumlah" id="loan-jumlah" class="transport-input" placeholder="Contoh: 5000000" inputmode="numeric" oninput="updateLoanEstimate()" required>
+                        </div>
+
+                        <div class="transport-form-group">
+                            <label>Tenor</label>
+                            <select name="tenor" id="loan-tenor" class="transport-input" onchange="updateLoanEstimate()" required></select>
+                        </div>
+
+                        <div class="loan-summary-box">
+                            <div class="loan-summary-row">
+                                <span>Estimasi Pokok / Bulan</span>
+                                <strong id="loan-est-pokok">Rp 0</strong>
+                            </div>
+                            <div class="loan-summary-row">
+                                <span>Estimasi Bunga / Bulan</span>
+                                <strong id="loan-est-bunga">Rp 0</strong>
+                            </div>
+                            <div class="loan-summary-row">
+                                <span>Total Angsuran / Bulan</span>
+                                <strong id="loan-est-total">Rp 0</strong>
+                            </div>
+                        </div>
+
+                        <div class="transport-form-group">
+                            <label>Keperluan / Catatan</label>
+                            <textarea name="keperluan" class="transport-input transport-textarea" placeholder="Tuliskan keperluan pengajuan pinjaman"></textarea>
+                        </div>
+
+                        <button type="submit" class="transport-submit">
+                            Kirim Pengajuan
+                        </button>
+                    </form>
+                </div>
+
+                <div class="transport-card-box">
+                    <div class="transport-section-head">
+                        <div>
+                            <h3>Riwayat Pengajuan</h3>
+                            <div style="font-size:11px;font-weight:600;color:var(--g4);margin-top:4px;">Status pengajuan pinjaman Anda</div>
+                        </div>
+                        <span><?= angka_member(count($pengajuanPinjaman)) ?></span>
+                    </div>
+
+                    <div class="transport-history-wrap">
+                        <?php if (!$pengajuanPinjaman): ?>
+                            <div class="transport-empty">Belum ada pengajuan pinjaman</div>
+                        <?php endif; ?>
+
+                        <?php foreach ($pengajuanPinjaman as $p):
+                            $bungaPct = $p['jenis'] === 'barang' ? (float)$konfigSp['bunga_barang'] : (float)$konfigSp['bunga_uang'];
+                            $pokok = (float)($p['jumlah'] ?? 0);
+                            $tenor = max(1, (int)($p['tenor'] ?? 1));
+                            $angPok = round($pokok / $tenor);
+                            $angBng = round($pokok * $bungaPct / 100);
+                            $angTot = $angPok + $angBng;
+                        ?>
+                            <div class="transport-history-card">
+                                <div class="transport-history-top">
+                                    <div>
+                                        <div class="transport-booking-code">Pengajuan #<?= (int)$p['id'] ?></div>
+                                        <div class="transport-booking-date"><?= h(tanggal_member($p['created_at'])) ?></div>
+                                    </div>
+                                    <div class="transport-status <?= h(pinjaman_status_class_member($p['status'])) ?>">
+                                        <?= h(pinjaman_status_label_member($p['status'])) ?>
+                                    </div>
+                                </div>
+
+                                <div class="transport-history-grid">
+                                    <div class="transport-history-item">
+                                        <span>Jenis</span>
+                                        <strong><?= h(ucfirst((string)$p['jenis'])) ?></strong>
+                                    </div>
+                                    <div class="transport-history-item">
+                                        <span>Jumlah</span>
+                                        <strong><?= rupiah_member($pokok) ?></strong>
+                                    </div>
+                                    <div class="transport-history-item">
+                                        <span>Tenor</span>
+                                        <strong><?= angka_member($tenor) ?> Bulan</strong>
+                                    </div>
+                                    <div class="transport-history-item">
+                                        <span>Angsuran</span>
+                                        <strong><?= rupiah_member($angTot) ?></strong>
+                                    </div>
+                                </div>
+
+                                <?php if (!empty($p['nama_barang']) || !empty($p['keperluan']) || !empty($p['catatan_petugas'])): ?>
+                                    <div class="transport-route-box">
+                                        <?php if (!empty($p['nama_barang'])): ?>
+                                            <div class="transport-route-item">
+                                                <small>Barang</small>
+                                                <div><?= h($p['nama_barang']) ?></div>
+                                            </div>
+                                            <?php if (!empty($p['keperluan']) || !empty($p['catatan_petugas'])): ?>
+                                                <div class="transport-route-divider"></div>
+                                            <?php endif; ?>
+                                        <?php endif; ?>
+
+                                        <?php if (!empty($p['keperluan'])): ?>
+                                            <div class="transport-route-item">
+                                                <small>Keperluan</small>
+                                                <div><?= h($p['keperluan']) ?></div>
+                                            </div>
+                                            <?php if (!empty($p['catatan_petugas'])): ?>
+                                                <div class="transport-route-divider"></div>
+                                            <?php endif; ?>
+                                        <?php endif; ?>
+
+                                        <?php if (!empty($p['catatan_petugas'])): ?>
+                                            <div class="transport-route-item">
+                                                <small>Catatan Petugas</small>
+                                                <div><?= h($p['catatan_petugas']) ?></div>
+                                            </div>
+                                        <?php endif; ?>
+                                    </div>
+                                <?php endif; ?>
+                            </div>
+                        <?php endforeach; ?>
+                    </div>
+                </div>
+
+                <div class="transport-card-box">
+                    <div class="transport-section-head">
+                        <div>
+                            <h3>Pinjaman Aktif</h3>
+                            <div style="font-size:11px;font-weight:600;color:var(--g4);margin-top:4px;">Pinjaman yang sudah dicairkan</div>
+                        </div>
+                        <span><?= angka_member(count($pinjamanAktif)) ?></span>
+                    </div>
+
+                    <div class="transport-history-wrap">
+                        <?php if (!$pinjamanAktif): ?>
+                            <div class="transport-empty">Belum ada pinjaman aktif</div>
+                        <?php endif; ?>
+
+                        <?php foreach ($pinjamanAktif as $p): ?>
+                            <div class="transport-history-card">
+                                <div class="transport-history-top">
+                                    <div>
+                                        <div class="transport-booking-code">Pinjaman #<?= (int)$p['id'] ?></div>
+                                        <div class="transport-booking-date"><?= h(tanggal_short($p['tanggal_mulai'] ?? $p['created_at'])) ?> - <?= h(tanggal_short($p['tanggal_selesai'] ?? null)) ?></div>
+                                    </div>
+                                    <div class="transport-status <?= h(pinjaman_status_class_member($p['status'] ?? 'aktif')) ?>">
+                                        <?= h(pinjaman_status_label_member($p['status'] ?? 'aktif')) ?>
+                                    </div>
+                                </div>
+
+                                <div class="transport-history-grid">
+                                    <div class="transport-history-item">
+                                        <span>Jenis</span>
+                                        <strong><?= h(ucfirst((string)$p['jenis'])) ?></strong>
+                                    </div>
+                                    <div class="transport-history-item">
+                                        <span>Pokok</span>
+                                        <strong><?= rupiah_member($p['pokok'] ?? 0) ?></strong>
+                                    </div>
+                                    <div class="transport-history-item">
+                                        <span>Tenor</span>
+                                        <strong><?= angka_member($p['tenor'] ?? 0) ?> Bulan</strong>
+                                    </div>
+                                    <div class="transport-history-item">
+                                        <span>Angsuran</span>
+                                        <strong><?= rupiah_member($p['angsuran_total'] ?? 0) ?></strong>
+                                    </div>
+                                </div>
+                            </div>
+                        <?php endforeach; ?>
+                    </div>
+                </div>
+            </div><!-- /page-pinjaman -->
+
+
+            <!-- ══════════════════════════════
              PAGE: TRANSPORT BANDARA
         ══════════════════════════════ -->
             <div class="page" id="page-transport">
@@ -3493,6 +4000,25 @@ catat_view_once($pdo, 'Member Dashboard', 'Membuka halaman Member Dashboard');
                     </div>
                 </div>
                 <div class="menu-section">
+                    <div class="menu-section-label">Simpan Pinjam</div>
+                    <div class="menu-group-card">
+                        <button class="menu-row" onclick="goTo('pinjaman')">
+                            <div class="menu-ico"><svg viewBox="0 0 24 24">
+                                    <rect x="3" y="4" width="18" height="16" rx="2" />
+                                    <path d="M7 8h10" />
+                                    <path d="M7 12h7" />
+                                    <path d="M7 16h4" />
+                                </svg></div>
+                            <div class="menu-text-wrap">
+                                <div class="menu-title">Pengajuan Pinjaman</div>
+                                <div class="menu-sub">Ajukan dan pantau status pinjaman</div>
+                            </div>
+                            <span class="menu-chevron">›</span>
+                        </button>
+                    </div>
+                </div>
+
+                <div class="menu-section">
                     <div class="menu-section-label">Transaksi</div>
                     <div class="menu-group-card">
                         <button class="menu-row" onclick="goTo('pesanan')">
@@ -3608,6 +4134,16 @@ catat_view_once($pdo, 'Member Dashboard', 'Membuka halaman Member Dashboard');
                     </svg>
                 </div>
                 <span class="nav-label">Pesanan</span>
+            </button>
+
+            <button class="nav-btn" id="nav-pinjaman" onclick="goTo('pinjaman')">
+                <div class="nav-icon"><svg viewBox="0 0 24 24">
+                        <rect x="3" y="4" width="18" height="16" rx="2" />
+                        <path d="M7 8h10" />
+                        <path d="M7 12h7" />
+                        <path d="M7 16h4" />
+                    </svg></div>
+                <span class="nav-label">Pinjaman</span>
             </button>
 
             <button class="nav-btn" id="nav-transport" onclick="goTo('transport')">
@@ -4140,7 +4676,91 @@ catat_view_once($pdo, 'Member Dashboard', 'Membuka halaman Member Dashboard');
             }
         }
 
+        /* ── Pinjaman Member ── */
+        var TENOR_UANG = <?= json_encode(array_values($tenorUang)) ?>;
+        var TENOR_BARANG = <?= json_encode(array_values($tenorBarang)) ?>;
+        var BUNGA_UANG = Number(<?= json_encode((float)$konfigSp['bunga_uang']) ?>) || 0;
+        var BUNGA_BARANG = Number(<?= json_encode((float)$konfigSp['bunga_barang']) ?>) || 0;
+
+        function getLoanJenis() {
+            var checked = document.querySelector('input[name="jenis"]:checked');
+            return checked ? checked.value : 'uang';
+        }
+
+        function normalizeNumberInput(v) {
+            return Number(String(v || '').replace(/\./g, '').replace(/,/g, '.')) || 0;
+        }
+
+        function formatRupiahSimple(n) {
+            return 'Rp ' + Number(n || 0).toLocaleString('id-ID');
+        }
+
+        function updateLoanForm() {
+            var jenis = getLoanJenis();
+            var tenorSelect = document.getElementById('loan-tenor');
+            var jumlahLabel = document.getElementById('loan-jumlah-label');
+            var namaBarangWrap = document.getElementById('nama-barang-wrap');
+            var namaBarang = document.getElementById('loan-nama-barang');
+
+            if (!tenorSelect) return;
+
+            var tenors = jenis === 'barang' ? TENOR_BARANG : TENOR_UANG;
+            tenorSelect.innerHTML = '';
+            if (!tenors || tenors.length === 0) {
+                var opt = document.createElement('option');
+                opt.value = '';
+                opt.textContent = 'Tenor belum dikonfigurasi';
+                tenorSelect.appendChild(opt);
+            } else {
+                tenors.forEach(function(t) {
+                    var opt = document.createElement('option');
+                    opt.value = t;
+                    opt.textContent = t + ' Bulan';
+                    tenorSelect.appendChild(opt);
+                });
+            }
+
+            if (jumlahLabel) jumlahLabel.textContent = jenis === 'barang' ? 'Harga Barang' : 'Nominal Pinjaman';
+            if (namaBarangWrap) namaBarangWrap.style.display = jenis === 'barang' ? '' : 'none';
+            if (namaBarang && jenis !== 'barang') namaBarang.value = '';
+
+            updateLoanEstimate();
+        }
+
+        var formPinjamanMember = document.getElementById('form-pinjaman-member');
+        if (formPinjamanMember) {
+            formPinjamanMember.addEventListener('submit', function(e) {
+                var tenorSelect = document.getElementById('loan-tenor');
+                if (!tenorSelect || !tenorSelect.value) {
+                    e.preventDefault();
+                    showToast('Tenor belum dikonfigurasi untuk jenis pinjaman ini');
+                }
+            });
+        }
+
+        function updateLoanEstimate() {
+            var jumlah = normalizeNumberInput(document.getElementById('loan-jumlah') ? document.getElementById('loan-jumlah').value : 0);
+            var tenor = Number(document.getElementById('loan-tenor') ? document.getElementById('loan-tenor').value : 0) || 0;
+            var jenis = getLoanJenis();
+            var bunga = jenis === 'barang' ? BUNGA_BARANG : BUNGA_UANG;
+
+            var pokok = tenor > 0 ? Math.round(jumlah / tenor) : 0;
+            var bungaBulanan = Math.round(jumlah * bunga / 100);
+            var total = pokok + bungaBulanan;
+
+            var elPokok = document.getElementById('loan-est-pokok');
+            var elBunga = document.getElementById('loan-est-bunga');
+            var elTotal = document.getElementById('loan-est-total');
+
+            if (elPokok) elPokok.textContent = formatRupiahSimple(pokok);
+            if (elBunga) elBunga.textContent = formatRupiahSimple(bungaBulanan);
+            if (elTotal) elTotal.textContent = formatRupiahSimple(total);
+        }
+
         document.addEventListener('DOMContentLoaded', function() {
+            if (typeof updateLoanForm === 'function') {
+                updateLoanForm();
+            }
             var targetHash = (window.location.hash || '').replace('#', '');
             if (targetHash && typeof goTo === 'function') {
                 goTo(targetHash);
