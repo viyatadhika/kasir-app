@@ -13,9 +13,11 @@ $backUrl     = 'dashboard.php';
 $isAdmin       = has_role('admin');
 $isKasirOnly   = has_role('kasir') && !$isAdmin;
 $isMurniRental = has_role('rental') && !$isAdmin;
+$isMurniKsp    = has_role('ksp') && !$isAdmin;
 $showTabs      = $isAdmin; // admin lihat semua via tab
 $isKasir       = has_role('admin', 'kasir');   // admin + kasir lihat laporan POS
 $isRental      = has_role('admin', 'rental');  // admin + rental lihat laporan rental
+$isKsp         = has_role('admin', 'ksp');     // admin + ksp lihat laporan simpan pinjam
 
 // ── Helper functions ─────────────────────────────────────────────────────────
 if (!function_exists('rupiah')) {
@@ -113,6 +115,20 @@ $ringkasanRental    = ['total_order' => 0, 'total_pendapatan' => 0, 'total_drive
 $orderRental        = [];
 $totalOrderRental   = 0;
 $pendapatanRental   = 0;
+
+// KSP / Simpan Pinjam
+$kspSummary = [
+    'pengajuan_total' => 0,
+    'pengajuan_nilai' => 0,
+    'pinjaman_aktif' => 0,
+    'pinjaman_pokok' => 0,
+    'angsuran_tertagih' => 0,
+    'angsuran_dibayar' => 0,
+    'angsuran_belum_bayar' => 0,
+];
+$kspPengajuan = [];
+$kspPinjaman = [];
+$kspAngsuran = [];
 
 // ════════════════════════════════════════════════════════════════════════════
 // DATA: ADMIN & KASIR — Transaksi POS
@@ -269,6 +285,93 @@ if ($isRental) {
     $pendapatanRental = (int)($ringkasanRental['total_pendapatan'] ?? 0);
 }
 
+
+// ════════════════════════════════════════════════════════════════════════════
+// DATA: KSP — Pengajuan, pinjaman aktif, dan angsuran
+// ════════════════════════════════════════════════════════════════════════════
+if ($isKsp) {
+    try {
+        $stmt = $pdo->prepare("
+            SELECT COUNT(*) AS total, COALESCE(SUM(jumlah), 0) AS nilai
+            FROM pengajuan_pinjaman
+            WHERE DATE(created_at) BETWEEN :awal AND :akhir
+        ");
+        $stmt->execute([':awal' => $awal, ':akhir' => $akhir]);
+        $row = $stmt->fetch(PDO::FETCH_ASSOC) ?: [];
+        $kspSummary['pengajuan_total'] = (int)($row['total'] ?? 0);
+        $kspSummary['pengajuan_nilai'] = (float)($row['nilai'] ?? 0);
+
+        $stmt = $pdo->prepare("
+            SELECT pp.*, m.nama AS member_nama, m.kode AS member_kode
+            FROM pengajuan_pinjaman pp
+            LEFT JOIN member m ON m.id = pp.member_id
+            WHERE DATE(pp.created_at) BETWEEN :awal AND :akhir
+            ORDER BY pp.created_at DESC, pp.id DESC
+            LIMIT 100
+        ");
+        $stmt->execute([':awal' => $awal, ':akhir' => $akhir]);
+        $kspPengajuan = $stmt->fetchAll(PDO::FETCH_ASSOC);
+    } catch (Throwable $e) {
+        $kspPengajuan = [];
+    }
+
+    try {
+        $stmt = $pdo->prepare("
+            SELECT COUNT(*) AS total,
+                   COALESCE(SUM(pokok), 0) AS pokok
+            FROM pinjaman
+            WHERE status IN ('aktif', 'berjalan')
+              AND DATE(created_at) BETWEEN :awal AND :akhir
+        ");
+        $stmt->execute([':awal' => $awal, ':akhir' => $akhir]);
+        $row = $stmt->fetch(PDO::FETCH_ASSOC) ?: [];
+        $kspSummary['pinjaman_aktif'] = (int)($row['total'] ?? 0);
+        $kspSummary['pinjaman_pokok'] = (float)($row['pokok'] ?? 0);
+
+        $stmt = $pdo->prepare("
+            SELECT p.*, m.nama AS member_nama, m.kode AS member_kode
+            FROM pinjaman p
+            LEFT JOIN member m ON m.id = p.member_id
+            WHERE DATE(p.created_at) BETWEEN :awal AND :akhir
+            ORDER BY p.created_at DESC, p.id DESC
+            LIMIT 100
+        ");
+        $stmt->execute([':awal' => $awal, ':akhir' => $akhir]);
+        $kspPinjaman = $stmt->fetchAll(PDO::FETCH_ASSOC);
+    } catch (Throwable $e) {
+        $kspPinjaman = [];
+    }
+
+    try {
+        $stmt = $pdo->prepare("
+            SELECT
+                COALESCE(SUM(jumlah_total), 0) AS tertagih,
+                COALESCE(SUM(CASE WHEN status IN ('dibayar', 'lunas') THEN jumlah_total ELSE 0 END), 0) AS dibayar,
+                COALESCE(SUM(CASE WHEN status NOT IN ('dibayar', 'lunas') THEN jumlah_total ELSE 0 END), 0) AS belum_bayar
+            FROM pinjaman_angsuran
+            WHERE jatuh_tempo BETWEEN :awal AND :akhir
+        ");
+        $stmt->execute([':awal' => $awal, ':akhir' => $akhir]);
+        $row = $stmt->fetch(PDO::FETCH_ASSOC) ?: [];
+        $kspSummary['angsuran_tertagih'] = (float)($row['tertagih'] ?? 0);
+        $kspSummary['angsuran_dibayar'] = (float)($row['dibayar'] ?? 0);
+        $kspSummary['angsuran_belum_bayar'] = (float)($row['belum_bayar'] ?? 0);
+
+        $stmt = $pdo->prepare("
+            SELECT pa.*, m.nama AS member_nama, m.kode AS member_kode
+            FROM pinjaman_angsuran pa
+            LEFT JOIN member m ON m.id = pa.member_id
+            WHERE pa.jatuh_tempo BETWEEN :awal AND :akhir
+            ORDER BY pa.jatuh_tempo ASC, pa.id ASC
+            LIMIT 100
+        ");
+        $stmt->execute([':awal' => $awal, ':akhir' => $akhir]);
+        $kspAngsuran = $stmt->fetchAll(PDO::FETCH_ASSOC);
+    } catch (Throwable $e) {
+        $kspAngsuran = [];
+    }
+}
+
 catat_view_once($pdo, 'Laporan Keuangan', 'Membuka halaman Laporan Keuangan');
 ?>
 <!DOCTYPE html>
@@ -277,7 +380,7 @@ catat_view_once($pdo, 'Laporan Keuangan', 'Membuka halaman Laporan Keuangan');
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title><?= e($isRental ? 'Laporan Rental' : 'Laporan Keuangan') ?> — SEJAHUB</title>
+    <title><?= e($isMurniKsp ? 'Laporan Simpan Pinjam' : ($isRental ? 'Laporan Rental' : 'Laporan Keuangan')) ?> — SEJAHUB</title>
     <link rel="icon" type="image/png" href="assets/sejahub_icon.png">
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
@@ -505,8 +608,9 @@ catat_view_once($pdo, 'Laporan Keuangan', 'Membuka halaman Laporan Keuangan');
                     <h2 class="text-lg font-bold tracking-tight">Laporan Keuangan</h2>
                     <p class="text-[10px] text-gray-400 uppercase tracking-widest mt-0.5">
                         <?php
-                        if ($isAdmin) echo 'Lihat semua laporan — kasir, rental, dan lainnya';
+                        if ($isAdmin) echo 'Lihat semua laporan — kasir, rental, simpan pinjam, dan lainnya';
                         elseif ($isMurniRental) echo 'Data order &amp; pendapatan rental';
+                        elseif ($isMurniKsp) echo 'Data pengajuan, pinjaman aktif, dan angsuran';
                         else echo 'Data transaksi POS &amp; diskon';
                         ?>
                     </p>
@@ -523,6 +627,10 @@ catat_view_once($pdo, 'Laporan Keuangan', 'Membuka halaman Laporan Keuangan');
                     <button id="tab-rental" onclick="switchTab('rental')"
                         class="tab-btn px-5 py-3 text-[10px] font-black uppercase tracking-widest border-b-2 transition-all">
                         Rental Bandara
+                    </button>
+                    <button id="tab-ksp" onclick="switchTab('ksp')"
+                        class="tab-btn px-5 py-3 text-[10px] font-black uppercase tracking-widest border-b-2 transition-all">
+                        Simpan Pinjam
                     </button>
                     <!-- ke depan: tambah tab baru di sini -->
                 </div>
@@ -991,12 +1099,165 @@ catat_view_once($pdo, 'Laporan Keuangan', 'Membuka halaman Laporan Keuangan');
             <?php endif; // end isRental 
             ?>
 
+
+            <?php if ($isKsp): ?>
+                <!-- ══════════════════════════════════════════════════════════════════ -->
+                <!-- KONTEN KSP / SIMPAN PINJAM                                        -->
+                <!-- ══════════════════════════════════════════════════════════════════ -->
+                <div id="panel-ksp">
+
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-3 md:gap-4">
+                        <div class="bg-white border border-subtle p-4 md:p-5">
+                            <p class="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1">Pengajuan Periode Ini</p>
+                            <p class="text-2xl font-bold text-amber-600"><?= angka($kspSummary['pengajuan_total']) ?></p>
+                            <p class="text-[10px] text-gray-400 mt-1">Nilai <?= rupiah($kspSummary['pengajuan_nilai']) ?></p>
+                        </div>
+                        <div class="bg-white border border-subtle p-4 md:p-5">
+                            <p class="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1">Pinjaman Aktif Dibuat</p>
+                            <p class="text-2xl font-bold text-blue-600"><?= angka($kspSummary['pinjaman_aktif']) ?></p>
+                            <p class="text-[10px] text-gray-400 mt-1">Pokok <?= rupiah($kspSummary['pinjaman_pokok']) ?></p>
+                        </div>
+                        <div class="bg-white border border-subtle p-4 md:p-5">
+                            <p class="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1">Angsuran Tertagih</p>
+                            <p class="text-2xl font-bold"><?= rupiah($kspSummary['angsuran_tertagih']) ?></p>
+                            <p class="text-[10px] text-gray-400 mt-1">Berdasarkan jatuh tempo periode ini</p>
+                        </div>
+                        <div class="bg-white border <?= $kspSummary['angsuran_belum_bayar'] > 0 ? 'border-red-200' : 'border-subtle' ?> p-4 md:p-5">
+                            <p class="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1">Belum Dibayar</p>
+                            <p class="text-2xl font-bold <?= $kspSummary['angsuran_belum_bayar'] > 0 ? 'text-red-600' : 'text-green-600' ?>"><?= rupiah($kspSummary['angsuran_belum_bayar']) ?></p>
+                            <p class="text-[10px] text-gray-400 mt-1">Dibayar <?= rupiah($kspSummary['angsuran_dibayar']) ?></p>
+                        </div>
+                    </div>
+
+                    <section class="bg-white border border-subtle overflow-hidden">
+                        <div class="px-5 py-4 border-b border-subtle flex items-center justify-between">
+                            <div>
+                                <h2 class="text-[10px] font-bold uppercase tracking-widest text-gray-400">Pengajuan Pinjaman</h2>
+                                <p class="text-xs text-gray-400 mt-0.5"><?= angka(count($kspPengajuan)) ?> pengajuan ditemukan</p>
+                            </div>
+                            <a href="pinjaman.php" class="text-[10px] font-black uppercase tracking-widest underline no-print">Kelola</a>
+                        </div>
+                        <div class="tbl-desktop overflow-x-auto no-scrollbar">
+                            <table class="w-full text-left" style="min-width:760px">
+                                <thead class="border-b border-subtle bg-gray-50">
+                                    <tr>
+                                        <th class="px-5 py-4 text-[10px] font-bold uppercase tracking-widest text-gray-400">Tanggal</th>
+                                        <th class="px-5 py-4 text-[10px] font-bold uppercase tracking-widest text-gray-400">Member</th>
+                                        <th class="px-5 py-4 text-[10px] font-bold uppercase tracking-widest text-gray-400">Jenis</th>
+                                        <th class="px-5 py-4 text-[10px] font-bold uppercase tracking-widest text-gray-400 text-right">Jumlah</th>
+                                        <th class="px-5 py-4 text-[10px] font-bold uppercase tracking-widest text-gray-400 text-center">Tenor</th>
+                                        <th class="px-5 py-4 text-[10px] font-bold uppercase tracking-widest text-gray-400 text-center">Status</th>
+                                    </tr>
+                                </thead>
+                                <tbody class="divide-y divide-[#f5f5f5]">
+                                    <?php if (!$kspPengajuan): ?>
+                                        <tr>
+                                            <td colspan="6" class="py-16 text-center text-[10px] font-bold uppercase tracking-widest text-gray-300">Belum ada pengajuan</td>
+                                        </tr>
+                                    <?php endif; ?>
+                                    <?php foreach ($kspPengajuan as $p): ?>
+                                        <tr>
+                                            <td class="px-5 py-4 text-xs text-gray-500 whitespace-nowrap"><?= e(waktu($p['created_at'] ?? null)) ?></td>
+                                            <td class="px-5 py-4">
+                                                <div class="font-semibold text-sm"><?= e($p['member_nama'] ?? '-') ?></div>
+                                                <div class="text-[10px] text-gray-400 font-mono"><?= e($p['member_kode'] ?? '') ?></div>
+                                            </td>
+                                            <td class="px-5 py-4 text-sm font-bold uppercase"><?= e($p['jenis'] ?? '-') ?></td>
+                                            <td class="px-5 py-4 text-right text-sm font-bold"><?= rupiah($p['jumlah'] ?? 0) ?></td>
+                                            <td class="px-5 py-4 text-center text-sm"><?= angka($p['tenor'] ?? 0) ?> bln</td>
+                                            <td class="px-5 py-4 text-center"><span class="badge-gray text-[9px] font-bold uppercase px-2 py-1 rounded-full"><?= e($p['status'] ?? '-') ?></span></td>
+                                        </tr>
+                                    <?php endforeach; ?>
+                                </tbody>
+                            </table>
+                        </div>
+                        <div class="card-list">
+                            <?php if (!$kspPengajuan): ?><div class="col-span-full py-12 text-center text-[10px] font-bold uppercase tracking-widest text-gray-400">Belum ada pengajuan</div><?php endif; ?>
+                            <?php foreach ($kspPengajuan as $p): ?>
+                                <div class="bg-white border border-subtle p-4 flex flex-col gap-3">
+                                    <div class="flex items-start justify-between gap-2">
+                                        <div class="min-w-0">
+                                            <p class="text-sm font-bold truncate"><?= e($p['member_nama'] ?? '-') ?></p>
+                                            <p class="text-[10px] text-gray-400 mt-0.5"><?= e(waktu($p['created_at'] ?? null)) ?></p>
+                                        </div>
+                                        <span class="badge-gray text-[9px] font-bold uppercase px-2 py-0.5 rounded-full"><?= e($p['status'] ?? '-') ?></span>
+                                    </div>
+                                    <div class="flex justify-between text-xs"><span class="text-gray-400">Jumlah</span><span class="font-bold"><?= rupiah($p['jumlah'] ?? 0) ?></span></div>
+                                    <div class="flex justify-between text-xs"><span class="text-gray-400">Jenis / Tenor</span><span class="font-semibold"><?= e($p['jenis'] ?? '-') ?> · <?= angka($p['tenor'] ?? 0) ?> bln</span></div>
+                                </div>
+                            <?php endforeach; ?>
+                        </div>
+                    </section>
+
+                    <section class="bg-white border border-subtle overflow-hidden">
+                        <div class="px-5 py-4 border-b border-subtle">
+                            <h2 class="text-[10px] font-bold uppercase tracking-widest text-gray-400">Jadwal Angsuran Periode Ini</h2>
+                            <p class="text-xs text-gray-400 mt-0.5"><?= angka(count($kspAngsuran)) ?> angsuran ditemukan</p>
+                        </div>
+                        <div class="tbl-desktop overflow-x-auto no-scrollbar">
+                            <table class="w-full text-left" style="min-width:760px">
+                                <thead class="border-b border-subtle bg-gray-50">
+                                    <tr>
+                                        <th class="px-5 py-4 text-[10px] font-bold uppercase tracking-widest text-gray-400">Jatuh Tempo</th>
+                                        <th class="px-5 py-4 text-[10px] font-bold uppercase tracking-widest text-gray-400">Member</th>
+                                        <th class="px-5 py-4 text-[10px] font-bold uppercase tracking-widest text-gray-400 text-center">Ke</th>
+                                        <th class="px-5 py-4 text-[10px] font-bold uppercase tracking-widest text-gray-400 text-right">Pokok</th>
+                                        <th class="px-5 py-4 text-[10px] font-bold uppercase tracking-widest text-gray-400 text-right">Bunga</th>
+                                        <th class="px-5 py-4 text-[10px] font-bold uppercase tracking-widest text-gray-400 text-right">Total</th>
+                                        <th class="px-5 py-4 text-[10px] font-bold uppercase tracking-widest text-gray-400 text-center">Status</th>
+                                    </tr>
+                                </thead>
+                                <tbody class="divide-y divide-[#f5f5f5]">
+                                    <?php if (!$kspAngsuran): ?>
+                                        <tr>
+                                            <td colspan="7" class="py-16 text-center text-[10px] font-bold uppercase tracking-widest text-gray-300">Belum ada jadwal angsuran</td>
+                                        </tr>
+                                    <?php endif; ?>
+                                    <?php foreach ($kspAngsuran as $a): ?>
+                                        <tr>
+                                            <td class="px-5 py-4 text-xs text-gray-500 whitespace-nowrap"><?= e(tgl($a['jatuh_tempo'] ?? null)) ?></td>
+                                            <td class="px-5 py-4">
+                                                <div class="font-semibold text-sm"><?= e($a['member_nama'] ?? '-') ?></div>
+                                                <div class="text-[10px] text-gray-400 font-mono"><?= e($a['member_kode'] ?? '') ?></div>
+                                            </td>
+                                            <td class="px-5 py-4 text-center text-sm font-bold"><?= angka($a['ke'] ?? 0) ?></td>
+                                            <td class="px-5 py-4 text-right text-sm"><?= rupiah($a['jumlah_pokok'] ?? 0) ?></td>
+                                            <td class="px-5 py-4 text-right text-sm"><?= rupiah($a['jumlah_bunga'] ?? 0) ?></td>
+                                            <td class="px-5 py-4 text-right text-sm font-bold"><?= rupiah($a['jumlah_total'] ?? 0) ?></td>
+                                            <td class="px-5 py-4 text-center"><span class="badge-gray text-[9px] font-bold uppercase px-2 py-1 rounded-full"><?= e($a['status'] ?? '-') ?></span></td>
+                                        </tr>
+                                    <?php endforeach; ?>
+                                </tbody>
+                            </table>
+                        </div>
+                        <div class="card-list">
+                            <?php if (!$kspAngsuran): ?><div class="col-span-full py-12 text-center text-[10px] font-bold uppercase tracking-widest text-gray-400">Belum ada jadwal angsuran</div><?php endif; ?>
+                            <?php foreach ($kspAngsuran as $a): ?>
+                                <div class="bg-white border border-subtle p-4 flex flex-col gap-3">
+                                    <div class="flex items-start justify-between gap-2">
+                                        <div class="min-w-0">
+                                            <p class="text-sm font-bold truncate"><?= e($a['member_nama'] ?? '-') ?></p>
+                                            <p class="text-[10px] text-gray-400 mt-0.5">Jatuh tempo <?= e(tgl($a['jatuh_tempo'] ?? null)) ?></p>
+                                        </div>
+                                        <span class="badge-gray text-[9px] font-bold uppercase px-2 py-0.5 rounded-full"><?= e($a['status'] ?? '-') ?></span>
+                                    </div>
+                                    <div class="flex justify-between text-xs"><span class="text-gray-400">Angsuran Ke</span><span class="font-semibold"><?= angka($a['ke'] ?? 0) ?></span></div>
+                                    <div class="flex justify-between text-xs"><span class="text-gray-400">Total</span><span class="font-bold"><?= rupiah($a['jumlah_total'] ?? 0) ?></span></div>
+                                </div>
+                            <?php endforeach; ?>
+                        </div>
+                    </section>
+
+                </div><!-- end panel-ksp -->
+            <?php endif; // end isKsp 
+            ?>
+
         </main>
     </div>
 
     <script>
         // ── Tab switching (admin only) ────────────────────────────────────────────
-        var activeTab = '<?php echo $isAdmin ? "kasir" : ($isMurniRental ? "rental" : "kasir"); ?>';
+        var activeTab = '<?php echo $isAdmin ? "kasir" : ($isMurniRental ? "rental" : ($isMurniKsp ? "ksp" : "kasir")); ?>';
 
         function switchTab(tab) {
             activeTab = tab;
@@ -1004,8 +1265,10 @@ catat_view_once($pdo, 'Laporan Keuangan', 'Membuka halaman Laporan Keuangan');
             // Panel visibility
             var panelKasir = document.getElementById('panel-kasir');
             var panelRental = document.getElementById('panel-rental');
+            var panelKsp = document.getElementById('panel-ksp');
             if (panelKasir) panelKasir.style.display = tab === 'kasir' ? '' : 'none';
             if (panelRental) panelRental.style.display = tab === 'rental' ? '' : 'none';
+            if (panelKsp) panelKsp.style.display = tab === 'ksp' ? '' : 'none';
 
             // Tab button style
             document.querySelectorAll('.tab-btn').forEach(function(btn) {
@@ -1027,12 +1290,21 @@ catat_view_once($pdo, 'Laporan Keuangan', 'Membuka halaman Laporan Keuangan');
                 // Non-admin: pastikan panel yang relevan tampil, sisanya hidden
                 var panelKasir = document.getElementById('panel-kasir');
                 var panelRental = document.getElementById('panel-rental');
+                var panelKsp = document.getElementById('panel-ksp');
                 <?php if ($isMurniRental): ?>
                     if (panelKasir) panelKasir.style.display = 'none';
                     if (panelRental) panelRental.style.display = '';
+                    if (panelKsp) panelKsp.style.display = 'none';
                 <?php else: ?>
-                    if (panelKasir) panelKasir.style.display = '';
-                    if (panelRental) panelRental.style.display = 'none';
+                    <?php if ($isMurniKsp): ?>
+                        if (panelKasir) panelKasir.style.display = 'none';
+                        if (panelRental) panelRental.style.display = 'none';
+                        if (panelKsp) panelKsp.style.display = '';
+                    <?php else: ?>
+                        if (panelKasir) panelKasir.style.display = '';
+                        if (panelRental) panelRental.style.display = 'none';
+                        if (panelKsp) panelKsp.style.display = 'none';
+                    <?php endif; ?>
                 <?php endif; ?>
             <?php endif; ?>
 
