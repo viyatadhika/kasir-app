@@ -170,6 +170,7 @@ function pinjaman_status_label_member($status): string
         'diproses' => 'Diproses',
         'disetujui' => 'Disetujui',
         'ditolak' => 'Ditolak',
+        'dibatalkan' => 'Dibatalkan',
         'dicairkan' => 'Dicairkan',
         'aktif' => 'Aktif',
         'lunas' => 'Lunas',
@@ -186,7 +187,7 @@ function pinjaman_status_class_member($status): string
     $status = strtolower(trim((string)$status));
     if (in_array($status, ['disetujui', 'dicairkan', 'aktif', 'lunas', 'selesai'], true)) return 'transport-status-green';
     if (in_array($status, ['diseleksi', 'diproses'], true)) return 'transport-status-blue';
-    if ($status === 'ditolak') return 'transport-status-red';
+    if (in_array($status, ['ditolak', 'dibatalkan'], true)) return 'transport-status-red';
     return 'transport-status-orange';
 }
 
@@ -380,30 +381,92 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
     }
 }
 
-try {
-    if (has_table_member($pdo, 'pengajuan_pinjaman')) {
-        $stmtPengajuan = $pdo->prepare("
-            SELECT *
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['action'] === 'batal_pengajuan') {
+    header('Content-Type: application/json; charset=utf-8');
+
+    try {
+        $pengajuanId = (int)($_POST['id'] ?? 0);
+
+        if ($pengajuanId < 1) {
+            echo json_encode(['success' => false, 'message' => 'ID pengajuan tidak valid.']);
+            exit;
+        }
+
+        $stmtCek = $pdo->prepare("
+            SELECT id, status
             FROM pengajuan_pinjaman
-            WHERE member_id = :member_id
-            ORDER BY created_at DESC, id DESC
-            LIMIT 20
+            WHERE id = :id
+              AND member_id = :member_id
+            LIMIT 1
         ");
-        $stmtPengajuan->execute([':member_id' => $memberId]);
-        $pengajuanPinjaman = $stmtPengajuan->fetchAll(PDO::FETCH_ASSOC);
+        $stmtCek->execute([
+            ':id' => $pengajuanId,
+            ':member_id' => $memberId
+        ]);
+        $pengajuanBatal = $stmtCek->fetch(PDO::FETCH_ASSOC);
+
+        if (!$pengajuanBatal) {
+            echo json_encode(['success' => false, 'message' => 'Pengajuan tidak ditemukan.']);
+            exit;
+        }
+
+        if (($pengajuanBatal['status'] ?? '') !== 'pending') {
+            echo json_encode(['success' => false, 'message' => 'Pengajuan hanya bisa dibatalkan saat status masih pending.']);
+            exit;
+        }
+
+        $stmtBatal = $pdo->prepare("
+            UPDATE pengajuan_pinjaman
+            SET status = 'dibatalkan',
+                updated_at = NOW()
+            WHERE id = :id
+              AND member_id = :member_id
+              AND status = 'pending'
+        ");
+        $stmtBatal->execute([
+            ':id' => $pengajuanId,
+            ':member_id' => $memberId
+        ]);
+
+        if (function_exists('catat_aktivitas')) {
+            catat_aktivitas($pdo, 'update', 'Pengajuan Pinjaman', 'Member membatalkan pengajuan pinjaman #' . $pengajuanId);
+        }
+
+        echo json_encode(['success' => true, 'message' => 'Pengajuan berhasil dibatalkan.']);
+    } catch (Throwable $e) {
+        echo json_encode(['success' => false, 'message' => 'Gagal membatalkan pengajuan: ' . $e->getMessage()]);
     }
 
-    if (has_table_member($pdo, 'pinjaman')) {
-        $stmtPinjaman = $pdo->prepare("
-            SELECT *
-            FROM pinjaman
-            WHERE member_id = :member_id
-            ORDER BY created_at DESC, id DESC
-            LIMIT 20
-        ");
-        $stmtPinjaman->execute([':member_id' => $memberId]);
-        $pinjamanAktif = $stmtPinjaman->fetchAll(PDO::FETCH_ASSOC);
-    }
+    exit;
+}
+
+
+try {
+    $stmtPengajuan = $pdo->prepare("
+        SELECT *
+        FROM pengajuan_pinjaman
+        WHERE member_id = :member_id
+        ORDER BY created_at DESC, id DESC
+        LIMIT 20
+    ");
+    $stmtPengajuan->execute([
+        ':member_id' => $memberId
+    ]);
+    $pengajuanPinjaman = $stmtPengajuan->fetchAll(PDO::FETCH_ASSOC);
+
+    $stmtPinjaman = $pdo->prepare("
+        SELECT *
+        FROM pinjaman
+        WHERE member_id = :member_id
+          AND status IN ('aktif', 'berjalan')
+        ORDER BY created_at DESC, id DESC
+        LIMIT 20
+    ");
+    $stmtPinjaman->execute([
+        ':member_id' => $memberId
+    ]);
+    $pinjamanAktif = $stmtPinjaman->fetchAll(PDO::FETCH_ASSOC);
 } catch (Throwable $e) {
     if (!$pinjamanErr) {
         $pinjamanErr = 'Gagal memuat data pinjaman: ' . $e->getMessage();
@@ -590,7 +653,6 @@ catat_view_once($pdo, 'Member Dashboard', 'Membuka halaman Member Dashboard');
     <meta charset="UTF-8">
     <title>Dashboard Member — Koperasi BSDK</title>
     <meta name="viewport" content="width=device-width,initial-scale=1.0,viewport-fit=cover">
-    <link rel="icon" type="image/png" href="assets/sejahub_icon.png">
     <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800;900&display=swap" rel="stylesheet">
     <style>
         /* ── Reset ── */
@@ -770,7 +832,7 @@ catat_view_once($pdo, 'Member Dashboard', 'Membuka halaman Member Dashboard');
             color: var(--white);
             font-size: 9px;
             font-weight: 900;
-            border-radius: 8px;
+            border-radius: 0;
             display: flex;
             align-items: center;
             justify-content: center;
@@ -789,7 +851,7 @@ catat_view_once($pdo, 'Member Dashboard', 'Membuka halaman Member Dashboard');
             text-transform: uppercase;
             letter-spacing: .08em;
             cursor: pointer;
-            border-radius: var(--r);
+            border-radius: 0;
             border: 0.5px solid var(--g6);
             background: var(--white);
             color: var(--g2);
@@ -838,7 +900,7 @@ catat_view_once($pdo, 'Member Dashboard', 'Membuka halaman Member Dashboard');
             font-weight: 900;
             text-transform: uppercase;
             letter-spacing: .08em;
-            border-radius: var(--r);
+            border-radius: 0;
             border: 0.5px solid var(--g6);
             color: var(--g2);
             background: var(--g7);
@@ -929,7 +991,7 @@ catat_view_once($pdo, 'Member Dashboard', 'Membuka halaman Member Dashboard');
             font-weight: 700;
             letter-spacing: .06em;
             text-transform: uppercase;
-            border-radius: var(--r);
+            border-radius: 0;
             color: rgba(255, 255, 255, .7);
             background: rgba(255, 255, 255, .08);
         }
@@ -955,14 +1017,14 @@ catat_view_once($pdo, 'Member Dashboard', 'Membuka halaman Member Dashboard');
         .point-strip-left {
             padding: 14px 16px;
             border: 0.5px solid var(--g6);
-            border-radius: var(--r);
+            border-radius: 0;
             min-width: 0;
         }
 
         .point-strip-right {
             padding: 14px 16px;
             border: 0.5px solid var(--g6);
-            border-radius: var(--r);
+            border-radius: 0;
             display: flex;
             flex-direction: column;
             align-items: flex-start;
@@ -996,7 +1058,7 @@ catat_view_once($pdo, 'Member Dashboard', 'Membuka halaman Member Dashboard');
 
         .stat-card {
             border: 0.5px solid var(--g6);
-            border-radius: var(--r);
+            border-radius: 0;
             padding: 14px;
             transition: border-color .15s;
             position: relative;
@@ -1088,7 +1150,7 @@ catat_view_once($pdo, 'Member Dashboard', 'Membuka halaman Member Dashboard');
             width: 44px;
             height: 44px;
             border: 0.5px solid var(--g6);
-            border-radius: var(--r);
+            border-radius: 0;
             display: flex;
             align-items: center;
             justify-content: center;
@@ -1137,7 +1199,7 @@ catat_view_once($pdo, 'Member Dashboard', 'Membuka halaman Member Dashboard');
             width: 38px;
             height: 38px;
             border: 0.5px solid var(--g6);
-            border-radius: var(--r);
+            border-radius: 0;
             display: flex;
             align-items: center;
             justify-content: center;
@@ -1307,7 +1369,7 @@ catat_view_once($pdo, 'Member Dashboard', 'Membuka halaman Member Dashboard');
 
         .order-card {
             border: 0.5px solid var(--g6);
-            border-radius: var(--r);
+            border-radius: 0;
             overflow: hidden;
             background: var(--white);
             transition: border-color .12s, box-shadow .12s;
@@ -1425,7 +1487,7 @@ catat_view_once($pdo, 'Member Dashboard', 'Membuka halaman Member Dashboard');
             align-items: center;
             gap: 8px;
             border: 0.5px solid var(--g6);
-            border-radius: var(--r);
+            border-radius: 0;
             padding: 0 12px;
             height: 38px;
             background: var(--g8);
@@ -1520,7 +1582,7 @@ catat_view_once($pdo, 'Member Dashboard', 'Membuka halaman Member Dashboard');
         .akun-avatar {
             width: 56px;
             height: 56px;
-            border-radius: var(--r);
+            border-radius: 0;
             border: 0.5px solid rgba(255, 255, 255, .3);
             background: rgba(255, 255, 255, .12);
             display: flex;
@@ -1559,7 +1621,7 @@ catat_view_once($pdo, 'Member Dashboard', 'Membuka halaman Member Dashboard');
             padding: 3px 8px;
             border: 0.5px solid rgba(255, 255, 255, .2);
             color: rgba(255, 255, 255, .65);
-            border-radius: var(--r);
+            border-radius: 0;
         }
 
         .akun-stats-grid {
@@ -1612,7 +1674,7 @@ catat_view_once($pdo, 'Member Dashboard', 'Membuka halaman Member Dashboard');
 
         .menu-group-card {
             border: 0.5px solid var(--g6);
-            border-radius: var(--r);
+            border-radius: 0;
             overflow: hidden;
             background: var(--white);
             margin-bottom: 16px;
@@ -1647,7 +1709,7 @@ catat_view_once($pdo, 'Member Dashboard', 'Membuka halaman Member Dashboard');
             width: 34px;
             height: 34px;
             border: 0.5px solid var(--g6);
-            border-radius: var(--r);
+            border-radius: 0;
             display: flex;
             align-items: center;
             justify-content: center;
@@ -1696,7 +1758,7 @@ catat_view_once($pdo, 'Member Dashboard', 'Membuka halaman Member Dashboard');
             padding: 3px 8px;
             background: var(--black);
             color: var(--white);
-            border-radius: 10px;
+            border-radius: 0;
             letter-spacing: .04em;
         }
 
@@ -1764,7 +1826,7 @@ catat_view_once($pdo, 'Member Dashboard', 'Membuka halaman Member Dashboard');
             width: 32px;
             height: 32px;
             border: 0.5px solid var(--g6);
-            border-radius: var(--r);
+            border-radius: 0;
             display: flex;
             align-items: center;
             justify-content: center;
@@ -1810,7 +1872,7 @@ catat_view_once($pdo, 'Member Dashboard', 'Membuka halaman Member Dashboard');
             width: 100%;
             padding: 10px 12px;
             border: 0.5px solid var(--g6);
-            border-radius: var(--r);
+            border-radius: 0;
             font-family: inherit;
             font-size: 13px;
             font-weight: 600;
@@ -1853,7 +1915,7 @@ catat_view_once($pdo, 'Member Dashboard', 'Membuka halaman Member Dashboard');
             width: 36px;
             height: 36px;
             border: 0.5px solid var(--g6);
-            border-radius: var(--r);
+            border-radius: 0;
             display: flex;
             align-items: center;
             justify-content: center;
@@ -1906,7 +1968,7 @@ catat_view_once($pdo, 'Member Dashboard', 'Membuka halaman Member Dashboard');
         /* ── Voucher ── */
         .voucher-card {
             border: 0.5px dashed var(--g5);
-            border-radius: var(--r);
+            border-radius: 0;
             padding: 14px;
             position: relative;
             overflow: hidden;
@@ -1980,7 +2042,7 @@ catat_view_once($pdo, 'Member Dashboard', 'Membuka halaman Member Dashboard');
             background: var(--black);
             color: var(--white);
             padding: 20px;
-            border-radius: var(--r);
+            border-radius: 0;
             margin-bottom: 20px;
             position: relative;
             overflow: hidden;
@@ -2003,7 +2065,7 @@ catat_view_once($pdo, 'Member Dashboard', 'Membuka halaman Member Dashboard');
 
         .tukar-option {
             border: 0.5px solid var(--g6);
-            border-radius: var(--r);
+            border-radius: 0;
             padding: 14px;
             margin-bottom: 8px;
             cursor: pointer;
@@ -2084,7 +2146,7 @@ catat_view_once($pdo, 'Member Dashboard', 'Membuka halaman Member Dashboard');
         /* ── Kontak ── */
         .kontak-card {
             border: 0.5px solid var(--g6);
-            border-radius: var(--r);
+            border-radius: 0;
             padding: 16px;
             margin-bottom: 10px;
             display: flex;
@@ -2104,7 +2166,7 @@ catat_view_once($pdo, 'Member Dashboard', 'Membuka halaman Member Dashboard');
             width: 44px;
             height: 44px;
             border: 0.5px solid var(--g6);
-            border-radius: var(--r);
+            border-radius: 0;
             display: flex;
             align-items: center;
             justify-content: center;
@@ -2148,7 +2210,7 @@ catat_view_once($pdo, 'Member Dashboard', 'Membuka halaman Member Dashboard');
         .info-box {
             padding: 10px 14px;
             border: 0.5px solid var(--g5);
-            border-radius: var(--r);
+            border-radius: 0;
             background: var(--g8);
             font-size: 11px;
             color: var(--g3);
@@ -2193,7 +2255,7 @@ catat_view_once($pdo, 'Member Dashboard', 'Membuka halaman Member Dashboard');
             background: var(--black);
             color: var(--white);
             padding: 10px 20px;
-            border-radius: var(--r);
+            border-radius: 0;
             font-size: 12px;
             font-weight: 800;
             z-index: 1000;
@@ -2227,7 +2289,7 @@ catat_view_once($pdo, 'Member Dashboard', 'Membuka halaman Member Dashboard');
         .transport-alert {
             margin: 12px 16px 0;
             border: 0.5px solid var(--g6);
-            border-radius: var(--r);
+            border-radius: 0;
             padding: 12px 14px;
             font-size: 11px;
             font-weight: 800;
@@ -2253,7 +2315,7 @@ catat_view_once($pdo, 'Member Dashboard', 'Membuka halaman Member Dashboard');
             width: 18px;
             height: 18px;
             min-width: 18px;
-            border-radius: 999px;
+            border-radius: 0;
             display: flex;
             align-items: center;
             justify-content: center;
@@ -2273,7 +2335,7 @@ catat_view_once($pdo, 'Member Dashboard', 'Membuka halaman Member Dashboard');
         .transport-card-box {
             margin: 12px 16px;
             border: 0.5px solid var(--g6);
-            border-radius: var(--r);
+            border-radius: 0;
             background: var(--white);
             padding: 16px;
         }
@@ -2302,7 +2364,7 @@ catat_view_once($pdo, 'Member Dashboard', 'Membuka halaman Member Dashboard');
             color: var(--g4);
             border: 0.5px solid var(--g6);
             padding: 4px 8px;
-            border-radius: var(--r);
+            border-radius: 0;
             background: var(--g8);
         }
 
@@ -2324,7 +2386,7 @@ catat_view_once($pdo, 'Member Dashboard', 'Membuka halaman Member Dashboard');
             width: 100%;
             padding: 11px 12px;
             border: 0.5px solid var(--g6);
-            border-radius: var(--r);
+            border-radius: 0;
             font-family: inherit;
             font-size: 13px;
             font-weight: 600;
@@ -2355,7 +2417,7 @@ catat_view_once($pdo, 'Member Dashboard', 'Membuka halaman Member Dashboard');
             border: 0.5px solid var(--black);
             background: var(--black);
             color: var(--white);
-            border-radius: var(--r);
+            border-radius: 0;
             padding: 13px 16px;
             font-family: inherit;
             font-size: 11px;
@@ -2380,7 +2442,7 @@ catat_view_once($pdo, 'Member Dashboard', 'Membuka halaman Member Dashboard');
 
         .transport-service-card {
             border: 0.5px solid var(--g6);
-            border-radius: var(--r);
+            border-radius: 0;
             background: var(--white);
             padding: 12px 8px;
             text-align: center;
@@ -2411,7 +2473,7 @@ catat_view_once($pdo, 'Member Dashboard', 'Membuka halaman Member Dashboard');
 
         .transport-car-card {
             border: 0.5px solid var(--g6);
-            border-radius: var(--r);
+            border-radius: 0;
             background: var(--white);
             padding: 14px;
         }
@@ -2443,7 +2505,7 @@ catat_view_once($pdo, 'Member Dashboard', 'Membuka halaman Member Dashboard');
             text-transform: uppercase;
             letter-spacing: .08em;
             padding: 4px 8px;
-            border-radius: var(--r);
+            border-radius: 0;
             background: #f0fdf4;
             color: #15803d;
             border: 0.5px solid #bbf7d0;
@@ -2463,7 +2525,7 @@ catat_view_once($pdo, 'Member Dashboard', 'Membuka halaman Member Dashboard');
         .transport-note-box {
             margin: 12px 16px 0;
             border: 0.5px solid var(--g6);
-            border-radius: var(--r);
+            border-radius: 0;
             padding: 12px;
             background: var(--g8);
             font-size: 11px;
@@ -2483,7 +2545,7 @@ catat_view_once($pdo, 'Member Dashboard', 'Membuka halaman Member Dashboard');
 
         .transport-history-card {
             border: 0.5px solid var(--g6);
-            border-radius: var(--r);
+            border-radius: 0;
             background: var(--white);
             padding: 14px;
         }
@@ -2511,7 +2573,7 @@ catat_view_once($pdo, 'Member Dashboard', 'Membuka halaman Member Dashboard');
 
         .transport-status {
             padding: 4px 8px;
-            border-radius: var(--r);
+            border-radius: 0;
             font-size: 9px;
             font-weight: 900;
             text-transform: uppercase;
@@ -2560,7 +2622,7 @@ catat_view_once($pdo, 'Member Dashboard', 'Membuka halaman Member Dashboard');
 
         .transport-history-item {
             border: 0.5px solid var(--g7);
-            border-radius: var(--r);
+            border-radius: 0;
             padding: 9px;
             min-width: 0;
         }
@@ -2587,7 +2649,7 @@ catat_view_once($pdo, 'Member Dashboard', 'Membuka halaman Member Dashboard');
         .transport-route-box {
             margin-top: 12px;
             border: 0.5px solid var(--g7);
-            border-radius: var(--r);
+            border-radius: 0;
             padding: 12px;
             background: var(--g8);
         }
@@ -2619,7 +2681,7 @@ catat_view_once($pdo, 'Member Dashboard', 'Membuka halaman Member Dashboard');
         .transport-note {
             margin-top: 10px;
             border: 0.5px solid var(--g7);
-            border-radius: var(--r);
+            border-radius: 0;
             background: var(--white);
             padding: 10px;
             font-size: 11px;
@@ -2653,7 +2715,7 @@ catat_view_once($pdo, 'Member Dashboard', 'Membuka halaman Member Dashboard');
 
         .transport-empty {
             border: 0.5px dashed var(--g6);
-            border-radius: var(--r);
+            border-radius: 0;
             background: var(--g8);
             padding: 24px 14px;
             text-align: center;
@@ -2662,6 +2724,105 @@ catat_view_once($pdo, 'Member Dashboard', 'Membuka halaman Member Dashboard');
             color: var(--g4);
             text-transform: uppercase;
             letter-spacing: .12em;
+        }
+
+
+
+        /* ── Riwayat Pengajuan Pinjaman Modern ── */
+        .pinjaman-history-card {
+            border: 0.5px solid var(--g6);
+            border-radius: 0;
+            background: var(--white);
+            padding: 16px;
+            box-shadow: 0 4px 14px rgba(15, 23, 42, .04);
+        }
+
+        .pinjaman-history-top {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            gap: 12px;
+            margin-bottom: 14px;
+        }
+
+        .pinjaman-history-code {
+            font-size: 13px;
+            font-weight: 900;
+            color: var(--black);
+            letter-spacing: -.02em;
+        }
+
+        .pinjaman-history-date {
+            margin-top: 4px;
+            font-size: 10px;
+            color: var(--g4);
+            font-weight: 700;
+        }
+
+        .pinjaman-info-grid {
+            display: grid;
+            grid-template-columns: repeat(4, minmax(0, 1fr));
+            gap: 8px;
+            margin-top: 10px;
+        }
+
+        .pinjaman-info-item {
+            border: 0.5px solid var(--g7);
+            border-radius: 0;
+            padding: 11px 12px;
+            background: #fff;
+            min-width: 0;
+        }
+
+        .pinjaman-info-item span {
+            display: block;
+            font-size: 9px;
+            font-weight: 900;
+            text-transform: uppercase;
+            letter-spacing: .08em;
+            color: var(--g4);
+            margin-bottom: 6px;
+        }
+
+        .pinjaman-info-item strong {
+            display: block;
+            font-size: 12px;
+            font-weight: 900;
+            color: var(--black);
+            line-height: 1.35;
+            overflow-wrap: anywhere;
+        }
+
+        .pinjaman-action-row {
+            margin-top: 12px;
+        }
+
+        .btn-batal-pengajuan {
+            width: 100%;
+            border: 0.5px solid #fecaca;
+            background: #fff5f5;
+            color: #dc2626;
+            border-radius: 0;
+            padding: 12px 14px;
+            font-family: inherit;
+            font-size: 10px;
+            font-weight: 900;
+            text-transform: uppercase;
+            letter-spacing: .1em;
+            cursor: pointer;
+            transition: background .12s, border-color .12s, color .12s;
+        }
+
+        .btn-batal-pengajuan:hover {
+            background: #fef2f2;
+            border-color: #fca5a5;
+            color: #b91c1c;
+        }
+
+        @media(max-width:480px) {
+            .pinjaman-info-grid {
+                grid-template-columns: repeat(2, minmax(0, 1fr));
+            }
         }
 
 
@@ -2762,7 +2923,7 @@ catat_view_once($pdo, 'Member Dashboard', 'Membuka halaman Member Dashboard');
 
             .modal-sheet {
                 max-width: 640px;
-                border-radius: var(--r);
+                border-radius: 0;
             }
         }
 
@@ -2891,6 +3052,55 @@ catat_view_once($pdo, 'Member Dashboard', 'Membuka halaman Member Dashboard');
             .vehicle-type-grid {
                 grid-template-columns: 1fr;
             }
+        }
+
+        .transport-status-red {
+            background: #fef2f2 !important;
+            color: #dc2626 !important;
+            border: 1px solid #fecaca !important;
+        }
+
+        .transport-status-orange {
+            background: #fff7ed !important;
+            color: #ea580c !important;
+            border: 1px solid #fed7aa !important;
+        }
+
+        .transport-status {
+            min-width: 110px;
+            text-align: center;
+            border-radius: 8px !important;
+            font-size: 10px !important;
+            font-weight: 900 !important;
+            letter-spacing: .08em;
+            padding: 7px 12px !important;
+        }
+
+        .transport-route-box {
+            border-radius: 8px !important;
+        }
+
+        .transport-route-item {
+            border-radius: 8px !important;
+        }
+
+
+        /* === Tema Kotak Full === */
+        .pinjaman-history-card,
+        .pinjaman-info-item,
+        .transport-route-box,
+        .transport-route-item,
+        .transport-status,
+        .btn-batal-pengajuan,
+        .transport-card,
+        .transport-box,
+        .transport-item,
+        .transport-submit,
+        .transport-status-red,
+        .transport-status-orange,
+        .transport-status-blue,
+        .transport-status-green {
+            border-radius: 0 !important;
         }
     </style>
 </head>
@@ -3595,14 +3805,14 @@ catat_view_once($pdo, 'Member Dashboard', 'Membuka halaman Member Dashboard');
                                     <input type="radio" name="jenis" value="uang" checked onchange="updateLoanForm()">
                                     <div class="loan-type-card">
                                         <div class="loan-type-name">Pinjaman Uang</div>
-                                        <div class="loan-type-meta">Bunga <?= h($konfigSp['bunga_uang']) ?>%/bulan flat</div>
+                                        <div class="loan-type-meta">Bunga <?= h($konfigSp['bunga_uang']) ?>% total</div>
                                     </div>
                                 </label>
                                 <label class="loan-type-option">
                                     <input type="radio" name="jenis" value="barang" onchange="updateLoanForm()">
                                     <div class="loan-type-card">
                                         <div class="loan-type-name">Pinjaman Barang</div>
-                                        <div class="loan-type-meta">Bunga <?= h($konfigSp['bunga_barang']) ?>%/bulan flat</div>
+                                        <div class="loan-type-meta">Bunga <?= h($konfigSp['bunga_barang']) ?>% total</div>
                                     </div>
                                 </label>
                             </div>
@@ -3656,6 +3866,7 @@ catat_view_once($pdo, 'Member Dashboard', 'Membuka halaman Member Dashboard');
                             <div style="font-size:11px;font-weight:600;color:var(--g4);margin-top:4px;">Status pengajuan pinjaman Anda</div>
                         </div>
                         <span><?= angka_member(count($pengajuanPinjaman)) ?></span>
+                        <!-- member_id aktif: <?= (int)$memberId ?> -->
                     </div>
 
                     <div class="transport-history-wrap">
@@ -3668,34 +3879,46 @@ catat_view_once($pdo, 'Member Dashboard', 'Membuka halaman Member Dashboard');
                             $pokok = (float)($p['jumlah'] ?? 0);
                             $tenor = max(1, (int)($p['tenor'] ?? 1));
                             $angPok = round($pokok / $tenor);
-                            $angBng = round($pokok * $bungaPct / 100);
+                            $totalBunga = round($pokok * $bungaPct / 100);
+                            $angBng = round($totalBunga / $tenor);
                             $angTot = $angPok + $angBng;
+                            $statusPengajuan = strtolower(trim((string)($p['status'] ?? '')));
                         ?>
-                            <div class="transport-history-card">
-                                <div class="transport-history-top">
+                            <div class="pinjaman-history-card">
+                                <div class="pinjaman-history-top">
                                     <div>
-                                        <div class="transport-booking-code">Pengajuan #<?= (int)$p['id'] ?></div>
-                                        <div class="transport-booking-date"><?= h(tanggal_member($p['created_at'])) ?></div>
+                                        <div class="pinjaman-history-code">Pengajuan #<?= (int)$p['id'] ?></div>
+                                        <div class="pinjaman-history-date"><?= h(tanggal_member($p['created_at'])) ?></div>
                                     </div>
-                                    <div class="transport-status <?= h(pinjaman_status_class_member($p['status'])) ?>">
-                                        <?= h(pinjaman_status_label_member($p['status'])) ?>
+
+                                    <?php
+                                    $statusBadgeText = pinjaman_status_label_member($statusPengajuan);
+                                    $statusBadgeClass = pinjaman_status_class_member($statusPengajuan);
+
+                                    if ($statusPengajuan === '' || $statusPengajuan === 'dibatalkan') {
+                                        $statusBadgeText = 'BATAL PENGAJUAN';
+                                        $statusBadgeClass = 'transport-status-red';
+                                    }
+                                    ?>
+                                    <div class="transport-status <?= h($statusBadgeClass) ?>">
+                                        <?= h(strtoupper($statusBadgeText)) ?>
                                     </div>
                                 </div>
 
-                                <div class="transport-history-grid">
-                                    <div class="transport-history-item">
+                                <div class="pinjaman-info-grid">
+                                    <div class="pinjaman-info-item">
                                         <span>Jenis</span>
                                         <strong><?= h(ucfirst((string)$p['jenis'])) ?></strong>
                                     </div>
-                                    <div class="transport-history-item">
+                                    <div class="pinjaman-info-item">
                                         <span>Jumlah</span>
                                         <strong><?= rupiah_member($pokok) ?></strong>
                                     </div>
-                                    <div class="transport-history-item">
+                                    <div class="pinjaman-info-item">
                                         <span>Tenor</span>
                                         <strong><?= angka_member($tenor) ?> Bulan</strong>
                                     </div>
-                                    <div class="transport-history-item">
+                                    <div class="pinjaman-info-item">
                                         <span>Angsuran</span>
                                         <strong><?= rupiah_member($angTot) ?></strong>
                                     </div>
@@ -3729,6 +3952,16 @@ catat_view_once($pdo, 'Member Dashboard', 'Membuka halaman Member Dashboard');
                                                 <div><?= h($p['catatan_petugas']) ?></div>
                                             </div>
                                         <?php endif; ?>
+                                    </div>
+                                <?php endif; ?>
+
+                                <?php if ($statusPengajuan === 'pending'): ?>
+                                    <div class="pinjaman-action-row">
+                                        <button type="button"
+                                            class="btn-batal-pengajuan"
+                                            data-id="<?= (int)$p['id'] ?>">
+                                            Batalkan Pengajuan
+                                        </button>
                                     </div>
                                 <?php endif; ?>
                             </div>
@@ -4746,7 +4979,11 @@ catat_view_once($pdo, 'Member Dashboard', 'Membuka halaman Member Dashboard');
             var bunga = jenis === 'barang' ? BUNGA_BARANG : BUNGA_UANG;
 
             var pokok = tenor > 0 ? Math.round(jumlah / tenor) : 0;
-            var bungaBulanan = Math.round(jumlah * bunga / 100);
+            // Bunga diambil dari database konfigurasi_sp sebagai total persen bunga.
+            // Contoh: nominal 5.000.000, bunga 10%, tenor 10 bulan
+            // total bunga = 500.000, bunga per bulan = 50.000
+            var totalBunga = Math.round(jumlah * bunga / 100);
+            var bungaBulanan = tenor > 0 ? Math.round(totalBunga / tenor) : 0;
             var total = pokok + bungaBulanan;
 
             var elPokok = document.getElementById('loan-est-pokok');
@@ -4758,9 +4995,48 @@ catat_view_once($pdo, 'Member Dashboard', 'Membuka halaman Member Dashboard');
             if (elTotal) elTotal.textContent = formatRupiahSimple(total);
         }
 
+
+        function initBatalPengajuan() {
+            document.querySelectorAll('.btn-batal-pengajuan').forEach(function(btn) {
+                btn.addEventListener('click', async function() {
+                    var id = this.getAttribute('data-id');
+                    if (!id) return;
+
+                    if (!confirm('Batalkan pengajuan pinjaman ini?')) {
+                        return;
+                    }
+
+                    try {
+                        var form = new FormData();
+                        form.append('action', 'batal_pengajuan');
+                        form.append('id', id);
+
+                        var res = await fetch('member_dashboard.php', {
+                            method: 'POST',
+                            body: form
+                        });
+
+                        var data = await res.json();
+                        showToast(data.message || 'Pengajuan diproses');
+
+                        if (data.success) {
+                            setTimeout(function() {
+                                window.location.href = 'member_dashboard.php#pinjaman';
+                            }, 900);
+                        }
+                    } catch (e) {
+                        showToast('Gagal membatalkan pengajuan.');
+                    }
+                });
+            });
+        }
+
         document.addEventListener('DOMContentLoaded', function() {
             if (typeof updateLoanForm === 'function') {
                 updateLoanForm();
+            }
+            if (typeof initBatalPengajuan === 'function') {
+                initBatalPengajuan();
             }
             var targetHash = (window.location.hash || '').replace('#', '');
             if (targetHash && typeof goTo === 'function') {

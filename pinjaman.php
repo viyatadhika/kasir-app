@@ -42,6 +42,94 @@ if (!function_exists('rupiah_sp')) {
     }
 }
 
+if (!function_exists('hitung_angsuran_sp')) {
+    /**
+     * Skema bunga:
+     * bunga_persen diambil dari konfigurasi_sp sebagai total persen bunga dari pokok.
+     * Contoh: pokok 5.000.000, bunga 10%, tenor 10 bulan
+     * total bunga = 500.000, bunga/bulan = 50.000.
+     *
+     * @return array{pokok:int,total_bunga:int,bunga_bulan:int,total_bulan:int,total_pinjaman:int}
+     */
+    function hitung_angsuran_sp(float $pokok, int $tenor, float $bungaPersen): array
+    {
+        $pokok = (float)$pokok;
+        $tenor = max(1, (int)$tenor);
+        $bungaPersen = (float)$bungaPersen;
+
+        $angsuranPokok = (int)round($pokok / $tenor);
+        $totalBunga = (int)round($pokok * $bungaPersen / 100);
+        $angsuranBunga = (int)round($totalBunga / $tenor);
+        $angsuranTotal = $angsuranPokok + $angsuranBunga;
+        $totalPinjaman = $angsuranTotal * $tenor;
+
+        return [
+            'pokok' => $angsuranPokok,
+            'total_bunga' => $totalBunga,
+            'bunga_bulan' => $angsuranBunga,
+            'total_bulan' => $angsuranTotal,
+            'total_pinjaman' => $totalPinjaman,
+        ];
+    }
+}
+
+if (!function_exists('format_no_wa_sp')) {
+    function format_no_wa_sp(string $noHp): string
+    {
+        $no = preg_replace('/\D+/', '', (string)$noHp);
+        if ($no === '') return '';
+        if (strpos($no, '0') === 0) {
+            $no = '62' . substr($no, 1);
+        } elseif (strpos($no, '62') !== 0) {
+            $no = '62' . $no;
+        }
+        return $no;
+    }
+}
+
+if (!function_exists('buat_link_wa_sp')) {
+    function buat_link_wa_sp(string $noHp, string $pesan): string
+    {
+        $no = format_no_wa_sp($noHp);
+        if ($no === '') return '';
+        return 'https://wa.me/' . $no . '?text=' . rawurlencode($pesan);
+    }
+}
+
+if (!function_exists('kirim_notif_wa_sp')) {
+    /**
+     * Placeholder aman untuk integrasi WhatsApp gateway.
+     * Jika nanti sudah punya endpoint gateway, isi kode CURL di sini.
+     * Saat ini fungsi mengembalikan link WA manual agar tidak membuat error.
+     */
+    function kirim_notif_wa_sp(string $noHp, string $pesan): string
+    {
+        return buat_link_wa_sp($noHp, $pesan);
+    }
+}
+
+if (!function_exists('status_pinjaman_label_sp')) {
+    function status_pinjaman_label_sp(string $status): string
+    {
+        $status = strtolower(trim($status));
+
+        if ($status === '') {
+            return 'Batal Pengajuan';
+        }
+
+        $map = [
+            'pending' => 'Pending',
+            'diseleksi' => 'Diseleksi',
+            'disetujui' => 'Disetujui',
+            'ditolak' => 'Ditolak',
+            'dibatalkan' => 'Batal Pengajuan',
+            'dicairkan' => 'Dicairkan',
+        ];
+
+        return $map[$status] ?? ucfirst($status);
+    }
+}
+
 $userId = (int)(isset($_SESSION['user']['id']) ? $_SESSION['user']['id'] : 0);
 
 // ── API Handler ───────────────────────────────────────────────────────────────
@@ -63,7 +151,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_GET['action'])) {
             }
 
             // Ambil data pengajuan
-            $stmt = $pdo->prepare("SELECT * FROM pengajuan_pinjaman WHERE id = :id LIMIT 1");
+            $stmt = $pdo->prepare("
+                SELECT pp.*, m.nama AS member_nama, m.kode AS member_kode, m.no_hp AS member_hp
+                FROM pengajuan_pinjaman pp
+                LEFT JOIN member m ON m.id = pp.member_id
+                WHERE pp.id = :id
+                LIMIT 1
+            ");
             $stmt->execute([':id' => $id]);
             $pengajuan = $stmt->fetch(PDO::FETCH_ASSOC);
             if (!$pengajuan) {
@@ -119,12 +213,29 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_GET['action'])) {
                 ':rid'   => $id,
             ]);
 
+            $waLink = '';
+            if (!empty($pengajuan['member_hp'])) {
+                $waPesan = $pesanMap[$status];
+                $waLink = kirim_notif_wa_sp((string)$pengajuan['member_hp'], (string)$waPesan);
+            }
+
             catat_aktivitas($pdo, 'update', 'Pinjaman', "Ubah status pengajuan #$id ke $status");
-            echo json_encode(['success' => true, 'message' => 'Status berhasil diperbarui.']);
+            echo json_encode([
+                'success' => true,
+                'message' => 'Status berhasil diperbarui.',
+                'wa_link' => $waLink
+            ]);
         } elseif ($action === 'cairkan') {
             $id = (int)(isset($input['id']) ? $input['id'] : 0);
 
-            $stmt = $pdo->prepare("SELECT * FROM pengajuan_pinjaman WHERE id = :id AND status = 'disetujui' LIMIT 1");
+            $stmt = $pdo->prepare("
+                SELECT pp.*, m.nama AS member_nama, m.kode AS member_kode, m.no_hp AS member_hp
+                FROM pengajuan_pinjaman pp
+                LEFT JOIN member m ON m.id = pp.member_id
+                WHERE pp.id = :id
+                  AND pp.status = 'disetujui'
+                LIMIT 1
+            ");
             $stmt->execute([':id' => $id]);
             $pengajuan = $stmt->fetch(PDO::FETCH_ASSOC);
             if (!$pengajuan) {
@@ -132,17 +243,24 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_GET['action'])) {
                 exit;
             }
 
-            // Ambil konfigurasi bunga
-            $konfig = $pdo->query("SELECT * FROM konfigurasi_sp LIMIT 1")->fetch(PDO::FETCH_ASSOC);
+            // Ambil konfigurasi bunga langsung dari database
+            $konfig = $pdo->query("
+                SELECT bunga_uang, bunga_barang
+                FROM konfigurasi_sp
+                ORDER BY id ASC
+                LIMIT 1
+            ")->fetch(PDO::FETCH_ASSOC) ?: [];
+
             $bungaPct = $pengajuan['jenis'] === 'barang'
                 ? (float)($konfig['bunga_barang'] ?? 1.5)
-                : (float)($konfig['bunga_uang']   ?? 1.0);
+                : (float)($konfig['bunga_uang'] ?? 1.0);
 
             $pokok  = (int)$pengajuan['jumlah'];
-            $tenor  = (int)$pengajuan['tenor'];
-            $angPok = (int)round($pokok / $tenor);
-            $angBng = (int)round($pokok * $bungaPct / 100);
-            $angTot = $angPok + $angBng;
+            $tenor  = max(1, (int)$pengajuan['tenor']);
+            $hitung = hitung_angsuran_sp($pokok, $tenor, $bungaPct);
+            $angPok = $hitung['pokok'];
+            $angBng = $hitung['bunga_bulan'];
+            $angTot = $hitung['total_bulan'];
 
             $mulai   = date('Y-m-d');
             $selesai = date('Y-m-d', strtotime("+$tenor months"));
@@ -171,7 +289,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_GET['action'])) {
 
             // Generate angsuran
             $insAng = $pdo->prepare("
-                INSERT INTO pinjaman_angsuran (pinjaman_id, member_id, ke, bulan, tahun, jumlah_pokok, jumlah_bunga, jumlah_total, jatuh_tempo, status)
+                INSERT INTO angsuran_pinjaman (pinjaman_id, member_id, ke, bulan, tahun, jumlah_pokok, jumlah_bunga, jumlah_total, jatuh_tempo, status)
                 VALUES (:pid, :mid, :ke, :bln, :thn, :jpok, :jbng, :jtot, :jatuh, 'belum_bayar')
             ");
             for ($i = 1; $i <= $tenor; $i++) {
@@ -206,8 +324,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_GET['action'])) {
             ]);
 
             $pdo->commit();
+
+            $waLink = '';
+            if (!empty($pengajuan['member_hp'])) {
+                $waPesan = "Pinjaman Anda sebesar " . rupiah_sp($pokok) . " telah dicairkan. Angsuran per bulan " . rupiah_sp($angTot) . " selama {$tenor} bulan. Jatuh tempo pertama " . date('d/m/Y', strtotime('+1 month', strtotime($mulai))) . ".";
+                $waLink = kirim_notif_wa_sp((string)$pengajuan['member_hp'], (string)$waPesan);
+            }
+
             catat_aktivitas($pdo, 'create', 'Pinjaman', "Cairkan pinjaman #$id — " . rupiah_sp($pokok));
-            echo json_encode(['success' => true, 'message' => 'Pinjaman berhasil dicairkan. Angsuran sudah dibuat.']);
+            echo json_encode([
+                'success' => true,
+                'message' => 'Pinjaman berhasil dicairkan. Angsuran sudah dibuat.',
+                'wa_link' => $waLink
+            ]);
         } else {
             echo json_encode(['success' => false, 'message' => 'Action tidak dikenali.']);
         }
@@ -249,7 +378,7 @@ $stmt = $pdo->prepare("
     LEFT JOIN member m ON m.id = pp.member_id
     LEFT JOIN users u  ON u.id = pp.disetujui_oleh
     WHERE $whereStr
-    ORDER BY FIELD(pp.status,'pending','diseleksi','disetujui','ditolak','dicairkan'), pp.created_at DESC
+    ORDER BY FIELD(pp.status,'pending','diseleksi','disetujui','ditolak','dibatalkan','dicairkan'), pp.created_at DESC
     LIMIT 100
 ");
 $stmt->execute($params);
@@ -263,13 +392,26 @@ $sumStmt = $pdo->query("
 ");
 $summary = [];
 foreach ($sumStmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
-    $summary[$row['status']] = $row;
+    $statusKey = strtolower(trim((string)($row['status'] ?? '')));
+
+    // Jika status kosong, biasanya karena database enum belum mendukung nilai dibatalkan.
+    // Tetap tampilkan sebagai Batal Pengajuan.
+    if ($statusKey === '') {
+        $statusKey = 'dibatalkan';
+    }
+
+    if (!isset($summary[$statusKey])) {
+        $summary[$statusKey] = ['status' => $statusKey, 'total' => 0, 'nilai' => 0];
+    }
+
+    $summary[$statusKey]['total'] += (int)($row['total'] ?? 0);
+    $summary[$statusKey]['nilai'] += (float)($row['nilai'] ?? 0);
 }
 
-$konfig = $pdo->query("SELECT * FROM konfigurasi_sp LIMIT 1")->fetch(PDO::FETCH_ASSOC);
+$konfig = $pdo->query("SELECT * FROM konfigurasi_sp ORDER BY id ASC LIMIT 1")->fetch(PDO::FETCH_ASSOC);
 
 $rightActionHtml = '
-<a href="konfigurasi_sp.php" class="inline-flex items-center gap-2 px-4 py-2 text-[10px] font-black uppercase tracking-widest border border-gray-200 hover:bg-gray-50 transition-all">
+<a href="sp.php" class="inline-flex items-center gap-2 px-4 py-2 text-[10px] font-black uppercase tracking-widest border border-gray-200 hover:bg-gray-50 transition-all">
     Konfigurasi SP
 </a>';
 
@@ -346,9 +488,9 @@ catat_view_once($pdo, 'Pengajuan Pinjaman', 'Membuka halaman Pengajuan Pinjaman'
         <!-- Konfigurasi aktif -->
         <?php if ($konfig): ?>
             <div class="mb-6 flex flex-wrap gap-4 text-[10px] font-bold text-gray-500 bg-gray-50 border border-gray-100 px-4 py-3">
-                <span>Bunga Uang: <strong class="text-black"><?php echo h($konfig['bunga_uang']); ?>%/bln flat</strong></span>
+                <span>Bunga Uang: <strong class="text-black"><?php echo h($konfig['bunga_uang']); ?>% total</strong></span>
                 <span>·</span>
-                <span>Bunga Barang: <strong class="text-black"><?php echo h($konfig['bunga_barang']); ?>%/bln flat</strong></span>
+                <span>Bunga Barang: <strong class="text-black"><?php echo h($konfig['bunga_barang']); ?>% total</strong></span>
                 <span>·</span>
                 <span>Tenor Maks Uang: <strong class="text-black"><?php echo h($konfig['tenor_maks_uang']); ?> bln</strong></span>
                 <span>·</span>
@@ -357,14 +499,15 @@ catat_view_once($pdo, 'Pengajuan Pinjaman', 'Membuka halaman Pengajuan Pinjaman'
         <?php endif; ?>
 
         <!-- Summary cards -->
-        <div class="grid grid-cols-2 md:grid-cols-5 gap-3 mb-8">
+        <div class="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-3 mb-8">
             <?php
             $statusInfo = [
-                'pending'   => ['label' => 'Pending',   'color' => 'text-amber-600'],
-                'diseleksi' => ['label' => 'Diseleksi', 'color' => 'text-blue-600'],
-                'disetujui' => ['label' => 'Disetujui', 'color' => 'text-green-600'],
-                'ditolak'   => ['label' => 'Ditolak',   'color' => 'text-red-600'],
-                'dicairkan' => ['label' => 'Dicairkan', 'color' => 'text-purple-600'],
+                'pending'     => ['label' => 'Pending', 'color' => 'text-amber-600'],
+                'diseleksi'   => ['label' => 'Diseleksi', 'color' => 'text-blue-600'],
+                'disetujui'   => ['label' => 'Disetujui', 'color' => 'text-green-600'],
+                'ditolak'     => ['label' => 'Ditolak', 'color' => 'text-red-600'],
+                'dibatalkan'  => ['label' => 'Batal Pengajuan', 'color' => 'text-red-600'],
+                'dicairkan'   => ['label' => 'Dicairkan', 'color' => 'text-purple-600'],
             ];
             foreach ($statusInfo as $st => $info):
                 $d = isset($summary[$st]) ? $summary[$st] : ['total' => 0, 'nilai' => 0];
@@ -428,16 +571,22 @@ catat_view_once($pdo, 'Pengajuan Pinjaman', 'Membuka halaman Pengajuan Pinjaman'
                                 $bungaPct   = $p['jenis'] === 'barang' ? (float)($konfig['bunga_barang'] ?? 1.5) : (float)($konfig['bunga_uang'] ?? 1.0);
                                 $pokok      = (int)$p['jumlah'];
                                 $tenor      = (int)$p['tenor'];
-                                $angBng     = $tenor > 0 ? (int)round($pokok * $bungaPct / 100) : 0;
-                                $angPok     = $tenor > 0 ? (int)round($pokok / $tenor) : 0;
-                                $angTot     = $angPok + $angBng;
+                                $hitung     = hitung_angsuran_sp($pokok, $tenor, $bungaPct);
+                                $angPok     = $hitung['pokok'];
+                                $angBng     = $hitung['bunga_bulan'];
+                                $angTot     = $hitung['total_bulan'];
+                                $statusKey  = strtolower(trim((string)($p['status'] ?? '')));
+                                if ($statusKey === '') {
+                                    $statusKey = 'dibatalkan';
+                                }
                                 $badgeClass = [
-                                    'pending'   => 'bg-amber-50 text-amber-700 border-amber-200',
-                                    'diseleksi' => 'bg-blue-50 text-blue-700 border-blue-200',
-                                    'disetujui' => 'bg-green-50 text-green-700 border-green-200',
-                                    'ditolak'   => 'bg-red-50 text-red-700 border-red-200',
-                                    'dicairkan' => 'bg-purple-50 text-purple-700 border-purple-200',
-                                ][$p['status']] ?? 'bg-gray-50 text-gray-700 border-gray-200';
+                                    'pending'     => 'bg-amber-50 text-amber-700 border-amber-200',
+                                    'diseleksi'   => 'bg-blue-50 text-blue-700 border-blue-200',
+                                    'disetujui'   => 'bg-green-50 text-green-700 border-green-200',
+                                    'ditolak'     => 'bg-red-50 text-red-700 border-red-200',
+                                    'dibatalkan'  => 'bg-red-50 text-red-700 border-red-200',
+                                    'dicairkan'   => 'bg-purple-50 text-purple-700 border-purple-200',
+                                ][$statusKey] ?? 'bg-gray-50 text-gray-700 border-gray-200';
                             ?>
                                 <tr class="hover:bg-gray-50">
                                     <td class="px-5 py-4">
@@ -460,11 +609,12 @@ catat_view_once($pdo, 'Pengajuan Pinjaman', 'Membuka halaman Pengajuan Pinjaman'
                                     </td>
                                     <td class="px-5 py-4 text-center">
                                         <span class="text-[9px] font-black uppercase px-2 py-1 border <?php echo $badgeClass; ?>">
-                                            <?php echo ucfirst(h($p['status'])); ?>
+                                            <?php echo h(status_pinjaman_label_sp($statusKey)); ?>
                                         </span>
                                     </td>
                                     <td class="px-5 py-4 text-xs text-gray-500">
-                                        <?php echo date('d/m/Y', strtotime($p['created_at'])); ?>
+                                        <div class="font-semibold text-gray-700"><?php echo date('d/m/Y', strtotime($p['created_at'])); ?></div>
+                                        <div class="text-[10px] text-gray-400 mt-1"><?php echo date('H:i', strtotime($p['created_at'])); ?> WIB</div>
                                     </td>
                                     <td class="px-5 py-4">
                                         <div class="flex items-center justify-end gap-1">
@@ -472,7 +622,7 @@ catat_view_once($pdo, 'Pengajuan Pinjaman', 'Membuka halaman Pengajuan Pinjaman'
                                                 class="px-3 py-1.5 text-[10px] font-black uppercase border border-gray-200 hover:bg-gray-50 transition-all">
                                                 Detail
                                             </button>
-                                            <?php if ($p['status'] === 'pending' || $p['status'] === 'diseleksi'): ?>
+                                            <?php if ($statusKey === 'pending' || $statusKey === 'diseleksi'): ?>
                                                 <button onclick="aksiBulk(<?php echo (int)$p['id']; ?>, 'disetujui')"
                                                     class="px-3 py-1.5 text-[10px] font-black uppercase bg-green-600 text-white hover:bg-green-700 transition-all">
                                                     ACC
@@ -481,7 +631,7 @@ catat_view_once($pdo, 'Pengajuan Pinjaman', 'Membuka halaman Pengajuan Pinjaman'
                                                     class="px-3 py-1.5 text-[10px] font-black uppercase border border-red-200 text-red-700 hover:bg-red-50 transition-all">
                                                     Tolak
                                                 </button>
-                                            <?php elseif ($p['status'] === 'disetujui'): ?>
+                                            <?php elseif ($statusKey === 'disetujui'): ?>
                                                 <button onclick="cairkan(<?php echo (int)$p['id']; ?>)"
                                                     class="px-3 py-1.5 text-[10px] font-black uppercase bg-black text-white hover:bg-gray-800 transition-all">
                                                     Cairkan
@@ -506,23 +656,30 @@ catat_view_once($pdo, 'Pengajuan Pinjaman', 'Membuka halaman Pengajuan Pinjaman'
                     $bungaPct = $p['jenis'] === 'barang' ? (float)($konfig['bunga_barang'] ?? 1.5) : (float)($konfig['bunga_uang'] ?? 1.0);
                     $pokok    = (int)$p['jumlah'];
                     $tenor    = (int)$p['tenor'];
-                    $angTot   = $tenor > 0 ? (int)round($pokok / $tenor + $pokok * $bungaPct / 100) : 0;
+                    $hitung   = hitung_angsuran_sp($pokok, $tenor, $bungaPct);
+                    $angTot   = $hitung['total_bulan'];
+                    $statusKey  = strtolower(trim((string)($p['status'] ?? '')));
+                    if ($statusKey === '') {
+                        $statusKey = 'dibatalkan';
+                    }
                     $badgeClass = [
-                        'pending'   => 'bg-amber-50 text-amber-700 border-amber-200',
-                        'diseleksi' => 'bg-blue-50 text-blue-700 border-blue-200',
-                        'disetujui' => 'bg-green-50 text-green-700 border-green-200',
-                        'ditolak'   => 'bg-red-50 text-red-700 border-red-200',
-                        'dicairkan' => 'bg-purple-50 text-purple-700 border-purple-200',
-                    ][$p['status']] ?? 'bg-gray-50 text-gray-700 border-gray-200';
+                        'pending'     => 'bg-amber-50 text-amber-700 border-amber-200',
+                        'diseleksi'   => 'bg-blue-50 text-blue-700 border-blue-200',
+                        'disetujui'   => 'bg-green-50 text-green-700 border-green-200',
+                        'ditolak'     => 'bg-red-50 text-red-700 border-red-200',
+                        'dibatalkan'  => 'bg-red-50 text-red-700 border-red-200',
+                        'dicairkan'   => 'bg-purple-50 text-purple-700 border-purple-200',
+                    ][$statusKey] ?? 'bg-gray-50 text-gray-700 border-gray-200';
                 ?>
                     <div class="bg-white border border-gray-100 p-4">
                         <div class="flex items-start justify-between gap-3 mb-3">
                             <div>
                                 <p class="text-sm font-bold"><?php echo h($p['member_nama']); ?></p>
                                 <p class="text-[10px] text-gray-400 font-mono mt-0.5"><?php echo h($p['member_kode']); ?></p>
+                                <p class="text-[10px] text-gray-400 mt-1"><?php echo date('d/m/Y H:i', strtotime($p['created_at'])); ?> WIB</p>
                             </div>
                             <span class="text-[9px] font-black uppercase px-2 py-1 border flex-shrink-0 <?php echo $badgeClass; ?>">
-                                <?php echo ucfirst(h($p['status'])); ?>
+                                <?php echo h(status_pinjaman_label_sp($statusKey)); ?>
                             </span>
                         </div>
                         <div class="grid grid-cols-2 gap-3 mb-3">
@@ -546,12 +703,12 @@ catat_view_once($pdo, 'Pengajuan Pinjaman', 'Membuka halaman Pengajuan Pinjaman'
                         <div class="flex gap-2 pt-3 border-t border-gray-100">
                             <button onclick="openDetail(<?php echo (int)$p['id']; ?>)"
                                 class="flex-1 py-2 text-[10px] font-black uppercase border border-gray-200 hover:bg-gray-50 transition-all">Detail</button>
-                            <?php if ($p['status'] === 'pending' || $p['status'] === 'diseleksi'): ?>
+                            <?php if ($statusKey === 'pending' || $statusKey === 'diseleksi'): ?>
                                 <button onclick="aksiBulk(<?php echo (int)$p['id']; ?>, 'disetujui')"
                                     class="flex-1 py-2 text-[10px] font-black uppercase bg-green-600 text-white hover:bg-green-700">ACC</button>
                                 <button onclick="aksiBulk(<?php echo (int)$p['id']; ?>, 'ditolak')"
                                     class="flex-1 py-2 text-[10px] font-black uppercase border border-red-200 text-red-700 hover:bg-red-50">Tolak</button>
-                            <?php elseif ($p['status'] === 'disetujui'): ?>
+                            <?php elseif ($statusKey === 'disetujui'): ?>
                                 <button onclick="cairkan(<?php echo (int)$p['id']; ?>)"
                                     class="flex-1 py-2 text-[10px] font-black uppercase bg-black text-white">Cairkan</button>
                             <?php endif; ?>
@@ -612,7 +769,8 @@ catat_view_once($pdo, 'Pengajuan Pinjaman', 'Membuka halaman Pengajuan Pinjaman'
             var pokok = parseInt(p.jumlah || 0);
             var tenor = parseInt(p.tenor || 0);
             var angPok = tenor > 0 ? Math.round(pokok / tenor) : 0;
-            var angBng = Math.round(pokok * bungaPct / 100);
+            var totalBunga = Math.round(pokok * bungaPct / 100);
+            var angBng = tenor > 0 ? Math.round(totalBunga / tenor) : 0;
             var angTot = angPok + angBng;
 
             var html = '<div class="space-y-3">';
@@ -623,8 +781,16 @@ catat_view_once($pdo, 'Pengajuan Pinjaman', 'Membuka halaman Pengajuan Pinjaman'
             html += box('Jumlah', rupiah(pokok));
             html += box('Tenor', tenor + ' bulan');
             html += box('Angsuran/bln', rupiah(angTot));
-            html += box('Bunga', bungaPct + '%/bln flat');
-            html += box('Status', ucFirst(p.status));
+            html += box('Bunga', bungaPct + '% total');
+            var statusLabelMap = {
+                pending: 'Pending',
+                diseleksi: 'Diseleksi',
+                disetujui: 'Disetujui',
+                ditolak: 'Ditolak',
+                dibatalkan: 'Batal Pengajuan',
+                dicairkan: 'Dicairkan'
+            };
+            html += box('Status', (String(p.status || '').trim() === '' ? 'Batal Pengajuan' : (statusLabelMap[String(p.status || '').toLowerCase()] || ucFirst(p.status))));
             if (p.nama_barang) html += box('Nama Barang', escHtml(p.nama_barang));
             if (p.keperluan) html += '<div class="col-span-2">' + box('Keperluan', escHtml(p.keperluan)) + '</div>';
             if (p.catatan_petugas) html += '<div class="col-span-2">' + box('Catatan Petugas', escHtml(p.catatan_petugas)) + '</div>';
@@ -645,7 +811,7 @@ catat_view_once($pdo, 'Pengajuan Pinjaman', 'Membuka halaman Pengajuan Pinjaman'
             }
             html += '<tr class="border-t border-gray-200 bg-gray-50 font-bold"><td class="px-3 py-2">Total</td>';
             html += '<td class="px-3 py-2 text-right">' + rupiah(angPok * tenor) + '</td>';
-            html += '<td class="px-3 py-2 text-right">' + rupiah(angBng * tenor) + '</td>';
+            html += '<td class="px-3 py-2 text-right">' + rupiah(totalBunga) + '</td>';
             html += '<td class="px-3 py-2 text-right">' + rupiah(angTot * tenor) + '</td></tr>';
             html += '</tbody></table></div></div>';
 
@@ -692,9 +858,14 @@ catat_view_once($pdo, 'Pengajuan Pinjaman', 'Membuka halaman Pengajuan Pinjaman'
                 });
                 var data = await res.json();
                 showToast(data.message, data.success ? 'success' : 'error');
+                if (data.success && data.wa_link) {
+                    setTimeout(function() {
+                        window.open(data.wa_link, '_blank');
+                    }, 300);
+                }
                 if (data.success) setTimeout(function() {
                     location.reload();
-                }, 900);
+                }, 1200);
             } catch (e) {
                 showToast('Terjadi kesalahan', 'error');
             }
@@ -714,9 +885,14 @@ catat_view_once($pdo, 'Pengajuan Pinjaman', 'Membuka halaman Pengajuan Pinjaman'
                 });
                 var data = await res.json();
                 showToast(data.message, data.success ? 'success' : 'error');
+                if (data.success && data.wa_link) {
+                    setTimeout(function() {
+                        window.open(data.wa_link, '_blank');
+                    }, 300);
+                }
                 if (data.success) setTimeout(function() {
                     location.reload();
-                }, 900);
+                }, 1200);
             } catch (e) {
                 showToast('Terjadi kesalahan', 'error');
             }
