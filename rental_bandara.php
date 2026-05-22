@@ -49,6 +49,171 @@ if (!function_exists('rupiah')) {
     }
 }
 
+
+if (!function_exists('rental_coa_id')) {
+    function rental_coa_id(PDO $pdo, string $kode): int
+    {
+        $stmt = $pdo->prepare("
+            SELECT id
+            FROM coa
+            WHERE kode = ?
+            LIMIT 1
+        ");
+        $stmt->execute([$kode]);
+
+        $id = $stmt->fetchColumn();
+
+        if (!$id) {
+            throw new Exception("COA kode {$kode} tidak ditemukan.");
+        }
+
+        return (int)$id;
+    }
+}
+
+if (!function_exists('rental_buat_jurnal')) {
+    function rental_buat_jurnal(
+        PDO $pdo,
+        string $tanggal,
+        string $keterangan,
+        string $refTabel,
+        int $refId,
+        ?int $userId = null
+    ): int {
+        $kodeJurnal = 'JR-RNT-' . date('YmdHis') . '-' . random_int(100, 999);
+
+        $stmt = $pdo->prepare("
+            INSERT INTO jurnal_umum
+            (
+                tanggal,
+                kode_jurnal,
+                keterangan,
+                ref_tabel,
+                ref_id,
+                dibuat_oleh,
+                created_at
+            )
+            VALUES
+            (
+                :tanggal,
+                :kode_jurnal,
+                :keterangan,
+                :ref_tabel,
+                :ref_id,
+                :dibuat_oleh,
+                NOW()
+            )
+        ");
+
+        $stmt->execute([
+            ':tanggal' => $tanggal,
+            ':kode_jurnal' => $kodeJurnal,
+            ':keterangan' => $keterangan,
+            ':ref_tabel' => $refTabel,
+            ':ref_id' => $refId,
+            ':dibuat_oleh' => $userId ?: null,
+        ]);
+
+        return (int)$pdo->lastInsertId();
+    }
+}
+
+if (!function_exists('rental_tambah_jurnal_detail')) {
+    function rental_tambah_jurnal_detail(
+        PDO $pdo,
+        int $jurnalId,
+        int $coaId,
+        float $debit = 0,
+        float $kredit = 0
+    ): void {
+        $stmt = $pdo->prepare("
+            INSERT INTO jurnal_detail
+            (
+                jurnal_id,
+                coa_id,
+                debit,
+                kredit,
+                created_at
+            )
+            VALUES
+            (
+                :jurnal_id,
+                :coa_id,
+                :debit,
+                :kredit,
+                NOW()
+            )
+        ");
+
+        $stmt->execute([
+            ':jurnal_id' => $jurnalId,
+            ':coa_id' => $coaId,
+            ':debit' => $debit,
+            ':kredit' => $kredit,
+        ]);
+    }
+}
+
+if (!function_exists('rental_auto_jurnal_selesai')) {
+    function rental_auto_jurnal_selesai(
+        PDO $pdo,
+        int $bookingId,
+        string $kodeBooking,
+        float $totalHarga,
+        ?int $userId = null
+    ): void {
+        if ($bookingId < 1 || $totalHarga <= 0) {
+            return;
+        }
+
+        try {
+            // Cegah jurnal ganda untuk booking yang sama.
+            $cek = $pdo->prepare("
+                SELECT COUNT(*)
+                FROM jurnal_umum
+                WHERE ref_tabel = 'rental_bandara'
+                  AND ref_id = ?
+            ");
+            $cek->execute([$bookingId]);
+
+            if ((int)$cek->fetchColumn() > 0) {
+                return;
+            }
+
+            $jurnalId = rental_buat_jurnal(
+                $pdo,
+                date('Y-m-d'),
+                'Pendapatan Rental Bandara ' . $kodeBooking,
+                'rental_bandara',
+                $bookingId,
+                $userId
+            );
+
+            // Debit: Kas
+            rental_tambah_jurnal_detail(
+                $pdo,
+                $jurnalId,
+                rental_coa_id($pdo, '101'),
+                $totalHarga,
+                0
+            );
+
+            // Kredit: Pendapatan Rental
+            rental_tambah_jurnal_detail(
+                $pdo,
+                $jurnalId,
+                rental_coa_id($pdo, '402'),
+                0,
+                $totalHarga
+            );
+        } catch (Throwable $e) {
+            // Auto jurnal tidak boleh menggagalkan update status rental.
+            error_log('AUTO JURNAL RENTAL ERROR: ' . $e->getMessage());
+        }
+    }
+}
+
+
 if (!function_exists('angka')) {
     /** @param mixed $v */
     function angka($v): string
@@ -355,7 +520,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'updat
             $pdo->beginTransaction();
 
             $stmtOld = $pdo->prepare("
-                SELECT id, kendaraan_id, driver_id, kendaraan, tipe_kendaraan, kapasitas_kendaraan, total_harga
+                SELECT id, kode_booking, status, kendaraan_id, driver_id, kendaraan, tipe_kendaraan, kapasitas_kendaraan, total_harga
                 FROM rental_bandara
                 WHERE id = :id
                 LIMIT 1
@@ -466,6 +631,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'updat
                         ':id' => (int)$oldBooking['kendaraan_id'],
                     ]);
                 }
+            }
+
+            // Auto jurnal rental:
+            // Hanya dibuat saat status booking menjadi selesai.
+            // Debit Kas (101), Kredit Pendapatan Rental (402).
+            // Jika tabel jurnal/COA belum siap, update status tetap aman karena fungsi ini menangani error sendiri.
+            if ($status === 'selesai') {
+                rental_auto_jurnal_selesai(
+                    $pdo,
+                    (int)$id,
+                    (string)($oldBooking['kode_booking'] ?? ''),
+                    (float)$hargaUpdate,
+                    (int)($_SESSION['user_id'] ?? ($_SESSION['user']['id'] ?? 0))
+                );
             }
 
             $pdo->commit();

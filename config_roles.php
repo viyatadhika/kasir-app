@@ -29,6 +29,7 @@ define('ROLE_ACCESS', [
             'produk.php',
             'diskon.php',
             'stok_opname.php',
+            'anggota.php',
             'laporan.php',
             // Halaman pendukung (ajax/sub-page) yang kasir butuhkan
             'struk.php',
@@ -40,6 +41,7 @@ define('ROLE_ACCESS', [
             'produk',
             'diskon',
             'stok',
+            'anggota',
             'laporan',
         ],
     ],
@@ -62,16 +64,26 @@ define('ROLE_ACCESS', [
     'ksp' => [
         'pages' => [
             'dashboard.php',
+
+            // KSP
             'simpanan.php',
             'pinjaman.php',
+            'angsuran_pinjaman.php',
             'anggota.php',
+
+            // Laporan operasional KSP
             'laporan.php',
         ],
         'menus' => [
             'dashboard',
+
+            // KSP
             'simpanan',
             'pinjaman',
+            'angsuran_pinjaman',
             'anggota',
+
+            // Laporan operasional KSP
             'laporan',
         ],
     ],

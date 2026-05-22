@@ -191,7 +191,14 @@ $stmtProd = $pdo->prepare("SELECT * FROM produk WHERE $whereStr ORDER BY kategor
 $stmtProd->execute($params);
 $produkList = $stmtProd->fetchAll();
 
-$kategoriList = $pdo->query("SELECT DISTINCT kategori FROM produk ORDER BY kategori")->fetchAll(PDO::FETCH_COLUMN);
+$kategoriList = $pdo->query("
+    SELECT DISTINCT TRIM(kategori) AS kategori
+    FROM produk
+    WHERE kategori IS NOT NULL
+      AND TRIM(kategori) <> ''
+      AND TRIM(kategori) <> '-'
+    ORDER BY kategori ASC
+")->fetchAll(PDO::FETCH_COLUMN);
 
 $summary = $pdo->query("
     SELECT
@@ -713,14 +720,28 @@ $rightActionHtml = '
                 </div>
                 <div>
                     <label class="block text-[10px] font-bold uppercase tracking-widest text-gray-500 mb-1.5">Kategori</label>
-                    <input type="text" id="form-kategori" placeholder="Minuman, Snack, Sembako..."
+
+                    <select id="form-kategori-select"
+                        class="w-full bg-gray-50 border border-gray-200 px-3 py-2.5 text-sm transition-all mb-2">
+                        <option value="">Pilih kategori yang sudah ada</option>
+                        <?php foreach ($kategoriList as $k): ?>
+                            <option value="<?php echo e($k); ?>"><?php echo e($k); ?></option>
+                        <?php endforeach; ?>
+                    </select>
+
+                    <input type="text" id="form-kategori-baru" placeholder="Atau ketik kategori baru..."
                         list="kat-list"
                         class="w-full bg-gray-50 border border-gray-200 px-3 py-2.5 text-sm transition-all">
+
                     <datalist id="kat-list">
                         <?php foreach ($kategoriList as $k): ?>
                             <option value="<?php echo e($k); ?>">
                             <?php endforeach; ?>
                     </datalist>
+
+                    <p class="text-[9px] text-gray-400 mt-1">
+                        Kalau kategori baru diisi, sistem akan otomatis menyimpannya ke produk dan muncul di dropdown berikutnya.
+                    </p>
                 </div>
                 <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
                     <div>
@@ -822,6 +843,16 @@ $rightActionHtml = '
             searchTimer = setTimeout(applyFilter, 400);
         });
         document.getElementById('filter-kat').addEventListener('change', applyFilter);
+        document.addEventListener('DOMContentLoaded', function() {
+            var kategoriSelect = document.getElementById('form-kategori-select');
+            if (kategoriSelect) {
+                kategoriSelect.addEventListener('change', function() {
+                    if (this.value !== '') {
+                        document.getElementById('form-kategori-baru').value = '';
+                    }
+                });
+            }
+        });
         document.getElementById('filter-status').addEventListener('change', applyFilter);
 
         function applyFilter() {
@@ -847,11 +878,50 @@ $rightActionHtml = '
             resetForm();
         }
 
+        function getKategoriProduk() {
+            var baru = document.getElementById('form-kategori-baru').value.trim();
+            var pilih = document.getElementById('form-kategori-select').value.trim();
+
+            if (baru !== '') {
+                return baru;
+            }
+
+            if (pilih !== '') {
+                return pilih;
+            }
+
+            return '-';
+        }
+
+        function setKategoriProduk(kategori) {
+            kategori = String(kategori || '').trim();
+
+            var select = document.getElementById('form-kategori-select');
+            var inputBaru = document.getElementById('form-kategori-baru');
+            var found = false;
+
+            for (var i = 0; i < select.options.length; i++) {
+                if (select.options[i].value === kategori) {
+                    found = true;
+                    break;
+                }
+            }
+
+            if (found) {
+                select.value = kategori;
+                inputBaru.value = '';
+            } else {
+                select.value = '';
+                inputBaru.value = kategori === '-' ? '' : kategori;
+            }
+        }
+
         function resetForm() {
-            ['form-id', 'form-kode', 'form-nama', 'form-kategori', 'form-harga-beli', 'form-harga-jual', 'form-stok', 'form-stok-min'].forEach(function(id) {
+            ['form-id', 'form-kode', 'form-nama', 'form-kategori-baru', 'form-harga-beli', 'form-harga-jual', 'form-stok', 'form-stok-min'].forEach(function(id) {
                 document.getElementById(id).value = '';
             });
             document.getElementById('form-satuan').value = 'pcs';
+            document.getElementById('form-kategori-select').value = '';
             document.querySelector('input[name="form-status"][value="aktif"]').checked = true;
             document.getElementById('margin-info').innerText = '';
         }
@@ -870,7 +940,7 @@ $rightActionHtml = '
                 document.getElementById('form-id').value = p.id;
                 document.getElementById('form-kode').value = p.kode;
                 document.getElementById('form-nama').value = p.nama;
-                document.getElementById('form-kategori').value = p.kategori;
+                setKategoriProduk(p.kategori);
                 document.getElementById('form-harga-beli').value = p.harga_beli;
                 document.getElementById('form-harga-jual').value = p.harga_jual;
                 document.getElementById('form-stok').value = p.stok;
@@ -895,7 +965,7 @@ $rightActionHtml = '
                 id: id || undefined,
                 kode: document.getElementById('form-kode').value.trim(),
                 nama: document.getElementById('form-nama').value.trim(),
-                kategori: document.getElementById('form-kategori').value.trim() || '-',
+                kategori: getKategoriProduk(),
                 harga_beli: document.getElementById('form-harga-beli').value || 0,
                 harga_jual: document.getElementById('form-harga-jual').value,
                 stok: document.getElementById('form-stok').value || 0,

@@ -26,10 +26,18 @@ if (!isset($activeMenu)) {
         'diskon.php'         => 'diskon',
         'rental_bandara.php' => 'rental',
         'driver.php'         => 'driver',
-        'simpanan.php'       => 'simpanan',
-        'pinjaman.php'       => 'pinjaman',
-        'laporan.php'        => 'laporan',
-        'log_aktivitas.php'  => 'log',
+        'anggota.php'        => 'anggota',
+
+        'simpanan.php'            => 'simpanan',
+        'pinjaman.php'            => 'pinjaman',
+        'angsuran_pinjaman.php'   => 'angsuran_pinjaman',
+
+        'laporan.php'             => 'laporan',
+        'laporan_keuangan.php'    => 'laporan_keuangan',
+        'neraca.php'              => 'neraca',
+        'laba_rugi.php'           => 'laba_rugi',
+
+        'log_aktivitas.php'       => 'log',
     ];
 
     $activeMenu = isset($map[$file]) ? $map[$file] : '';
@@ -58,10 +66,18 @@ $allMenus = [
     ['key' => 'diskon',    'href' => 'diskon.php',         'label' => 'Kelola Diskon'],
     ['key' => 'rental',    'href' => 'rental_bandara.php', 'label' => 'Rental Bandara'],
     ['key' => 'driver',    'href' => 'driver.php',         'label' => 'Driver Mitra'],
-    ['key' => 'simpanan',    'href' => 'simpanan.php',     'label' => 'Kelola Simpanan'],
-    ['key' => 'pinjaman',    'href' => 'pinjaman.php',     'label' => 'Kelola Pinjaman'],
-    ['key' => 'laporan',   'href' => 'laporan.php',        'label' => 'Laporan Keuangan'],
-    ['key' => 'log',       'href' => 'log_aktivitas.php',  'label' => 'Log Aktivitas'],
+
+    ['key' => 'anggota',            'href' => 'anggota.php',              'label' => 'Kelola Anggota'],
+    ['key' => 'simpanan',           'href' => 'simpanan.php',             'label' => 'Kelola Simpanan'],
+    ['key' => 'pinjaman',            'href' => 'pinjaman.php',             'label' => 'Kelola Pinjaman'],
+    ['key' => 'angsuran_pinjaman',   'href' => 'angsuran_pinjaman.php',    'label' => 'Angsuran Pinjaman'],
+
+    ['key' => 'laporan',             'href' => 'laporan.php',              'label' => 'Laporan Operasional'],
+    ['key' => 'laporan_keuangan',    'href' => 'laporan_keuangan.php',     'label' => 'Laporan Keuangan'],
+    ['key' => 'neraca',              'href' => 'neraca.php',               'label' => 'Neraca'],
+    ['key' => 'laba_rugi',           'href' => 'laba_rugi.php',            'label' => 'Laba Rugi / SHU'],
+
+    ['key' => 'log',                 'href' => 'log_aktivitas.php',        'label' => 'Log Aktivitas'],
 ];
 
 // ── Filter menu berdasarkan role ──────────────────────────────────────────

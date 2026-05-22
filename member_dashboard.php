@@ -644,6 +644,106 @@ if (!function_exists('transport_jam_member')) {
 
 
 
+
+// ── Simpanan member dari database ───────────────────────────────────────────
+$simpananError = '';
+$simpananTahunOptions = [];
+$simpananTahunAktif = 0;
+$simpananBulanAktif = (int)($_GET['simpanan_bulan'] ?? date('n'));
+if ($simpananBulanAktif < 1 || $simpananBulanAktif > 12) {
+    $simpananBulanAktif = (int)date('n');
+}
+
+$simpananSummary = [
+    'pokok' => 0,
+    'wajib' => 0,
+    'sukarela' => 0,
+    'total' => 0,
+];
+$simpananBulanIni = [
+    'pokok' => 0,
+    'wajib' => 0,
+    'sukarela' => 0,
+    'total' => 0,
+];
+$simpananBulanan = [];
+$simpananRiwayat = [];
+$bulanNamaMember = [
+    1 => 'Jan',
+    2 => 'Feb',
+    3 => 'Mar',
+    4 => 'Apr',
+    5 => 'Mei',
+    6 => 'Jun',
+    7 => 'Jul',
+    8 => 'Agu',
+    9 => 'Sep',
+    10 => 'Okt',
+    11 => 'Nov',
+    12 => 'Des',
+];
+
+for ($i = 1; $i <= 12; $i++) {
+    $simpananBulanan[$i] = [
+        'pokok' => 0,
+        'wajib' => 0,
+        'sukarela' => 0,
+        'total' => 0,
+    ];
+}
+
+try {
+    if (has_table_member($pdo, 'simpanan')) {
+        $stmtTahunSimpanan = $pdo->prepare("\n            SELECT DISTINCT tahun\n            FROM simpanan\n            WHERE member_id = :member_id\n              AND tahun IS NOT NULL\n              AND tahun > 0\n            ORDER BY tahun DESC\n        ");
+        $stmtTahunSimpanan->execute([':member_id' => $memberId]);
+        $simpananTahunOptions = array_map('intval', $stmtTahunSimpanan->fetchAll(PDO::FETCH_COLUMN));
+
+        $tahunReq = (int)($_GET['simpanan_tahun'] ?? 0);
+        if ($tahunReq > 0 && in_array($tahunReq, $simpananTahunOptions, true)) {
+            $simpananTahunAktif = $tahunReq;
+        } elseif ($simpananTahunOptions) {
+            $simpananTahunAktif = (int)$simpananTahunOptions[0];
+        } else {
+            $simpananTahunAktif = (int)date('Y');
+        }
+
+        $stmtSimpanan = $pdo->prepare("\n            SELECT\n                bulan,\n                jenis,\n                COALESCE(SUM(jumlah), 0) AS total\n            FROM simpanan\n            WHERE member_id = :member_id\n              AND tahun = :tahun\n            GROUP BY bulan, jenis\n            ORDER BY bulan ASC\n        ");
+        $stmtSimpanan->execute([
+            ':member_id' => $memberId,
+            ':tahun' => $simpananTahunAktif,
+        ]);
+
+        foreach ($stmtSimpanan->fetchAll(PDO::FETCH_ASSOC) as $row) {
+            $bulan = (int)($row['bulan'] ?? 0);
+            $jenis = strtolower(trim((string)($row['jenis'] ?? '')));
+            $jumlah = (float)($row['total'] ?? 0);
+
+            if ($bulan < 1 || $bulan > 12 || !isset($simpananBulanan[$bulan][$jenis])) {
+                continue;
+            }
+
+            $simpananBulanan[$bulan][$jenis] += $jumlah;
+            $simpananBulanan[$bulan]['total'] += $jumlah;
+            $simpananSummary[$jenis] += $jumlah;
+            $simpananSummary['total'] += $jumlah;
+        }
+
+        $simpananBulanIni = $simpananBulanan[$simpananBulanAktif] ?? $simpananBulanIni;
+
+        $stmtRiwayatSimpanan = $pdo->prepare("\n            SELECT id, jenis, jumlah, bulan, tahun, keterangan, created_at\n            FROM simpanan\n            WHERE member_id = :member_id\n            ORDER BY tahun DESC, bulan DESC, id DESC\n            LIMIT 30\n        ");
+        $stmtRiwayatSimpanan->execute([':member_id' => $memberId]);
+        $simpananRiwayat = $stmtRiwayatSimpanan->fetchAll(PDO::FETCH_ASSOC);
+    } else {
+        $simpananError = 'Tabel simpanan belum tersedia di database.';
+        $simpananTahunAktif = (int)date('Y');
+    }
+} catch (Throwable $e) {
+    $simpananError = 'Gagal memuat data simpanan: ' . $e->getMessage();
+    if ($simpananTahunAktif < 1) {
+        $simpananTahunAktif = (int)date('Y');
+    }
+}
+
 catat_view_once($pdo, 'Member Dashboard', 'Membuka halaman Member Dashboard');
 ?>
 <!DOCTYPE html>
@@ -3803,20 +3903,154 @@ catat_view_once($pdo, 'Member Dashboard', 'Membuka halaman Member Dashboard');
                 <div class="promo-hero-bar">
                     <div style="font-size:10px;font-weight:900;text-transform:uppercase;letter-spacing:.15em;opacity:.4;margin-bottom:8px;">Layanan Simpanan</div>
                     <h2>Simpanan<br>Member</h2>
-                    <p>Ringkasan simpanan anggota koperasi.</p>
+                    <p>Data simpanan diambil langsung dari database koperasi.</p>
+                </div>
+
+                <?php if ($simpananError): ?>
+                    <div class="transport-alert transport-alert-error">
+                        <span class="transport-alert-icon">!</span>
+                        <span><?= h($simpananError) ?></span>
+                    </div>
+                <?php endif; ?>
+
+                <form method="GET" class="transport-card-box" style="position:sticky;top:0;z-index:30;background:#fff;box-shadow:0 6px 18px rgba(15,23,42,.04);">
+                    <input type="hidden" name="tab" value="simpanan">
+                    <div class="transport-section-head" style="margin-bottom:12px;">
+                        <div>
+                            <h3>Filter Simpanan</h3>
+                            <div style="font-size:11px;font-weight:600;color:var(--g4);margin-top:4px;">Pilih tahun dan bulan yang ingin dilihat.</div>
+                        </div>
+                        <span><?= h((string)$simpananTahunAktif) ?></span>
+                    </div>
+
+                    <div class="transport-grid-2">
+                        <div class="transport-form-group">
+                            <label>Tahun</label>
+                            <select name="simpanan_tahun" class="transport-input" onchange="this.form.submit()">
+                                <?php if (!$simpananTahunOptions): ?>
+                                    <option value="<?= (int)$simpananTahunAktif ?>"><?= (int)$simpananTahunAktif ?></option>
+                                <?php endif; ?>
+                                <?php foreach ($simpananTahunOptions as $tahunOpt): ?>
+                                    <option value="<?= (int)$tahunOpt ?>" <?= (int)$tahunOpt === (int)$simpananTahunAktif ? 'selected' : '' ?>><?= (int)$tahunOpt ?></option>
+                                <?php endforeach; ?>
+                            </select>
+                        </div>
+
+                        <div class="transport-form-group">
+                            <label>Bulan</label>
+                            <select name="simpanan_bulan" class="transport-input" onchange="this.form.submit()">
+                                <?php foreach ($bulanNamaMember as $numBulan => $namaBulan): ?>
+                                    <option value="<?= (int)$numBulan ?>" <?= (int)$numBulan === (int)$simpananBulanAktif ? 'selected' : '' ?>><?= h($namaBulan) ?></option>
+                                <?php endforeach; ?>
+                            </select>
+                        </div>
+                    </div>
+                </form>
+
+                <div class="transport-service-grid" style="grid-template-columns:repeat(4,minmax(0,1fr));">
+                    <div class="transport-service-card">
+                        <div class="transport-service-label">Pokok Tahun</div>
+                        <div style="font-size:13px;font-weight:900;color:#111;margin-top:8px;line-height:1.3;"><?= rupiah_member($simpananSummary['pokok']) ?></div>
+                    </div>
+                    <div class="transport-service-card">
+                        <div class="transport-service-label">Wajib Tahun</div>
+                        <div style="font-size:13px;font-weight:900;color:#111;margin-top:8px;line-height:1.3;"><?= rupiah_member($simpananSummary['wajib']) ?></div>
+                    </div>
+                    <div class="transport-service-card">
+                        <div class="transport-service-label">Sukarela Tahun</div>
+                        <div style="font-size:13px;font-weight:900;color:#111;margin-top:8px;line-height:1.3;"><?= rupiah_member($simpananSummary['sukarela']) ?></div>
+                    </div>
+                    <div class="transport-service-card">
+                        <div class="transport-service-label">Total Tahun</div>
+                        <div style="font-size:13px;font-weight:900;color:#111;margin-top:8px;line-height:1.3;"><?= rupiah_member($simpananSummary['total']) ?></div>
+                    </div>
                 </div>
 
                 <div class="transport-card-box">
                     <div class="transport-section-head">
                         <div>
-                            <h3>Informasi Simpanan</h3>
-                            <div style="font-size:11px;font-weight:600;color:var(--g4);margin-top:4px;">Fitur simpanan member tetap mengikuti data dari halaman simpanan.</div>
+                            <h3>Simpanan Bulan <?= h($bulanNamaMember[$simpananBulanAktif] ?? '-') ?> <?= h((string)$simpananTahunAktif) ?></h3>
+                            <div style="font-size:11px;font-weight:600;color:var(--g4);margin-top:4px;">Ringkasan sesuai bulan yang dipilih</div>
                         </div>
-                        <span>SP</span>
+                        <span><?= rupiah_member($simpananBulanIni['total']) ?></span>
                     </div>
 
-                    <div class="transport-empty">
-                        Data simpanan member belum ditampilkan di dashboard ini
+                    <?php if ((float)$simpananBulanIni['total'] <= 0): ?>
+                        <div class="transport-empty">Belum ada simpanan pada bulan ini</div>
+                    <?php else: ?>
+                        <div class="transport-history-grid" style="grid-template-columns:repeat(4,minmax(0,1fr));">
+                            <div class="transport-history-item">
+                                <span>Pokok</span>
+                                <strong><?= rupiah_member($simpananBulanIni['pokok']) ?></strong>
+                            </div>
+                            <div class="transport-history-item">
+                                <span>Wajib</span>
+                                <strong><?= rupiah_member($simpananBulanIni['wajib']) ?></strong>
+                            </div>
+                            <div class="transport-history-item">
+                                <span>Sukarela</span>
+                                <strong><?= rupiah_member($simpananBulanIni['sukarela']) ?></strong>
+                            </div>
+                            <div class="transport-history-item">
+                                <span>Total</span>
+                                <strong><?= rupiah_member($simpananBulanIni['total']) ?></strong>
+                            </div>
+                        </div>
+                    <?php endif; ?>
+                </div>
+
+                <div class="transport-card-box">
+                    <div class="transport-section-head">
+                        <div>
+                            <h3>Rekap 12 Bulan</h3>
+                            <div style="font-size:11px;font-weight:600;color:var(--g4);margin-top:4px;">Klik bulan untuk mengganti ringkasan bulan di atas.</div>
+                        </div>
+                        <span><?= h((string)$simpananTahunAktif) ?></span>
+                    </div>
+
+                    <div style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;">
+                        <?php foreach ($bulanNamaMember as $numBulan => $namaBulan): ?>
+                            <?php $dataBulan = $simpananBulanan[$numBulan] ?? ['total' => 0]; ?>
+                            <a href="?simpanan_tahun=<?= (int)$simpananTahunAktif ?>&simpanan_bulan=<?= (int)$numBulan ?>#simpanan"
+                                style="display:block;text-decoration:none;border:0.5px solid <?= (int)$numBulan === (int)$simpananBulanAktif ? '#111' : 'var(--g7)' ?>;background:<?= (int)$numBulan === (int)$simpananBulanAktif ? '#f9fafb' : '#fff' ?>;padding:12px;min-width:0;">
+                                <div style="font-size:9px;font-weight:900;text-transform:uppercase;letter-spacing:.12em;color:var(--g4);"><?= h($namaBulan) ?></div>
+                                <div style="font-size:13px;font-weight:900;color:#111;margin-top:7px;line-height:1.25;overflow-wrap:anywhere;"><?= rupiah_member($dataBulan['total'] ?? 0) ?></div>
+                                <div style="font-size:10px;font-weight:700;color:var(--g4);margin-top:5px;line-height:1.5;">
+                                    W: <?= rupiah_member($dataBulan['wajib'] ?? 0) ?><br>
+                                    S: <?= rupiah_member($dataBulan['sukarela'] ?? 0) ?>
+                                </div>
+                            </a>
+                        <?php endforeach; ?>
+                    </div>
+                </div>
+
+                <div class="transport-card-box">
+                    <div class="transport-section-head">
+                        <div>
+                            <h3>Riwayat Simpanan</h3>
+                            <div style="font-size:11px;font-weight:600;color:var(--g4);margin-top:4px;">30 data simpanan terbaru dari database</div>
+                        </div>
+                        <span><?= angka_member(count($simpananRiwayat)) ?></span>
+                    </div>
+
+                    <div class="transport-history-wrap">
+                        <?php if (!$simpananRiwayat): ?>
+                            <div class="transport-empty">Belum ada riwayat simpanan</div>
+                        <?php endif; ?>
+
+                        <?php foreach ($simpananRiwayat as $rowSimpanan): ?>
+                            <div class="transport-history-card">
+                                <div class="transport-history-top">
+                                    <div>
+                                        <div class="transport-booking-code">Simpanan <?= h(ucfirst((string)$rowSimpanan['jenis'])) ?></div>
+                                        <div class="transport-booking-date"><?= h($bulanNamaMember[(int)$rowSimpanan['bulan']] ?? '-') ?> <?= h((string)$rowSimpanan['tahun']) ?><?= !empty($rowSimpanan['keterangan']) ? ' · ' . h($rowSimpanan['keterangan']) : '' ?></div>
+                                    </div>
+                                    <div class="transport-status transport-status-green">
+                                        <?= rupiah_member($rowSimpanan['jumlah']) ?>
+                                    </div>
+                                </div>
+                            </div>
+                        <?php endforeach; ?>
                     </div>
                 </div>
             </div><!-- /page-simpanan -->
@@ -5120,11 +5354,21 @@ catat_view_once($pdo, 'Member Dashboard', 'Membuka halaman Member Dashboard');
 
         document.addEventListener('DOMContentLoaded', function() {
             var savedPage = 'beranda';
+            var hashPage = (window.location.hash || '').replace('#', '');
+            var queryPage = new URLSearchParams(window.location.search).get('tab') || '';
 
             try {
                 savedPage = localStorage.getItem('member_dashboard_active_page') || 'beranda';
             } catch (e) {
                 savedPage = 'beranda';
+            }
+
+            if (queryPage && document.getElementById('page-' + queryPage)) {
+                savedPage = queryPage;
+            }
+
+            if (hashPage && document.getElementById('page-' + hashPage)) {
+                savedPage = hashPage;
             }
 
             if (!document.getElementById('page-' + savedPage)) {

@@ -6,11 +6,21 @@ require_once 'config.php';
 requireAccess();
 require_once 'activity_helper.php';
 
+// Server Linux/MySQL bisa mengembalikan nama kolom sesuai casing asli, misalnya STATUS.
+// Paksa PDO mengembalikan key array menjadi huruf kecil agar $row['status'] selalu terbaca.
+try {
+    if (isset($pdo) && $pdo instanceof PDO) {
+        $pdo->setAttribute(PDO::ATTR_CASE, PDO::CASE_LOWER);
+    }
+} catch (Throwable $e) {
+    // Abaikan jika driver tidak mendukung.
+}
+
 $activeMenu = 'diskon';
 $pageTitle  = 'Kelola Diskon';
 $backUrl    = 'dashboard.php';
 
-$success = '';
+$success = isset($_GET['ok']) ? trim((string)$_GET['ok']) : '';
 $error   = '';
 
 // ── Helper ───────────────────────────────────────────────────────────────────
@@ -47,12 +57,195 @@ if (!function_exists('tanggal_diskon')) {
     }
 }
 
+
+if (!function_exists('diskon_status_norm')) {
+    /**
+     * @param mixed $status
+     */
+    function diskon_status_norm($status): string
+    {
+        $status = strtolower(trim((string)($status ?? '')));
+        if (in_array($status, ['aktif', 'active', '1', 'true', 'yes', 'on'], true)) {
+            return 'aktif';
+        }
+        return 'nonaktif';
+    }
+}
+
+if (!function_exists('diskon_is_aktif')) {
+    /**
+     * @param mixed $status
+     */
+    function diskon_is_aktif($status): bool
+    {
+        return diskon_status_norm($status) === 'aktif';
+    }
+}
+
 try {
     $produkList   = $pdo->query("SELECT id, kode, nama, kategori FROM produk WHERE status='aktif' ORDER BY nama")->fetchAll(PDO::FETCH_ASSOC);
     $kategoriList = $pdo->query("SELECT DISTINCT kategori FROM produk WHERE status='aktif' AND kategori IS NOT NULL AND kategori<>'' ORDER BY kategori")->fetchAll(PDO::FETCH_COLUMN);
 } catch (Exception $e) {
     $produkList   = [];
     $kategoriList = [];
+}
+
+
+// ── JSON API Handler untuk edit/toggle/hapus yang stabil ─────────────────────
+if (isset($_GET['action'])) {
+    header('Content-Type: application/json; charset=utf-8');
+
+    $jsonAction = (string)$_GET['action'];
+
+    try {
+        if ($jsonAction === 'get') {
+            $id = (int)($_GET['id'] ?? 0);
+            $stmt = $pdo->prepare("SELECT * FROM diskon WHERE id = :id LIMIT 1");
+            $stmt->execute([':id' => $id]);
+            $row = $stmt->fetch(PDO::FETCH_ASSOC);
+
+            if (!$row) {
+                echo json_encode(['success' => false, 'message' => 'Diskon tidak ditemukan.']);
+                exit;
+            }
+
+            $row['status'] = diskon_status_norm($row['status'] ?? 'nonaktif');
+            echo json_encode(['success' => true, 'data' => $row]);
+            exit;
+        }
+
+        if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
+            echo json_encode(['success' => false, 'message' => 'Method tidak valid.']);
+            exit;
+        }
+
+        if ($jsonAction === 'save') {
+            $id      = !empty($_POST['id']) ? (int)$_POST['id'] : null;
+            $nama    = trim((string)($_POST['nama'] ?? ''));
+            $cakupan = (string)($_POST['cakupan'] ?? 'transaksi');
+            $target  = 'semua';
+            $produkId = !empty($_POST['produk_id']) ? (int)$_POST['produk_id'] : null;
+            $kategori = trim((string)($_POST['kategori'] ?? ''));
+            $jenis   = (string)($_POST['jenis'] ?? 'persen');
+            $nilai   = (int)($_POST['nilai'] ?? 0);
+            $minimal = (int)($_POST['minimal_belanja'] ?? 0);
+            $mulai   = !empty($_POST['tanggal_mulai']) ? (string)$_POST['tanggal_mulai'] : null;
+            $selesai = !empty($_POST['tanggal_selesai']) ? (string)$_POST['tanggal_selesai'] : null;
+            $status = diskon_status_norm($_POST['status'] ?? 'aktif');
+
+            if ($nama === '') throw new Exception('Nama diskon wajib diisi.');
+            if (!in_array($cakupan, ['transaksi', 'produk', 'kategori'], true)) throw new Exception('Cakupan tidak valid.');
+            if (!in_array($jenis, ['persen', 'nominal'], true)) throw new Exception('Jenis diskon tidak valid.');
+            if ($nilai <= 0) throw new Exception('Nilai diskon harus lebih dari 0.');
+            if ($jenis === 'persen' && $nilai > 100) throw new Exception('Diskon persen maksimal 100%.');
+            if ($minimal < 0) throw new Exception('Minimal belanja tidak boleh minus.');
+            if ($mulai && $selesai && strtotime($selesai) < strtotime($mulai)) throw new Exception('Tanggal selesai tidak boleh lebih kecil dari tanggal mulai.');
+            if ($cakupan === 'produk' && !$produkId) throw new Exception('Pilih produk untuk diskon produk.');
+            if ($cakupan === 'kategori' && $kategori === '') throw new Exception('Pilih kategori untuk diskon kategori.');
+
+            if ($cakupan !== 'produk') $produkId = null;
+            if ($cakupan !== 'kategori') $kategori = null;
+
+            if ($id) {
+                $stmt = $pdo->prepare("
+                    UPDATE diskon
+                    SET nama = :nama,
+                        cakupan = :cakupan,
+                        target = :target,
+                        produk_id = :produk_id,
+                        kategori = :kategori,
+                        jenis = :jenis,
+                        nilai = :nilai,
+                        minimal_belanja = :minimal,
+                        tanggal_mulai = :mulai,
+                        tanggal_selesai = :selesai,
+                        status = :status,
+                        updated_at = NOW()
+                    WHERE id = :id
+                    LIMIT 1
+                ");
+                $stmt->execute([
+                    ':id' => $id,
+                    ':nama' => $nama,
+                    ':cakupan' => $cakupan,
+                    ':target' => $target,
+                    ':produk_id' => $produkId,
+                    ':kategori' => $kategori,
+                    ':jenis' => $jenis,
+                    ':nilai' => $nilai,
+                    ':minimal' => $minimal,
+                    ':mulai' => $mulai,
+                    ':selesai' => $selesai,
+                    ':status' => $status,
+                ]);
+
+                $cek = $pdo->prepare("SELECT status FROM diskon WHERE id = :id LIMIT 1");
+                $cek->execute([':id' => $id]);
+                $statusDb = diskon_status_norm($cek->fetchColumn());
+
+                echo json_encode([
+                    'success' => true,
+                    'message' => 'Diskon berhasil diperbarui. Status sekarang: ' . (diskon_is_aktif($statusDb) ? 'Aktif' : 'Nonaktif') . '.',
+                    'status' => diskon_status_norm($statusDb)
+                ]);
+                exit;
+            }
+
+            $stmt = $pdo->prepare("
+                INSERT INTO diskon (nama, cakupan, target, produk_id, kategori, jenis, nilai, minimal_belanja, tanggal_mulai, tanggal_selesai, status)
+                VALUES (:nama, :cakupan, :target, :produk_id, :kategori, :jenis, :nilai, :minimal, :mulai, :selesai, :status)
+            ");
+            $stmt->execute([
+                ':nama' => $nama,
+                ':cakupan' => $cakupan,
+                ':target' => $target,
+                ':produk_id' => $produkId,
+                ':kategori' => $kategori,
+                ':jenis' => $jenis,
+                ':nilai' => $nilai,
+                ':minimal' => $minimal,
+                ':mulai' => $mulai,
+                ':selesai' => $selesai,
+                ':status' => $status,
+            ]);
+
+            echo json_encode(['success' => true, 'message' => 'Diskon berhasil ditambahkan.', 'status' => $status]);
+            exit;
+        }
+
+        if ($jsonAction === 'toggle') {
+            $id = (int)($_POST['id'] ?? 0);
+            if ($id <= 0) throw new Exception('ID diskon tidak valid.');
+
+            $stmt = $pdo->prepare("SELECT status FROM diskon WHERE id = :id LIMIT 1");
+            $stmt->execute([':id' => $id]);
+            $current = diskon_status_norm($stmt->fetchColumn());
+            $next = diskon_is_aktif($current) ? 'nonaktif' : 'aktif';
+
+            $upd = $pdo->prepare("UPDATE diskon SET status = :status, updated_at = NOW() WHERE id = :id LIMIT 1");
+            $upd->execute([':status' => $next, ':id' => $id]);
+
+            echo json_encode([
+                'success' => true,
+                'message' => 'Status diskon diubah menjadi ' . ($next === 'aktif' ? 'Aktif' : 'Nonaktif') . '.',
+                'status' => $next
+            ]);
+            exit;
+        }
+
+        if ($jsonAction === 'delete') {
+            $id = (int)($_POST['id'] ?? 0);
+            if ($id <= 0) throw new Exception('ID diskon tidak valid.');
+            $pdo->prepare("DELETE FROM diskon WHERE id = :id LIMIT 1")->execute([':id' => $id]);
+            echo json_encode(['success' => true, 'message' => 'Diskon berhasil dihapus.']);
+            exit;
+        }
+
+        echo json_encode(['success' => false, 'message' => 'Action tidak dikenali.']);
+    } catch (Throwable $e) {
+        echo json_encode(['success' => false, 'message' => $e->getMessage()]);
+    }
+    exit;
 }
 
 // ── POST Handler ──────────────────────────────────────────────────────────────
@@ -72,12 +265,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $minimal = (int)(isset($_POST['minimal_belanja']) ? $_POST['minimal_belanja'] : 0);
             $mulai   = !empty($_POST['tanggal_mulai'])   ? $_POST['tanggal_mulai']   : null;
             $selesai = !empty($_POST['tanggal_selesai']) ? $_POST['tanggal_selesai'] : null;
-            $status  = isset($_POST['status'])        ? $_POST['status']  : 'aktif';
+            $status  = diskon_status_norm($_POST['status'] ?? 'aktif');
 
             if ($nama === '') throw new Exception('Nama diskon wajib diisi.');
             if (!in_array($cakupan, ['transaksi', 'produk', 'kategori'], true)) throw new Exception('Cakupan tidak valid.');
             if (!in_array($jenis,   ['persen', 'nominal'], true))              throw new Exception('Jenis diskon tidak valid.');
-            if (!in_array($status,  ['aktif', 'nonaktif'], true))              throw new Exception('Status tidak valid.');
             if ($nilai <= 0) throw new Exception('Nilai diskon harus lebih dari 0.');
             if ($jenis === 'persen' && $nilai > 100) throw new Exception('Diskon persen maksimal 100%.');
             if ($minimal < 0) throw new Exception('Minimal belanja tidak boleh minus.');
@@ -110,9 +302,31 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             }
         } elseif ($action === 'toggle') {
             $id = (int)(isset($_POST['id']) ? $_POST['id'] : 0);
-            $pdo->prepare("UPDATE diskon SET status=IF(status='aktif','nonaktif','aktif'), updated_at=NOW() WHERE id=:id")->execute([':id' => $id]);
-            $success = 'Status diskon berhasil diubah.';
-            catat_aktivitas($pdo, 'status', 'Diskon', 'Mengubah status diskon ID: ' . $id);
+            if ($id < 1) {
+                throw new Exception('ID diskon tidak valid.');
+            }
+
+            $stmtToggle = $pdo->prepare("
+                UPDATE diskon
+                SET status = CASE
+                    WHEN LOWER(TRIM(COALESCE(status,''))) = 'aktif' THEN 'nonaktif'
+                    ELSE 'aktif'
+                END,
+                updated_at = NOW()
+                WHERE id = :id
+            ");
+            $stmtToggle->execute([':id' => $id]);
+
+            $stmtStatus = $pdo->prepare("SELECT status FROM diskon WHERE id = :id LIMIT 1");
+            $stmtStatus->execute([':id' => $id]);
+            $newStatus = strtoupper(trim((string)$stmtStatus->fetchColumn()));
+
+            if (function_exists('catat_aktivitas')) {
+                catat_aktivitas($pdo, 'status', 'Diskon', 'Mengubah status diskon ID: ' . $id . ' menjadi ' . $newStatus);
+            }
+
+            header('Location: ' . strtok((string)($_SERVER['REQUEST_URI'] ?? 'diskon.php'), '?') . '?ok=' . urlencode('Status diskon berhasil diubah menjadi ' . $newStatus . '.'));
+            exit;
         } elseif ($action === 'delete') {
             $id = (int)(isset($_POST['id']) ? $_POST['id'] : 0);
             $pdo->prepare("DELETE FROM diskon WHERE id=:id")->execute([':id' => $id]);
@@ -126,7 +340,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
 // ── Fetch List ────────────────────────────────────────────────────────────────
 $q             = trim(isset($_GET['q'])       ? $_GET['q']       : '');
-$filterStatus  = isset($_GET['status'])        ? $_GET['status']  : '';
+$filterStatus  = isset($_GET['status'])        ? diskon_status_norm($_GET['status'])  : '';
 $filterCakupan = isset($_GET['cakupan'])       ? $_GET['cakupan'] : '';
 $where         = [];
 $params        = [];
@@ -136,7 +350,7 @@ if ($q !== '') {
     $params[':q']   = '%' . $q . '%';
 }
 if (in_array($filterStatus, ['aktif', 'nonaktif'], true)) {
-    $where[]           = "d.status=:status";
+    $where[]           = "LOWER(TRIM(COALESCE(d.status,'')))=:status";
     $params[':status'] = $filterStatus;
 }
 if (in_array($filterCakupan, ['transaksi', 'produk', 'kategori'], true)) {
@@ -150,7 +364,7 @@ $stmt     = $pdo->prepare("
     FROM diskon d
     LEFT JOIN produk p ON p.id = d.produk_id
     $sqlWhere
-    ORDER BY d.status='aktif' DESC, d.id DESC
+    ORDER BY CASE WHEN LOWER(TRIM(COALESCE(d.status,''))) IN ('aktif','active','1','true','yes','on') THEN 0 ELSE 1 END ASC, d.id DESC
 ");
 $stmt->execute($params);
 $diskonList = $stmt->fetchAll(PDO::FETCH_ASSOC);
@@ -159,10 +373,10 @@ try {
     $summary = $pdo->query("
         SELECT
             COUNT(*) AS total,
-            SUM(CASE WHEN status='aktif' THEN 1 ELSE 0 END) AS aktif,
-            SUM(CASE WHEN status='aktif' AND cakupan='transaksi' THEN 1 ELSE 0 END) AS transaksi,
-            SUM(CASE WHEN status='aktif' AND cakupan='produk'    THEN 1 ELSE 0 END) AS produk,
-            SUM(CASE WHEN status='aktif' AND cakupan='kategori'  THEN 1 ELSE 0 END) AS kategori
+            SUM(CASE WHEN LOWER(TRIM(COALESCE(status,''))) IN ('aktif','active','1','true','yes','on') THEN 1 ELSE 0 END) AS aktif,
+            SUM(CASE WHEN LOWER(TRIM(COALESCE(status,''))) IN ('aktif','active','1','true','yes','on') AND cakupan='transaksi' THEN 1 ELSE 0 END) AS transaksi,
+            SUM(CASE WHEN LOWER(TRIM(COALESCE(status,''))) IN ('aktif','active','1','true','yes','on') AND cakupan='produk' THEN 1 ELSE 0 END) AS produk,
+            SUM(CASE WHEN LOWER(TRIM(COALESCE(status,''))) IN ('aktif','active','1','true','yes','on') AND cakupan='kategori' THEN 1 ELSE 0 END) AS kategori
         FROM diskon
     ")->fetch(PDO::FETCH_ASSOC);
 } catch (Exception $e) {
@@ -480,7 +694,7 @@ $rightActionHtml = '
                                         <div><?php echo tanggal_diskon($d['tanggal_selesai']); ?></div>
                                     </td>
                                     <td class="px-5 py-4 text-center">
-                                        <?php if ($d['status'] === 'aktif'): ?>
+                                        <?php if (diskon_is_aktif($d['status'] ?? '')): ?>
                                             <span class="badge-aktif text-[9px] font-bold uppercase px-2 py-1">Aktif</span>
                                         <?php else: ?>
                                             <span class="badge-nonaktif text-[9px] font-bold uppercase px-2 py-1">Nonaktif</span>
@@ -494,20 +708,24 @@ $rightActionHtml = '
                                                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
                                                 </svg>
                                             </button>
-                                            <button onclick="toggleDiskon(<?php echo (int)$d['id']; ?>, '<?php echo $d['status']; ?>')"
-                                                class="p-2 text-gray-400 hover:text-yellow-600 hover:bg-yellow-50 transition-all"
-                                                title="<?php echo $d['status'] === 'aktif' ? 'Nonaktifkan' : 'Aktifkan'; ?>">
-                                                <?php if ($d['status'] === 'aktif'): ?>
-                                                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 9v6m4-6v6m7-3a9 9 0 11-18 0 9 9 0 0118 0z" />
-                                                    </svg>
-                                                <?php else: ?>
-                                                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z" />
-                                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                                                    </svg>
-                                                <?php endif; ?>
-                                            </button>
+                                            <form method="POST" action="" class="inline-flex" onsubmit="return confirm('Ubah status diskon ini?');">
+                                                <input type="hidden" name="action" value="toggle">
+                                                <input type="hidden" name="id" value="<?php echo (int)$d['id']; ?>">
+                                                <button type="submit"
+                                                    class="p-2 text-gray-400 hover:text-yellow-600 hover:bg-yellow-50 transition-all"
+                                                    title="<?php echo diskon_is_aktif($d['status'] ?? '') ? 'Nonaktifkan' : 'Aktifkan'; ?>">
+                                                    <?php if (diskon_is_aktif($d['status'] ?? '')): ?>
+                                                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 9v6m4-6v6m7-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+                                                        </svg>
+                                                    <?php else: ?>
+                                                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z" />
+                                                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                                                        </svg>
+                                                    <?php endif; ?>
+                                                </button>
+                                            </form>
                                             <button onclick="hapusDiskon(<?php echo (int)$d['id']; ?>, '<?php echo h(addslashes($d['nama'])); ?>')"
                                                 class="p-2 text-gray-400 hover:text-red-600 hover:bg-red-50 transition-all" title="Hapus">
                                                 <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -566,7 +784,7 @@ $rightActionHtml = '
                                         <p class="text-[10px] text-gray-400 font-mono mt-1 truncate">ID #<?php echo (int)$d['id']; ?> &middot; <?php echo h($cakupanLabel); ?></p>
                                     </div>
                                     <div class="shrink-0">
-                                        <?php if ($d['status'] === 'aktif'): ?>
+                                        <?php if (diskon_is_aktif($d['status'] ?? '')): ?>
                                             <span class="badge-aktif text-[9px] font-bold uppercase px-2 py-1">Aktif</span>
                                         <?php else: ?>
                                             <span class="badge-nonaktif text-[9px] font-bold uppercase px-2 py-1">Nonaktif</span>
@@ -592,10 +810,13 @@ $rightActionHtml = '
                                         class="flex-1 py-2 text-[10px] font-black uppercase tracking-widest border border-blue-100 text-blue-700 hover:bg-blue-50 transition-all">
                                         Edit
                                     </button>
-                                    <button onclick="toggleDiskon(<?php echo (int)$d['id']; ?>, '<?php echo $d['status']; ?>')"
-                                        class="flex-1 py-2 text-[10px] font-black uppercase tracking-widest border border-yellow-100 text-yellow-700 hover:bg-yellow-50 transition-all">
-                                        <?php echo $d['status'] === 'aktif' ? 'Nonaktif' : 'Aktifkan'; ?>
-                                    </button>
+                                    <form method="POST" action="" class="flex-1" onsubmit="return confirm('Ubah status diskon ini?');">
+                                        <input type="hidden" name="action" value="toggle">
+                                        <input type="hidden" name="id" value="<?php echo (int)$d['id']; ?>">
+                                        <button type="submit" class="w-full py-2 text-[10px] font-black uppercase tracking-widest border border-yellow-100 text-yellow-700 hover:bg-yellow-50 transition-all">
+                                            <?php echo diskon_is_aktif($d['status'] ?? '') ? 'Nonaktif' : 'Aktifkan'; ?>
+                                        </button>
+                                    </form>
                                     <button onclick="hapusDiskon(<?php echo (int)$d['id']; ?>, '<?php echo h(addslashes($d['nama'])); ?>')"
                                         class="flex-1 py-2 text-[10px] font-black uppercase tracking-widest border border-red-100 text-red-700 hover:bg-red-50 transition-all">
                                         Hapus
@@ -729,6 +950,20 @@ $rightActionHtml = '
     <script>
         var DISKON_DATA = <?php echo json_encode(array_column($diskonList, null, 'id')); ?>;
 
+
+        function normalizeDiskonStatusJs(value) {
+            var status = String(value == null ? '' : value).toLowerCase().trim();
+            return ['aktif', 'active', '1', 'true', 'yes', 'on'].indexOf(status) >= 0 ? 'aktif' : 'nonaktif';
+        }
+
+        function setDiskonStatusRadio(value) {
+            var status = normalizeDiskonStatusJs(value);
+            var aktif = document.querySelector('input[name="form-status"][value="aktif"]');
+            var nonaktif = document.querySelector('input[name="form-status"][value="nonaktif"]');
+            if (aktif) aktif.checked = (status === 'aktif');
+            if (nonaktif) nonaktif.checked = (status !== 'aktif');
+        }
+
         // ── Live Filter ──────────────────────────────────────────────────────────────
         var searchTimer;
         document.getElementById('search-input').addEventListener('input', function() {
@@ -778,30 +1013,58 @@ $rightActionHtml = '
             document.getElementById('form-minimal').value = '0';
             document.getElementById('form-mulai').value = '';
             document.getElementById('form-selesai').value = '';
-            document.querySelector('input[name="form-status"][value="aktif"]').checked = true;
+            setDiskonStatusRadio('aktif');
             document.getElementById('produk-wrap').classList.add('hidden');
             document.getElementById('kategori-wrap').classList.add('hidden');
         }
 
-        function editDiskon(id) {
-            var d = DISKON_DATA[id];
-            if (!d) {
-                showToast('Data tidak ditemukan.', 'error');
-                return;
+        async function editDiskon(id) {
+            try {
+                var res = await fetch(window.location.pathname + '?action=get&id=' + encodeURIComponent(id), {
+                    method: 'GET',
+                    headers: {
+                        'Accept': 'application/json'
+                    }
+                });
+                var data = await res.json();
+
+                if (!data.success) {
+                    showToast(data.message || 'Data tidak ditemukan.', 'error');
+                    return;
+                }
+
+                var d = data.data;
+                document.getElementById('form-id').value = d.id || '';
+                document.getElementById('form-nama').value = d.nama || '';
+                document.getElementById('form-cakupan').value = d.cakupan || 'transaksi';
+                document.getElementById('form-jenis').value = d.jenis || 'persen';
+                document.getElementById('form-nilai').value = d.nilai || '';
+                document.getElementById('form-minimal').value = d.minimal_belanja || 0;
+                document.getElementById('form-mulai').value = d.tanggal_mulai || '';
+                document.getElementById('form-selesai').value = d.tanggal_selesai || '';
+
+                openModal('edit');
+                toggleCakupanForm();
+
+                if (d.cakupan === 'produk' && d.produk_id) {
+                    document.getElementById('form-produk-id').value = d.produk_id;
+                } else {
+                    document.getElementById('form-produk-id').value = '';
+                }
+
+                if (d.cakupan === 'kategori' && d.kategori) {
+                    document.getElementById('form-kategori').value = d.kategori;
+                } else {
+                    document.getElementById('form-kategori').value = '';
+                }
+
+                setDiskonStatusRadio(d.status);
+                setTimeout(function() {
+                    setDiskonStatusRadio(d.status);
+                }, 50);
+            } catch (e) {
+                showToast('Gagal mengambil data diskon.', 'error');
             }
-            document.getElementById('form-id').value = d.id;
-            document.getElementById('form-nama').value = d.nama;
-            document.getElementById('form-cakupan').value = d.cakupan || 'transaksi';
-            document.getElementById('form-jenis').value = d.jenis;
-            document.getElementById('form-nilai').value = d.nilai;
-            document.getElementById('form-minimal').value = d.minimal_belanja || 0;
-            document.getElementById('form-mulai').value = d.tanggal_mulai || '';
-            document.getElementById('form-selesai').value = d.tanggal_selesai || '';
-            document.querySelector('input[name="form-status"][value="' + d.status + '"]').checked = true;
-            toggleCakupanForm();
-            if (d.cakupan === 'produk' && d.produk_id) document.getElementById('form-produk-id').value = d.produk_id;
-            if (d.cakupan === 'kategori' && d.kategori) document.getElementById('form-kategori').value = d.kategori;
-            openModal('edit');
         }
 
         async function simpanDiskon() {
@@ -812,7 +1075,6 @@ $rightActionHtml = '
 
             var cakupan = document.getElementById('form-cakupan').value;
             var formData = new FormData();
-            formData.append('action', 'save');
             if (id) formData.append('id', id);
             formData.append('nama', document.getElementById('form-nama').value.trim());
             formData.append('cakupan', cakupan);
@@ -823,29 +1085,35 @@ $rightActionHtml = '
             formData.append('tanggal_mulai', document.getElementById('form-mulai').value);
             formData.append('tanggal_selesai', document.getElementById('form-selesai').value);
             formData.append('status', document.querySelector('input[name="form-status"]:checked').value);
-            if (cakupan === 'produk') formData.append('produk_id', document.getElementById('form-produk-id').value);
-            if (cakupan === 'kategori') formData.append('kategori', document.getElementById('form-kategori').value);
+
+            if (cakupan === 'produk') {
+                formData.append('produk_id', document.getElementById('form-produk-id').value);
+            }
+            if (cakupan === 'kategori') {
+                formData.append('kategori', document.getElementById('form-kategori').value);
+            }
 
             try {
-                var res = await fetch('diskon.php', {
+                var res = await fetch(window.location.pathname + '?action=save', {
                     method: 'POST',
-                    body: formData
+                    body: formData,
+                    headers: {
+                        'Accept': 'application/json'
+                    }
                 });
-                var text = await res.text();
-                if (text.includes('Diskon berhasil')) {
-                    showToast(id ? 'Diskon berhasil diperbarui.' : 'Diskon berhasil ditambahkan.', 'success');
+                var data = await res.json();
+
+                if (data.success) {
+                    showToast(data.message || 'Diskon berhasil disimpan.', 'success');
                     closeModal();
                     setTimeout(function() {
-                        location.reload();
-                    }, 800);
+                        window.location.reload();
+                    }, 500);
                 } else {
-                    var parser = new DOMParser();
-                    var doc = parser.parseFromString(text, 'text/html');
-                    var errEl = doc.getElementById('alert-error');
-                    showToast(errEl ? errEl.innerText.replace('×', '').trim() : 'Terjadi kesalahan.', 'error');
+                    showToast(data.message || 'Gagal menyimpan diskon.', 'error');
                 }
             } catch (e) {
-                showToast('Terjadi kesalahan koneksi.', 'error');
+                showToast('Terjadi kesalahan koneksi atau response bukan JSON.', 'error');
             } finally {
                 btn.disabled = false;
                 btn.innerText = 'Simpan';
@@ -854,40 +1122,60 @@ $rightActionHtml = '
 
         async function toggleDiskon(id, statusSekarang) {
             var formData = new FormData();
-            formData.append('action', 'toggle');
             formData.append('id', id);
+
             try {
-                await fetch('diskon.php', {
+                var res = await fetch(window.location.pathname + '?action=toggle', {
                     method: 'POST',
-                    body: formData
+                    body: formData,
+                    headers: {
+                        'Accept': 'application/json'
+                    }
                 });
-                showToast(statusSekarang === 'aktif' ? 'Diskon dinonaktifkan.' : 'Diskon diaktifkan.', 'success');
-                setTimeout(function() {
-                    location.reload();
-                }, 800);
+                var data = await res.json();
+
+                if (data.success) {
+                    showToast(data.message || 'Status berhasil diubah.', 'success');
+                    setTimeout(function() {
+                        window.location.reload();
+                    }, 500);
+                } else {
+                    showToast(data.message || 'Status gagal diubah.', 'error');
+                }
             } catch (e) {
-                showToast('Terjadi kesalahan.', 'error');
+                showToast('Terjadi kesalahan saat mengubah status.', 'error');
             }
         }
 
         async function hapusDiskon(id, nama) {
             if (!confirm('Hapus diskon "' + nama + '"?\n\nTindakan ini tidak dapat dibatalkan.')) return;
+
             var formData = new FormData();
-            formData.append('action', 'delete');
             formData.append('id', id);
+
             try {
-                await fetch('diskon.php', {
+                var res = await fetch(window.location.pathname + '?action=delete', {
                     method: 'POST',
-                    body: formData
+                    body: formData,
+                    headers: {
+                        'Accept': 'application/json'
+                    }
                 });
-                showToast('Diskon berhasil dihapus.', 'success');
-                setTimeout(function() {
-                    location.reload();
-                }, 800);
+                var data = await res.json();
+
+                if (data.success) {
+                    showToast(data.message || 'Diskon berhasil dihapus.', 'success');
+                    setTimeout(function() {
+                        window.location.reload();
+                    }, 500);
+                } else {
+                    showToast(data.message || 'Diskon gagal dihapus.', 'error');
+                }
             } catch (e) {
-                showToast('Terjadi kesalahan.', 'error');
+                showToast('Terjadi kesalahan saat menghapus diskon.', 'error');
             }
         }
+
 
         // ── Toast ────────────────────────────────────────────────────────────────────
         var toastTimer;

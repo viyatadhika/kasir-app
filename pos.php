@@ -18,6 +18,158 @@ if (!function_exists('e')) {
     }
 }
 
+
+if (!function_exists('pos_coa_id')) {
+    function pos_coa_id(PDO $pdo, string $kode): int
+    {
+        $stmt = $pdo->prepare("
+            SELECT id
+            FROM coa
+            WHERE kode = ?
+            LIMIT 1
+        ");
+        $stmt->execute([$kode]);
+
+        $id = $stmt->fetchColumn();
+
+        if (!$id) {
+            throw new Exception("COA kode {$kode} tidak ditemukan.");
+        }
+
+        return (int)$id;
+    }
+}
+
+if (!function_exists('pos_buat_jurnal')) {
+    function pos_buat_jurnal(
+        PDO $pdo,
+        string $tanggal,
+        string $keterangan,
+        string $refTabel,
+        int $refId,
+        ?int $userId = null
+    ): int {
+        $kodeJurnal = 'JR-POS-' . date('YmdHis') . '-' . random_int(100, 999);
+
+        $stmt = $pdo->prepare("
+            INSERT INTO jurnal_umum
+            (
+                tanggal,
+                kode_jurnal,
+                keterangan,
+                ref_tabel,
+                ref_id,
+                dibuat_oleh,
+                created_at
+            )
+            VALUES
+            (
+                :tanggal,
+                :kode_jurnal,
+                :keterangan,
+                :ref_tabel,
+                :ref_id,
+                :dibuat_oleh,
+                NOW()
+            )
+        ");
+
+        $stmt->execute([
+            ':tanggal' => $tanggal,
+            ':kode_jurnal' => $kodeJurnal,
+            ':keterangan' => $keterangan,
+            ':ref_tabel' => $refTabel,
+            ':ref_id' => $refId,
+            ':dibuat_oleh' => $userId ?: null,
+        ]);
+
+        return (int)$pdo->lastInsertId();
+    }
+}
+
+if (!function_exists('pos_tambah_jurnal_detail')) {
+    function pos_tambah_jurnal_detail(
+        PDO $pdo,
+        int $jurnalId,
+        int $coaId,
+        float $debit = 0,
+        float $kredit = 0
+    ): void {
+        $stmt = $pdo->prepare("
+            INSERT INTO jurnal_detail
+            (
+                jurnal_id,
+                coa_id,
+                debit,
+                kredit,
+                created_at
+            )
+            VALUES
+            (
+                :jurnal_id,
+                :coa_id,
+                :debit,
+                :kredit,
+                NOW()
+            )
+        ");
+
+        $stmt->execute([
+            ':jurnal_id' => $jurnalId,
+            ':coa_id' => $coaId,
+            ':debit' => $debit,
+            ':kredit' => $kredit,
+        ]);
+    }
+}
+
+if (!function_exists('pos_auto_jurnal_penjualan')) {
+    function pos_auto_jurnal_penjualan(
+        PDO $pdo,
+        int $transaksiId,
+        string $invoice,
+        float $total,
+        ?int $userId = null
+    ): void {
+        if ($transaksiId < 1 || $total <= 0) {
+            return;
+        }
+
+        try {
+            $jurnalId = pos_buat_jurnal(
+                $pdo,
+                date('Y-m-d'),
+                'Penjualan POS Invoice ' . $invoice,
+                'transaksi',
+                $transaksiId,
+                $userId
+            );
+
+            // Debit: Kas
+            pos_tambah_jurnal_detail(
+                $pdo,
+                $jurnalId,
+                pos_coa_id($pdo, '101'),
+                $total,
+                0
+            );
+
+            // Kredit: Pendapatan POS
+            pos_tambah_jurnal_detail(
+                $pdo,
+                $jurnalId,
+                pos_coa_id($pdo, '401'),
+                0,
+                $total
+            );
+        } catch (Throwable $e) {
+            // Auto jurnal tidak boleh menggagalkan transaksi kasir.
+            error_log('AUTO JURNAL POS ERROR: ' . $e->getMessage());
+        }
+    }
+}
+
+
 define('POINT_RUPIAH', 1000);
 
 function diskonColumns(PDO $pdo): array
@@ -321,6 +473,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_GET['action'])) {
                     $stmtStok->execute([':qty' => $qty, ':id' => $pid]);
                 }
                 if ($memberId) $pdo->prepare("UPDATE member SET point=point-:pakai+:pt, total_belanja=total_belanja+:total, updated_at=NOW() WHERE id=:id")->execute([':pakai' => $pointPakai, ':pt' => $pointDapat, ':total' => $total, ':id' => $memberId]);
+
+                // Auto jurnal POS:
+                // Debit Kas (101), Kredit Pendapatan POS (401).
+                // Jika tabel jurnal/COA belum siap, transaksi POS tetap aman karena fungsi ini menangani error sendiri.
+                pos_auto_jurnal_penjualan(
+                    $pdo,
+                    (int)$transaksiId,
+                    (string)$invoice,
+                    (float)$total,
+                    (int)($userId ?? ($_SESSION['user']['id'] ?? 0))
+                );
+
                 $pdo->commit();
                 catat_aktivitas($pdo, 'create', 'Mesin Kasir', 'Menyimpan transaksi: ' . $invoice . ' total ' . $total);
                 $pointTotal = 0;
