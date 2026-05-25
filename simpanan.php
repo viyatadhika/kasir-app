@@ -59,9 +59,131 @@ if (!function_exists('normal_nama_sp')) {
     function normal_nama_sp(string $name): string
     {
         $name = strtoupper(trim($name));
+        $name = str_replace(['’', '`'], "'", $name);
+        $name = preg_replace('/\([^)]*\)/', ' ', $name) ?: $name; // buang keterangan seperti (pensiun)
+        $name = preg_replace('/[^A-Z0-9]+/u', ' ', $name) ?: $name;
         $name = preg_replace('/\s+/', ' ', $name) ?: $name;
-        $name = str_replace(['.', ',', "'", '`', '’'], '', $name);
         return trim($name);
+    }
+}
+
+if (!function_exists('nama_key_sp')) {
+    function nama_key_sp(string $name): string
+    {
+        $name = normal_nama_sp($name);
+        if ($name === '') {
+            return '';
+        }
+
+        $gelar = [
+            'A',
+            'AB',
+            'AG',
+            'AK',
+            'AMD',
+            'AMDKB',
+            'B',
+            'C',
+            'DR',
+            'DRS',
+            'DRA',
+            'DRG',
+            'H',
+            'HJ',
+            'IR',
+            'M',
+            'MA',
+            'MAG',
+            'MAK',
+            'MHI',
+            'MH',
+            'MHUM',
+            'MKN',
+            'MM',
+            'MMPD',
+            'MMSI',
+            'MPD',
+            'MSI',
+            'PSI',
+            'S',
+            'SAG',
+            'SCOM',
+            'SE',
+            'SH',
+            'SHI',
+            'SHUM',
+            'SI',
+            'SKOM',
+            'SOS',
+            'SPD',
+            'SPSI',
+            'SS',
+            'SSI',
+            'ST',
+            'PENSIUN',
+            'N'
+        ];
+        $stop = array_fill_keys($gelar, true);
+
+        $tokens = explode(' ', $name);
+        $clean = [];
+        foreach ($tokens as $token) {
+            $token = trim($token);
+            if ($token === '' || isset($stop[$token])) {
+                continue;
+            }
+            // Buang token gelar gabungan umum, contoh SHMH, SHMHUM, SEMAK.
+            if (preg_match('/^(S|M)?(H|HUM|HI|AG|PD|SI|M|AK|KOM|SOS|T|S|PSI)+$/', $token)) {
+                continue;
+            }
+            $clean[] = $token;
+        }
+
+        return trim(implode(' ', $clean));
+    }
+}
+
+if (!function_exists('nama_match_score_sp')) {
+    function nama_match_score_sp(string $importName, string $dbName): int
+    {
+        $a = nama_key_sp($importName);
+        $b = nama_key_sp($dbName);
+        if ($a === '' || $b === '') {
+            return 0;
+        }
+        if ($a === $b) {
+            return 100;
+        }
+
+        $ta = array_values(array_unique(array_filter(explode(' ', $a))));
+        $tb = array_values(array_unique(array_filter(explode(' ', $b))));
+        if (!$ta || !$tb) {
+            return 0;
+        }
+
+        $intersect = array_intersect($ta, $tb);
+        $matchCount = count($intersect);
+        $minCount = min(count($ta), count($tb));
+        $maxCount = max(count($ta), count($tb));
+
+        // Nama satu kata hanya boleh cocok kalau benar-benar sama supaya tidak salah orang.
+        if ($minCount <= 1) {
+            return ($matchCount === 1 && $a === $b) ? 100 : 0;
+        }
+
+        if ($matchCount === $minCount && $minCount >= 2) {
+            return 95;
+        }
+
+        $ratio = $matchCount / max(1, $maxCount);
+        if ($ratio >= 0.85 && $matchCount >= 2) {
+            return 90;
+        }
+        if ($ratio >= 0.70 && $matchCount >= 3) {
+            return 80;
+        }
+
+        return 0;
     }
 }
 
@@ -180,32 +302,45 @@ if (!function_exists('find_member_id_by_name_sp')) {
             return 0;
         }
 
-        // 1) Cocok persis setelah TRIM dan UPPER.
-        $stmt = $pdo->prepare("\n            SELECT id\n            FROM member\n            WHERE UPPER(TRIM(nama)) = UPPER(TRIM(:nama))\n            LIMIT 1\n        ");
+        // 1) Cocok persis, tidak peduli huruf besar/kecil dan spasi depan/belakang.
+        $stmt = $pdo->prepare("
+            SELECT id
+            FROM member
+            WHERE UPPER(TRIM(nama)) = UPPER(TRIM(:nama))
+            LIMIT 1
+        ");
         $stmt->execute([':nama' => $nama]);
         $id = (int)$stmt->fetchColumn();
         if ($id > 0) {
             return $id;
         }
 
-        // 2) Cocok LIKE nama lengkap.
-        $stmt = $pdo->prepare("\n            SELECT id\n            FROM member\n            WHERE nama LIKE :nama_like\n            ORDER BY LENGTH(nama) ASC\n            LIMIT 1\n        ");
-        $stmt->execute([':nama_like' => '%' . $nama . '%']);
-        $id = (int)$stmt->fetchColumn();
-        if ($id > 0) {
-            return $id;
+        // 2) Cocok berdasarkan nama yang sudah dinormalisasi: gelar/titik/koma/spasi diabaikan.
+        $importKey = nama_key_sp($nama);
+        if ($importKey === '') {
+            return 0;
         }
 
-        // 3) Cocok nama yang sudah dibersihkan gelar/tanda baca sederhana.
-        $norm = normal_nama_sp($nama);
-        if ($norm !== '') {
-            $stmt = $pdo->query("SELECT id, nama FROM member");
-            while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
-                $dbNorm = normal_nama_sp((string)($row['nama'] ?? ''));
-                if ($dbNorm === $norm) {
-                    return (int)$row['id'];
-                }
+        $bestId = 0;
+        $bestScore = 0;
+        $secondScore = 0;
+
+        $stmtAll = $pdo->query("SELECT id, nama FROM member");
+        while ($row = $stmtAll->fetch(PDO::FETCH_ASSOC)) {
+            $dbNama = (string)($row['nama'] ?? '');
+            $score = nama_match_score_sp($nama, $dbNama);
+            if ($score > $bestScore) {
+                $secondScore = $bestScore;
+                $bestScore = $score;
+                $bestId = (int)$row['id'];
+            } elseif ($score > $secondScore) {
+                $secondScore = $score;
             }
+        }
+
+        // Ambil hanya kalau match kuat dan tidak ambigu.
+        if ($bestScore >= 90 && ($bestScore - $secondScore) >= 5) {
+            return $bestId;
         }
 
         return 0;
@@ -314,6 +449,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $totalMemberTidakKetemu = 0;
         $jenisCount = ['pokok' => 0, 'wajib' => 0, 'sukarela' => 0];
         $logPreview = [];
+        $failedRows = [];
 
         try {
             $pdo->beginTransaction();
@@ -346,12 +482,45 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
                 if ($nama === '' || !in_array($jenis, ['pokok', 'wajib', 'sukarela'], true) || $bulan < 1 || $bulan > 12 || $jumlah <= 0) {
                     $totalLewat++;
+                    $alasanGagal = [];
+                    if ($nama === '') {
+                        $alasanGagal[] = 'Nama kosong';
+                    }
+                    if (!in_array($jenis, ['pokok', 'wajib', 'sukarela'], true)) {
+                        $alasanGagal[] = 'Jenis simpanan tidak valid';
+                    }
+                    if ($bulan < 1 || $bulan > 12) {
+                        $alasanGagal[] = 'Bulan tidak valid';
+                    }
+                    if ($jumlah <= 0) {
+                        $alasanGagal[] = 'Jumlah kosong / 0';
+                    }
+                    $failedRows[] = [
+                        'nama' => $nama !== '' ? $nama : '-',
+                        'jenis' => $jenis !== '' ? $jenis : '-',
+                        'bulan' => $bulan,
+                        'bulan_label' => ($bulan >= 1 && $bulan <= 12) ? bulan_nama_sp($bulan) : '-',
+                        'jumlah' => $jumlah,
+                        'jumlah_label' => rupiah_sp($jumlah),
+                        'sheet' => $sheet !== '' ? $sheet : '-',
+                        'alasan' => implode(', ', $alasanGagal),
+                    ];
                     continue;
                 }
 
                 $memberId = find_member_id_by_name_sp($pdo, $nama);
                 if ($memberId <= 0) {
                     $totalMemberTidakKetemu++;
+                    $failedRows[] = [
+                        'nama' => $nama,
+                        'jenis' => $jenis,
+                        'bulan' => $bulan,
+                        'bulan_label' => bulan_nama_sp($bulan),
+                        'jumlah' => $jumlah,
+                        'jumlah_label' => rupiah_sp($jumlah),
+                        'sheet' => $sheet !== '' ? $sheet : '-',
+                        'alasan' => 'Member tidak ditemukan di database',
+                    ];
                     if (count($logPreview) < 20) {
                         $logPreview[] = 'Member tidak ditemukan: ' . $nama . ' (' . ucfirst($jenis) . ' ' . bulan_nama_sp($bulan) . ' ' . rupiah_sp($jumlah) . ')';
                     }
@@ -365,6 +534,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $jenisCount[$jenis]++;
                 } else {
                     $totalLewat++;
+                    $failedRows[] = [
+                        'nama' => $nama,
+                        'jenis' => $jenis,
+                        'bulan' => $bulan,
+                        'bulan_label' => bulan_nama_sp($bulan),
+                        'jumlah' => $jumlah,
+                        'jumlah_label' => rupiah_sp($jumlah),
+                        'sheet' => $sheet !== '' ? $sheet : '-',
+                        'alasan' => 'Data dilewati saat simpan / update',
+                    ];
                 }
             }
 
@@ -383,7 +562,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 catat_aktivitas($pdo, 'import', 'Simpanan', 'Import Excel simpanan tahunan ' . $tahun . ' - ' . $totalMasuk . ' data');
             }
 
-            $msg = 'Import selesai. Masuk ' . $totalMasuk . ' data. Pokok ' . $jenisCount['pokok'] . ', Wajib ' . $jenisCount['wajib'] . ', Sukarela ' . $jenisCount['sukarela'] . '. Tidak ketemu member ' . $totalMemberTidakKetemu . '.';
+            $msg = 'Import selesai. Masuk ' . $totalMasuk . ' data. Pokok ' . $jenisCount['pokok'] . ', Wajib ' . $jenisCount['wajib'] . ', Sukarela ' . $jenisCount['sukarela'] . '. Gagal/lewat ' . count($failedRows) . ' data. Tidak ketemu member ' . $totalMemberTidakKetemu . '.';
             $_SESSION['flash_success'] = $msg;
             json_response_sp([
                 'ok' => true,
@@ -392,6 +571,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 'tidak_ketemu' => $totalMemberTidakKetemu,
                 'lewat' => $totalLewat,
                 'sample_log' => $logPreview,
+                'failed_rows' => $failedRows,
             ]);
         } catch (Throwable $e) {
             if ($pdo->inTransaction()) {
@@ -1605,6 +1785,28 @@ try {
             });
         }
 
+        function renderFailedRows(rows) {
+            if (!rows || !rows.length) return;
+            var box = document.getElementById('js-alert');
+            var html = '<div class="mt-3 border-t border-red-200 pt-3">';
+            html += '<p class="font-black mb-2">Data gagal/lewat import (' + rows.length + ' data)</p>';
+            html += '<div class="max-h-72 overflow-y-auto bg-white/60 border border-red-100">';
+            html += '<table class="w-full text-left text-[11px]"><thead><tr>';
+            html += '<th class="p-2">Nama</th><th class="p-2">Jenis</th><th class="p-2">Bulan</th><th class="p-2 text-right">Jumlah</th><th class="p-2">Alasan</th>';
+            html += '</tr></thead><tbody>';
+            rows.forEach(function(r) {
+                html += '<tr class="border-t border-red-100">';
+                html += '<td class="p-2 font-bold">' + escapeHtml(r.nama || '-') + '</td>';
+                html += '<td class="p-2">' + escapeHtml(r.jenis || '-') + '</td>';
+                html += '<td class="p-2">' + escapeHtml(r.bulan_label || r.bulan || '-') + '</td>';
+                html += '<td class="p-2 text-right">' + escapeHtml(r.jumlah_label || rupiahJS(r.jumlah || 0)) + '</td>';
+                html += '<td class="p-2 text-red-700 font-bold">' + escapeHtml(r.alasan || '-') + '</td>';
+                html += '</tr>';
+            });
+            html += '</tbody></table></div></div>';
+            box.innerHTML += html;
+        }
+
         function rupiahJS(n) {
             return 'Rp ' + parseInt(n || 0, 10).toLocaleString('id-ID');
         }
@@ -1982,9 +2184,12 @@ try {
                 .then(function(data) {
                     closePreviewModal();
                     showAlert('success', data.message || 'Import berhasil.');
-                    setTimeout(function() {
-                        window.location.href = '?tahun_filter=' + encodeURIComponent(importPayload.tahun) + '&bulan_filter=12';
-                    }, 1200);
+                    renderFailedRows(data.failed_rows || []);
+                    if (!data.failed_rows || !data.failed_rows.length) {
+                        setTimeout(function() {
+                            window.location.href = '?tahun_filter=' + encodeURIComponent(importPayload.tahun) + '&bulan_filter=12';
+                        }, 1200);
+                    }
                 })
                 .catch(function(err) {
                     showAlert('error', err.message);

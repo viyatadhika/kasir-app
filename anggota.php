@@ -172,7 +172,7 @@ if (!function_exists('read_member_csv_ag')) {
 
 
 if (!function_exists('xlsx_col_index_ag')) {
-    function xlsx_col_index_ag($cellRef)
+    function xlsx_col_index_ag(string $cellRef): int
     {
         if (!preg_match('/^[A-Z]+/i', (string)$cellRef, $m)) {
             return 0;
@@ -187,7 +187,7 @@ if (!function_exists('xlsx_col_index_ag')) {
 }
 
 if (!function_exists('read_member_xlsx_ag')) {
-    function read_member_xlsx_ag($path)
+    function read_member_xlsx_ag(string $path): array
     {
         $rows = [];
 
@@ -278,7 +278,7 @@ if (!function_exists('read_member_xlsx_ag')) {
 }
 
 if (!function_exists('read_member_rows_ag')) {
-    function read_member_rows_ag($path, $filename)
+    function read_member_rows_ag(string $path, string $filename): array
     {
         $ext = strtolower(pathinfo((string)$filename, PATHINFO_EXTENSION));
         if ($ext === 'xlsx') {
@@ -323,7 +323,7 @@ if (!function_exists('clean_phone_ag')) {
 }
 
 if (!function_exists('parse_member_import_ag')) {
-    function parse_member_import_ag($path, $filename = '')
+    function parse_member_import_ag(string $path, string $filename = ''): array
     {
         $rawRows = read_member_rows_ag($path, $filename);
         if (!$rawRows) {
@@ -398,16 +398,41 @@ if (!function_exists('parse_member_import_ag')) {
 if (!function_exists('member_exists_ag')) {
     function member_exists_ag(PDO $pdo, string $nama, string $noHp): bool
     {
-        if ($noHp !== '') {
-            $stmt = $pdo->prepare("SELECT COUNT(*) FROM member WHERE no_hp = ? LIMIT 1");
-            $stmt->execute([$noHp]);
-            if ((int)$stmt->fetchColumn() > 0) {
-                return true;
-            }
+        $nama = trim($nama);
+        $noHp = clean_phone_ag($noHp);
+
+        if ($nama === '') {
+            return false;
         }
 
-        $stmt = $pdo->prepare("SELECT COUNT(*) FROM member WHERE LOWER(nama) = LOWER(?) LIMIT 1");
-        $stmt->execute([$nama]);
+        // Aturan baru:
+        // - Nama sama + nomor HP sama = duplikat.
+        // - Nama sama + nomor HP beda = boleh import.
+        // - Kalau nomor HP kosong, pakai nama sebagai pengaman duplikat.
+        if ($noHp !== '') {
+            $stmt = $pdo->prepare("
+                SELECT COUNT(*)
+                FROM member
+                WHERE LOWER(TRIM(nama)) = LOWER(TRIM(:nama))
+                  AND TRIM(COALESCE(no_hp, '')) = :no_hp
+                LIMIT 1
+            ");
+            $stmt->execute([
+                ':nama' => $nama,
+                ':no_hp' => $noHp,
+            ]);
+
+            return (int)$stmt->fetchColumn() > 0;
+        }
+
+        $stmt = $pdo->prepare("
+            SELECT COUNT(*)
+            FROM member
+            WHERE LOWER(TRIM(nama)) = LOWER(TRIM(:nama))
+              AND TRIM(COALESCE(no_hp, '')) = ''
+            LIMIT 1
+        ");
+        $stmt->execute([':nama' => $nama]);
 
         return (int)$stmt->fetchColumn() > 0;
     }
@@ -425,6 +450,11 @@ $importSummary = [
 ];
 
 $importToken = '';
+$lastImportFailedRows = [];
+if (isset($_SESSION['anggota_import_failed_rows']) && is_array($_SESSION['anggota_import_failed_rows'])) {
+    $lastImportFailedRows = $_SESSION['anggota_import_failed_rows'];
+    unset($_SESSION['anggota_import_failed_rows']);
+}
 $importLimit = 50;
 $importPage = max(1, (int)($_GET['import_page'] ?? 1));
 $importPerPageOptions = [25, 50, 100];
@@ -520,19 +550,30 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $fullImportRows = [];
 
             foreach ($rows as $row) {
-                $exists = member_exists_ag($pdo, (string)$row['nama'], (string)$row['no_hp']);
+                $namaImport = trim((string)($row['nama'] ?? ''));
+                $noHpImport = clean_phone_ag((string)($row['no_hp'] ?? ''));
+                $row['no_hp'] = $noHpImport;
+                $row['error_detail'] = '-';
 
-                if ($exists) {
+                if ($namaImport === '') {
+                    $row['status_import'] = 'gagal';
+                    $row['status_label'] = 'Gagal';
+                    $row['error_detail'] = 'Nama kosong / tidak terbaca dari file.';
+                    $importSummary['gagal']++;
+                } elseif (strlen($namaImport) > 190) {
+                    $row['status_import'] = 'gagal';
+                    $row['status_label'] = 'Gagal';
+                    $row['error_detail'] = 'Nama terlalu panjang, periksa kolom nama di file.';
+                    $importSummary['gagal']++;
+                } elseif (member_exists_ag($pdo, $namaImport, $noHpImport)) {
                     $row['status_import'] = 'duplikat';
                     $row['status_label'] = 'Duplikat';
+                    $row['error_detail'] = 'Member sudah ada di database dengan nama dan nomor HP yang sama.';
                     $importSummary['duplikat']++;
-                } elseif (trim((string)$row['nama']) === '') {
-                    $row['status_import'] = 'gagal';
-                    $row['status_label'] = 'Nama kosong';
-                    $importSummary['gagal']++;
                 } else {
                     $row['status_import'] = 'valid';
                     $row['status_label'] = 'Siap import';
+                    $row['error_detail'] = '-';
                     $importSummary['valid']++;
                 }
 
@@ -620,6 +661,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
             $berhasil = 0;
             $skip = 0;
+            $importProcessFailedRows = [];
 
             $pdo->beginTransaction();
 
@@ -649,16 +691,58 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             ");
 
             foreach ($rows as $idxRow => $row) {
-                if (!isset($selectedMap[(int)$idxRow]) || ($row['status_import'] ?? '') !== 'valid') {
+                $rowNo = (int)($row['row_no'] ?? ($idxRow + 1));
+                $namaPreview = trim((string)($row['nama'] ?? ''));
+                $noHpPreview = clean_phone_ag((string)($row['no_hp'] ?? ''));
+
+                if (!isset($selectedMap[(int)$idxRow])) {
                     $skip++;
+                    $importProcessFailedRows[] = [
+                        'row_no' => $rowNo,
+                        'nama' => $namaPreview,
+                        'no_hp' => $noHpPreview,
+                        'status_import' => 'dilewati',
+                        'error_detail' => 'Tidak dicentang untuk diimport.',
+                    ];
                     continue;
                 }
 
-                $nama = trim((string)($row['nama'] ?? ''));
-                $noHp = clean_phone_ag((string)($row['no_hp'] ?? ''));
-
-                if ($nama === '' || member_exists_ag($pdo, $nama, $noHp)) {
+                if (($row['status_import'] ?? '') !== 'valid') {
                     $skip++;
+                    $importProcessFailedRows[] = [
+                        'row_no' => $rowNo,
+                        'nama' => $namaPreview,
+                        'no_hp' => $noHpPreview,
+                        'status_import' => (string)($row['status_import'] ?? 'gagal'),
+                        'error_detail' => (string)($row['error_detail'] ?? 'Data tidak valid saat preview.'),
+                    ];
+                    continue;
+                }
+
+                $nama = $namaPreview;
+                $noHp = $noHpPreview;
+
+                if ($nama === '') {
+                    $skip++;
+                    $importProcessFailedRows[] = [
+                        'row_no' => $rowNo,
+                        'nama' => $nama,
+                        'no_hp' => $noHp,
+                        'status_import' => 'gagal',
+                        'error_detail' => 'Nama kosong setelah diedit.',
+                    ];
+                    continue;
+                }
+
+                if (member_exists_ag($pdo, $nama, $noHp)) {
+                    $skip++;
+                    $importProcessFailedRows[] = [
+                        'row_no' => $rowNo,
+                        'nama' => $nama,
+                        'no_hp' => $noHp,
+                        'status_import' => 'duplikat',
+                        'error_detail' => 'Member sudah ada di database saat proses simpan.',
+                    ];
                     continue;
                 }
 
@@ -668,14 +752,24 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
                 $kode = next_member_code_ag($pdo);
 
-                $stmtInsert->execute([
-                    ':kode' => $kode,
-                    ':nama' => $nama,
-                    ':no_hp' => $noHp,
-                    ':created_at' => $createdAt,
-                ]);
-
-                $berhasil++;
+                try {
+                    $stmtInsert->execute([
+                        ':kode' => $kode,
+                        ':nama' => $nama,
+                        ':no_hp' => $noHp,
+                        ':created_at' => $createdAt,
+                    ]);
+                    $berhasil++;
+                } catch (Throwable $rowError) {
+                    $skip++;
+                    $importProcessFailedRows[] = [
+                        'row_no' => $rowNo,
+                        'nama' => $nama,
+                        'no_hp' => $noHp,
+                        'status_import' => 'gagal',
+                        'error_detail' => $rowError->getMessage(),
+                    ];
+                }
             }
 
             $pdo->commit();
@@ -685,7 +779,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $importPreview = [];
             $importToken = '';
 
-            $success = 'Import anggota selesai. Berhasil ' . $berhasil . ' data, dilewati ' . $skip . ' data.';
+            $lastImportFailedRows = $importProcessFailedRows;
+            $_SESSION['anggota_import_failed_rows'] = $importProcessFailedRows;
+
+            $success = 'Import anggota selesai. Berhasil ' . $berhasil . ' data, dilewati/gagal ' . $skip . ' data.';
 
             if (function_exists('catat_aktivitas')) {
                 catat_aktivitas($pdo, 'import', 'Anggota', 'Import anggota dari file sebanyak ' . $berhasil . ' data');
@@ -849,9 +946,9 @@ if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
 $importPreviewAllRows = $importPreview;
 if ($importPreviewAllRows) {
     if ($importFilter !== 'semua') {
-        $importPreviewAllRows = array_values(array_filter($importPreviewAllRows, function ($row) use ($importFilter) {
+        $importPreviewAllRows = array_filter($importPreviewAllRows, function ($row) use ($importFilter) {
             return (string)($row['status_import'] ?? '') === $importFilter;
-        }));
+        });
     }
 
     $importTotalRows = count($importPreviewAllRows);
@@ -870,7 +967,7 @@ if ($importPreviewAllRows) {
     $importPreview = array_slice($importPreviewPaged, $importOffset, $importPerPage);
 }
 
-function import_pagination_url_ag($token, $page, $perPage, $filter)
+function import_pagination_url_ag(string $token, int $page, int $perPage, string $filter): string
 {
     $query = $_GET;
     $query['import_token'] = $token;
@@ -1321,6 +1418,42 @@ if (function_exists('catat_view_once')) {
                 </div>
             <?php endif; ?>
 
+            <?php if (!empty($lastImportFailedRows)): ?>
+                <section class="bg-white border border-red-100 overflow-hidden">
+                    <div class="px-5 py-4 border-b border-red-100 bg-red-50">
+                        <h2 class="text-[10px] font-black uppercase tracking-widest text-red-700">Data dilewati / gagal import terakhir</h2>
+                        <p class="text-xs text-red-600 mt-1"><?= angka_ag(count($lastImportFailedRows)) ?> data tidak masuk. Tabel ini membantu cek baris, nama, nomor HP, dan alasannya.</p>
+                    </div>
+                    <div class="overflow-x-auto no-scrollbar">
+                        <table class="w-full text-left" style="min-width:820px">
+                            <thead class="bg-gray-50 border-b border-subtle">
+                                <tr>
+                                    <th class="px-5 py-3 text-[10px] font-bold uppercase tracking-widest text-gray-400">Row</th>
+                                    <th class="px-5 py-3 text-[10px] font-bold uppercase tracking-widest text-gray-400">Nama</th>
+                                    <th class="px-5 py-3 text-[10px] font-bold uppercase tracking-widest text-gray-400">No HP</th>
+                                    <th class="px-5 py-3 text-[10px] font-bold uppercase tracking-widest text-gray-400">Status</th>
+                                    <th class="px-5 py-3 text-[10px] font-bold uppercase tracking-widest text-gray-400">Alasan</th>
+                                </tr>
+                            </thead>
+                            <tbody class="divide-y divide-[#f5f5f5]">
+                                <?php foreach (array_slice($lastImportFailedRows, 0, 100) as $fr): ?>
+                                    <tr>
+                                        <td class="px-5 py-3 text-xs font-mono text-gray-500"><?= angka_ag($fr['row_no'] ?? 0) ?></td>
+                                        <td class="px-5 py-3 text-xs font-bold"><?= h($fr['nama'] ?? '-') ?></td>
+                                        <td class="px-5 py-3 text-xs text-gray-500"><?= h($fr['no_hp'] ?? '-') ?></td>
+                                        <td class="px-5 py-3 text-[10px] font-black uppercase text-red-600"><?= h($fr['status_import'] ?? 'gagal') ?></td>
+                                        <td class="px-5 py-3 text-xs text-gray-600"><?= h($fr['error_detail'] ?? '-') ?></td>
+                                    </tr>
+                                <?php endforeach; ?>
+                            </tbody>
+                        </table>
+                    </div>
+                    <?php if (count($lastImportFailedRows) > 100): ?>
+                        <div class="px-5 py-3 bg-gray-50 text-[10px] font-bold uppercase tracking-widest text-gray-400">Ditampilkan 100 data pertama dari <?= angka_ag(count($lastImportFailedRows)) ?> data.</div>
+                    <?php endif; ?>
+                </section>
+            <?php endif; ?>
+
             <section class="bg-white border border-subtle p-5 md:p-6">
                 <div class="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
                     <div>
@@ -1433,7 +1566,7 @@ if (function_exists('catat_view_once')) {
                         </div>
 
                         <div class="overflow-x-auto no-scrollbar">
-                            <table class="w-full text-left" style="min-width:920px">
+                            <table class="w-full text-left" style="min-width:1100px">
                                 <thead class="bg-gray-50 border-b border-subtle">
                                     <tr>
                                         <th class="px-5 py-4 text-[10px] font-bold uppercase tracking-widest text-gray-400 w-[44px]">Pilih</th>
@@ -1442,6 +1575,7 @@ if (function_exists('catat_view_once')) {
                                         <th class="px-5 py-4 text-[10px] font-bold uppercase tracking-widest text-gray-400">Kode Lama</th>
                                         <th class="px-5 py-4 text-[10px] font-bold uppercase tracking-widest text-gray-400">Tanggal</th>
                                         <th class="px-5 py-4 text-[10px] font-bold uppercase tracking-widest text-gray-400">Status</th>
+                                        <th class="px-5 py-4 text-[10px] font-bold uppercase tracking-widest text-gray-400">Alasan</th>
                                     </tr>
                                 </thead>
                                 <tbody class="divide-y divide-[#f5f5f5]">
@@ -1503,6 +1637,10 @@ if (function_exists('catat_view_once')) {
                                                 <span class="<?= h($cls) ?> border text-[9px] font-bold uppercase px-2 py-1">
                                                     <?= h($row['status_label'] ?? '-') ?>
                                                 </span>
+                                            </td>
+
+                                            <td class="px-5 py-3 align-top text-xs text-gray-600 max-w-[260px]">
+                                                <?= h($row['error_detail'] ?? '-') ?>
                                             </td>
                                         </tr>
                                     <?php endforeach; ?>
