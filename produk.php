@@ -33,6 +33,92 @@ if (!function_exists('rupiah')) {
     }
 }
 
+
+if (!function_exists('produk_ensure_gambar_column')) {
+    function produk_ensure_gambar_column(PDO $pdo): void
+    {
+        static $done = false;
+        if ($done) return;
+        $done = true;
+        try {
+            $cols = $pdo->query("SHOW COLUMNS FROM produk")->fetchAll(PDO::FETCH_COLUMN);
+            if (!in_array('gambar', $cols, true)) {
+                $pdo->exec("ALTER TABLE produk ADD COLUMN gambar VARCHAR(255) NULL AFTER satuan");
+            }
+        } catch (Throwable $e) {
+        }
+    }
+}
+
+if (!function_exists('produk_upload_gambar')) {
+    function produk_upload_gambar(string $fieldName, string $oldPath = ''): string
+    {
+        if (empty($_FILES[$fieldName]['tmp_name']) || !is_uploaded_file($_FILES[$fieldName]['tmp_name'])) {
+            return $oldPath;
+        }
+
+        $file = $_FILES[$fieldName];
+        if (($file['error'] ?? UPLOAD_ERR_OK) !== UPLOAD_ERR_OK) {
+            throw new Exception('Upload gambar gagal.');
+        }
+        if (($file['size'] ?? 0) > 2 * 1024 * 1024) {
+            throw new Exception('Ukuran gambar maksimal 2MB.');
+        }
+
+        $info = @getimagesize((string)$file['tmp_name']);
+        if (!$info) {
+            throw new Exception('File harus berupa gambar.');
+        }
+
+        $extMap = [
+            'image/jpeg' => 'jpg',
+            'image/png' => 'png',
+            'image/webp' => 'webp',
+            'image/gif' => 'gif',
+        ];
+        $mime = (string)($info['mime'] ?? '');
+        if (!isset($extMap[$mime])) {
+            throw new Exception('Format gambar harus JPG, PNG, WEBP, atau GIF.');
+        }
+
+        $dir = __DIR__ . '/uploads/produk';
+        if (!is_dir($dir)) {
+            mkdir($dir, 0775, true);
+        }
+
+        $filename = 'produk_' . date('YmdHis') . '_' . bin2hex(random_bytes(4)) . '.' . $extMap[$mime];
+        $dest = $dir . '/' . $filename;
+
+        if (!move_uploaded_file((string)$file['tmp_name'], $dest)) {
+            throw new Exception('Gagal menyimpan gambar produk.');
+        }
+
+        if ($oldPath !== '' && strpos($oldPath, 'uploads/produk/') === 0) {
+            $oldFile = __DIR__ . '/' . $oldPath;
+            if (is_file($oldFile)) {
+                @unlink($oldFile);
+            }
+        }
+
+        return 'uploads/produk/' . $filename;
+    }
+}
+
+
+if (!function_exists('produk_hapus_file_gambar')) {
+    function produk_hapus_file_gambar(string $path): void
+    {
+        if ($path !== '' && strpos($path, 'uploads/produk/') === 0) {
+            $file = __DIR__ . '/' . $path;
+            if (is_file($file)) {
+                @unlink($file);
+            }
+        }
+    }
+}
+
+produk_ensure_gambar_column($pdo);
+
 // ── API Handler (AJAX) ────────────────────────────────────────────────────────
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_GET['action'])) {
     header('Content-Type: application/json');
@@ -40,7 +126,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_GET['action'])) {
     switch ($_GET['action']) {
 
         case 'tambah':
-            $input    = json_decode(file_get_contents('php://input'), true);
+            $input    = !empty($_POST) ? $_POST : (json_decode(file_get_contents('php://input'), true) ?: []);
             $required = ['kode', 'nama', 'harga_jual'];
             foreach ($required as $field) {
                 if (empty($input[$field])) {
@@ -54,9 +140,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_GET['action'])) {
                 echo json_encode(['success' => false, 'message' => 'Kode produk sudah digunakan.']);
                 exit;
             }
+            $gambar = produk_upload_gambar('gambar_produk');
+
             $stmt = $pdo->prepare("
-                INSERT INTO produk (kode, nama, kategori, harga_beli, harga_jual, stok, stok_minimum, satuan, status)
-                VALUES (:kode, :nama, :kategori, :harga_beli, :harga_jual, :stok, :stok_minimum, :satuan, :status)
+                INSERT INTO produk (kode, nama, kategori, harga_beli, harga_jual, stok, stok_minimum, satuan, gambar, status)
+                VALUES (:kode, :nama, :kategori, :harga_beli, :harga_jual, :stok, :stok_minimum, :satuan, :gambar, :status)
             ");
             $stmt->execute([
                 ':kode'         => trim($input['kode']),
@@ -67,6 +155,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_GET['action'])) {
                 ':stok'         => (int)(isset($input['stok']) ? $input['stok'] : 0),
                 ':stok_minimum' => (int)(isset($input['stok_minimum']) ? $input['stok_minimum'] : 5),
                 ':satuan'       => trim(isset($input['satuan']) ? $input['satuan'] : 'pcs'),
+                ':gambar'       => $gambar,
                 ':status'       => in_array(isset($input['status']) ? $input['status'] : 'aktif', ['aktif', 'nonaktif']) ? $input['status'] : 'aktif',
             ]);
             catat_aktivitas($pdo, 'create', 'Produk', 'Menambah produk: ' . trim($input['nama']));
@@ -74,7 +163,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_GET['action'])) {
             exit;
 
         case 'edit':
-            $input = json_decode(file_get_contents('php://input'), true);
+            $input = !empty($_POST) ? $_POST : (json_decode(file_get_contents('php://input'), true) ?: []);
             if (empty($input['id'])) {
                 echo json_encode(['success' => false, 'message' => 'ID tidak valid.']);
                 exit;
@@ -85,12 +174,24 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_GET['action'])) {
                 echo json_encode(['success' => false, 'message' => 'Kode produk sudah digunakan produk lain.']);
                 exit;
             }
+            $oldStmt = $pdo->prepare("SELECT gambar FROM produk WHERE id = :id LIMIT 1");
+            $oldStmt->execute([':id' => (int)$input['id']]);
+            $oldGambar = (string)($oldStmt->fetchColumn() ?: '');
+
+            $hapusGambar = !empty($input['hapus_gambar']) && (string)$input['hapus_gambar'] === '1';
+            if ($hapusGambar) {
+                produk_hapus_file_gambar($oldGambar);
+                $oldGambar = '';
+            }
+
+            $gambar = produk_upload_gambar('gambar_produk', $oldGambar);
+
             $stmt = $pdo->prepare("
                 UPDATE produk SET
                     kode = :kode, nama = :nama, kategori = :kategori,
                     harga_beli = :harga_beli, harga_jual = :harga_jual,
                     stok = :stok, stok_minimum = :stok_minimum,
-                    satuan = :satuan, status = :status, updated_at = NOW()
+                    satuan = :satuan, gambar = :gambar, status = :status, updated_at = NOW()
                 WHERE id = :id
             ");
             $stmt->execute([
@@ -103,6 +204,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_GET['action'])) {
                 ':stok'         => (int)(isset($input['stok']) ? $input['stok'] : 0),
                 ':stok_minimum' => (int)(isset($input['stok_minimum']) ? $input['stok_minimum'] : 5),
                 ':satuan'       => trim(isset($input['satuan']) ? $input['satuan'] : 'pcs'),
+                ':gambar'       => $gambar,
                 ':status'       => in_array(isset($input['status']) ? $input['status'] : 'aktif', ['aktif', 'nonaktif']) ? $input['status'] : 'aktif',
             ]);
             catat_aktivitas($pdo, 'update', 'Produk', 'Mengubah produk ID: ' . (int)$input['id']);
@@ -123,6 +225,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_GET['action'])) {
                 catat_aktivitas($pdo, 'status', 'Produk', 'Menonaktifkan produk ID: ' . (int)$input['id']);
                 echo json_encode(['success' => true, 'message' => 'Produk dinonaktifkan (ada di riwayat transaksi).', 'type' => 'soft']);
             } else {
+                $oldStmt = $pdo->prepare("SELECT gambar FROM produk WHERE id = :id LIMIT 1");
+                $oldStmt->execute([':id' => (int)$input['id']]);
+                produk_hapus_file_gambar((string)($oldStmt->fetchColumn() ?: ''));
+
                 $pdo->prepare("DELETE FROM produk WHERE id = :id")->execute([':id' => $input['id']]);
                 catat_aktivitas($pdo, 'delete', 'Produk', 'Menghapus produk ID: ' . (int)$input['id']);
                 echo json_encode(['success' => true, 'message' => 'Produk berhasil dihapus.', 'type' => 'hard']);
@@ -200,7 +306,10 @@ $kategoriList = $pdo->query("
     ORDER BY kategori ASC
 ")->fetchAll(PDO::FETCH_COLUMN);
 
-$summary = $pdo->query("
+$summaryWhere = $whereStr;
+$summaryParams = $params;
+
+$stmtSummary = $pdo->prepare("
     SELECT
         COUNT(*) AS total,
         SUM(CASE WHEN status = 'aktif' THEN 1 ELSE 0 END) AS aktif,
@@ -208,7 +317,10 @@ $summary = $pdo->query("
         SUM(CASE WHEN stok = 0 THEN 1 ELSE 0 END) AS habis,
         SUM(harga_jual * stok) AS nilai_stok
     FROM produk
-")->fetch();
+    WHERE $summaryWhere
+");
+$stmtSummary->execute($summaryParams);
+$summary = $stmtSummary->fetch();
 
 catat_view_once($pdo, 'Produk', 'Membuka halaman Produk');
 
@@ -395,6 +507,87 @@ $rightActionHtml = '
         .produk-mobile-card:hover {
             border-color: #e5e7eb;
         }
+
+        .produk-thumb {
+            width: 44px;
+            height: 44px;
+            border: 1px solid #f0f0f0;
+            background: #fafafa;
+            object-fit: cover;
+            flex-shrink: 0;
+        }
+
+        .produk-thumb-empty {
+            width: 44px;
+            height: 44px;
+            border: 1px solid #f0f0f0;
+            background: #fafafa;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            color: #d1d5db;
+            flex-shrink: 0;
+        }
+
+        .gambar-preview-box {
+            width: 96px;
+            height: 96px;
+            border: 1px dashed #d1d5db;
+            background: #fafafa;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            overflow: hidden;
+        }
+
+        .gambar-preview-box img {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+        }
+
+
+        .preview-image-modal {
+            position: fixed;
+            inset: 0;
+            background: rgba(0, 0, 0, .8);
+            display: none;
+            align-items: center;
+            justify-content: center;
+            z-index: 9999;
+            padding: 20px
+        }
+
+        .preview-image-modal.show {
+            display: flex
+        }
+
+        .preview-image-modal img {
+            max-width: 95vw;
+            max-height: 90vh;
+            object-fit: contain;
+            background: #fff
+        }
+
+        .preview-close-btn {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            width: 42px;
+            height: 42px;
+            border: none;
+            border-radius: 9999px;
+            background: #fff;
+            color: #111827;
+            font-size: 20px;
+            font-weight: 700;
+            cursor: pointer;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, .2)
+        }
+
+        .preview-close-btn:hover {
+            background: #f3f4f6
+        }
     </style>
 </head>
 
@@ -410,7 +603,7 @@ $rightActionHtml = '
             <div class="summary-card p-4 md:p-5">
                 <p class="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1">Total SKU</p>
                 <p class="text-2xl font-bold"><?php echo number_format($summary['total']); ?></p>
-                <p class="text-[10px] text-gray-400 mt-1"><?php echo number_format($summary['aktif']); ?> aktif</p>
+                <p class="text-[10px] text-gray-400 mt-1"><?php echo $statusFilter === 'aktif' ? 'Produk aktif' : number_format($summary['aktif']) . ' aktif'; ?></p>
             </div>
             <div class="summary-card p-4 md:p-5">
                 <p class="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1">Nilai Stok</p>
@@ -500,8 +693,21 @@ $rightActionHtml = '
                                 <tr class="group">
                                     <td class="px-5 py-4 text-[11px] text-gray-300 font-medium"><?php echo $offset + $i + 1; ?></td>
                                     <td class="px-5 py-4">
-                                        <div class="font-semibold text-sm leading-tight"><?php echo e($p['nama']); ?></div>
-                                        <div class="text-[10px] text-gray-400 font-mono mt-0.5"><?php echo e($p['kode']); ?> &middot; <?php echo e($p['satuan']); ?></div>
+                                        <div class="flex items-center gap-3">
+                                            <?php if (!empty($p['gambar'])): ?>
+                                                <img src="<?php echo e($p['gambar']); ?>" alt="<?php echo e($p['nama']); ?>" class="produk-thumb cursor-pointer" onclick="previewProdukImage(this.src)">
+                                            <?php else: ?>
+                                                <div class="produk-thumb-empty">
+                                                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M4 16l4-4a2 2 0 012.8 0L16 17m-2-2l1.5-1.5a2 2 0 012.8 0L20 15M4 6h16v12H4z" />
+                                                    </svg>
+                                                </div>
+                                            <?php endif; ?>
+                                            <div class="min-w-0">
+                                                <div class="font-semibold text-sm leading-tight"><?php echo e($p['nama']); ?></div>
+                                                <div class="text-[10px] text-gray-400 font-mono mt-0.5"><?php echo e($p['kode']); ?> &middot; <?php echo e($p['satuan']); ?></div>
+                                            </div>
+                                        </div>
                                     </td>
                                     <td class="px-5 py-4">
                                         <span class="text-[10px] font-bold uppercase tracking-wide text-gray-500 bg-gray-100 px-2 py-1">
@@ -585,15 +791,26 @@ $rightActionHtml = '
                         ?>
                             <div class="produk-mobile-card bg-white border border-subtle p-4">
                                 <div class="flex items-start justify-between gap-3 mb-3">
-                                    <div class="min-w-0">
-                                        <div class="flex items-center gap-2 mb-1">
-                                            <span class="text-[10px] text-gray-300 font-bold">#<?php echo $offset + $i + 1; ?></span>
-                                            <span class="text-[10px] font-bold uppercase tracking-wide text-gray-500 bg-gray-100 px-2 py-0.5">
-                                                <?php echo e($p['kategori']); ?>
-                                            </span>
+                                    <div class="min-w-0 flex items-start gap-3">
+                                        <?php if (!empty($p['gambar'])): ?>
+                                            <img src="<?php echo e($p['gambar']); ?>" alt="<?php echo e($p['nama']); ?>" class="produk-thumb cursor-pointer" onclick="previewProdukImage(this.src)">
+                                        <?php else: ?>
+                                            <div class="produk-thumb-empty">
+                                                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M4 16l4-4a2 2 0 012.8 0L16 17m-2-2l1.5-1.5a2 2 0 012.8 0L20 15M4 6h16v12H4z" />
+                                                </svg>
+                                            </div>
+                                        <?php endif; ?>
+                                        <div class="min-w-0">
+                                            <div class="flex items-center gap-2 mb-1">
+                                                <span class="text-[10px] text-gray-300 font-bold">#<?php echo $offset + $i + 1; ?></span>
+                                                <span class="text-[10px] font-bold uppercase tracking-wide text-gray-500 bg-gray-100 px-2 py-0.5">
+                                                    <?php echo e($p['kategori']); ?>
+                                                </span>
+                                            </div>
+                                            <h3 class="font-bold text-sm leading-tight text-gray-900 truncate"><?php echo e($p['nama']); ?></h3>
+                                            <p class="text-[10px] text-gray-400 font-mono mt-1 truncate"><?php echo e($p['kode']); ?> &middot; <?php echo e($p['satuan']); ?></p>
                                         </div>
-                                        <h3 class="font-bold text-sm leading-tight text-gray-900 truncate"><?php echo e($p['nama']); ?></h3>
-                                        <p class="text-[10px] text-gray-400 font-mono mt-1 truncate"><?php echo e($p['kode']); ?> &middot; <?php echo e($p['satuan']); ?></p>
                                     </div>
                                     <div class="shrink-0">
                                         <?php if ($p['status'] === 'aktif'): ?>
@@ -717,6 +934,24 @@ $rightActionHtml = '
                     <label class="block text-[10px] font-bold uppercase tracking-widest text-gray-500 mb-1.5">Nama Produk *</label>
                     <input type="text" id="form-nama" placeholder="Nama lengkap produk"
                         class="w-full bg-gray-50 border border-gray-200 px-3 py-2.5 text-sm transition-all">
+                </div>
+                <div>
+                    <label class="block text-[10px] font-bold uppercase tracking-widest text-gray-500 mb-1.5">Gambar Produk</label>
+                    <div class="flex flex-col sm:flex-row gap-3 sm:items-center">
+                        <div class="gambar-preview-box" id="gambar-preview-box">
+                            <span class="text-[10px] text-gray-400 font-bold uppercase tracking-widest">Preview</span>
+                        </div>
+                        <div class="flex-1">
+                            <input type="file" id="form-gambar" accept="image/jpeg,image/png,image/webp,image/gif"
+                                class="w-full bg-gray-50 border border-gray-200 px-3 py-2.5 text-sm transition-all">
+                            <input type="hidden" id="form-gambar-current">
+                            <label id="hapus-gambar-wrap" class="hidden mt-2 items-center gap-2 text-xs font-bold text-red-600 cursor-pointer">
+                                <input type="checkbox" id="form-hapus-gambar" value="1" class="accent-red-600">
+                                Hapus foto produk saat disimpan
+                            </label>
+                            <p class="text-[9px] text-gray-400 mt-1">Foto opsional. Format JPG, PNG, WEBP, atau GIF. Maksimal 2MB.</p>
+                        </div>
+                    </div>
                 </div>
                 <div>
                     <label class="block text-[10px] font-bold uppercase tracking-widest text-gray-500 mb-1.5">Kategori</label>
@@ -917,9 +1152,19 @@ $rightActionHtml = '
         }
 
         function resetForm() {
-            ['form-id', 'form-kode', 'form-nama', 'form-kategori-baru', 'form-harga-beli', 'form-harga-jual', 'form-stok', 'form-stok-min'].forEach(function(id) {
+            ['form-id', 'form-kode', 'form-nama', 'form-kategori-baru', 'form-harga-beli', 'form-harga-jual', 'form-stok', 'form-stok-min', 'form-gambar-current'].forEach(function(id) {
                 document.getElementById(id).value = '';
             });
+            var gambarInput = document.getElementById('form-gambar');
+            if (gambarInput) gambarInput.value = '';
+            var hapusGambar = document.getElementById('form-hapus-gambar');
+            if (hapusGambar) hapusGambar.checked = false;
+            var hapusWrap = document.getElementById('hapus-gambar-wrap');
+            if (hapusWrap) {
+                hapusWrap.classList.add('hidden');
+                hapusWrap.classList.remove('flex');
+            }
+            setGambarPreview('');
             document.getElementById('form-satuan').value = 'pcs';
             document.getElementById('form-kategori-select').value = '';
             document.querySelector('input[name="form-status"][value="aktif"]').checked = true;
@@ -946,6 +1191,20 @@ $rightActionHtml = '
                 document.getElementById('form-stok').value = p.stok;
                 document.getElementById('form-stok-min').value = p.stok_minimum;
                 document.getElementById('form-satuan').value = p.satuan;
+                document.getElementById('form-gambar-current').value = p.gambar || '';
+                setGambarPreview(p.gambar || '');
+                var hapusWrap = document.getElementById('hapus-gambar-wrap');
+                var hapusGambar = document.getElementById('form-hapus-gambar');
+                if (hapusGambar) hapusGambar.checked = false;
+                if (hapusWrap) {
+                    if (p.gambar) {
+                        hapusWrap.classList.remove('hidden');
+                        hapusWrap.classList.add('flex');
+                    } else {
+                        hapusWrap.classList.add('hidden');
+                        hapusWrap.classList.remove('flex');
+                    }
+                }
                 document.querySelector('input[name="form-status"][value="' + p.status + '"]').checked = true;
                 hitungMargin();
                 openModal('edit');
@@ -961,26 +1220,30 @@ $rightActionHtml = '
             btn.disabled = true;
             btn.innerHTML = '<span class="spinner"></span>';
 
-            var payload = {
-                id: id || undefined,
-                kode: document.getElementById('form-kode').value.trim(),
-                nama: document.getElementById('form-nama').value.trim(),
-                kategori: getKategoriProduk(),
-                harga_beli: document.getElementById('form-harga-beli').value || 0,
-                harga_jual: document.getElementById('form-harga-jual').value,
-                stok: document.getElementById('form-stok').value || 0,
-                stok_minimum: document.getElementById('form-stok-min').value || 5,
-                satuan: document.getElementById('form-satuan').value,
-                status: document.querySelector('input[name="form-status"]:checked').value,
-            };
+            var payload = new FormData();
+            if (id) payload.append('id', id);
+            payload.append('kode', document.getElementById('form-kode').value.trim());
+            payload.append('nama', document.getElementById('form-nama').value.trim());
+            payload.append('kategori', getKategoriProduk());
+            payload.append('harga_beli', document.getElementById('form-harga-beli').value || 0);
+            payload.append('harga_jual', document.getElementById('form-harga-jual').value);
+            payload.append('stok', document.getElementById('form-stok').value || 0);
+            payload.append('stok_minimum', document.getElementById('form-stok-min').value || 5);
+            payload.append('satuan', document.getElementById('form-satuan').value);
+            payload.append('status', document.querySelector('input[name="form-status"]:checked').value);
+            var gambarInput = document.getElementById('form-gambar');
+            if (gambarInput && gambarInput.files && gambarInput.files[0]) {
+                payload.append('gambar_produk', gambarInput.files[0]);
+            }
+            var hapusGambar = document.getElementById('form-hapus-gambar');
+            if (hapusGambar && hapusGambar.checked) {
+                payload.append('hapus_gambar', '1');
+            }
 
             try {
                 var res = await fetch('produk.php?action=' + action, {
                     method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json'
-                    },
-                    body: JSON.stringify(payload)
+                    body: payload
                 });
                 var data = await res.json();
                 if (data.success) {
@@ -1090,6 +1353,39 @@ $rightActionHtml = '
         document.getElementById('form-harga-beli').addEventListener('input', hitungMargin);
         document.getElementById('form-harga-jual').addEventListener('input', hitungMargin);
 
+
+        function setGambarPreview(src) {
+            var box = document.getElementById('gambar-preview-box');
+            if (!box) return;
+            if (src) {
+                box.innerHTML = '<img src="' + src + '" alt="Preview gambar produk">';
+            } else {
+                box.innerHTML = '<span class="text-[10px] text-gray-400 font-bold uppercase tracking-widest">Preview</span>';
+            }
+        }
+
+        document.addEventListener('DOMContentLoaded', function() {
+            var inputGambar = document.getElementById('form-gambar');
+            if (inputGambar) {
+                inputGambar.addEventListener('change', function() {
+                    var file = this.files && this.files[0] ? this.files[0] : null;
+                    if (!file) {
+                        setGambarPreview(document.getElementById('form-gambar-current').value || '');
+                        return;
+                    }
+                    if (file.size > 2 * 1024 * 1024) {
+                        showToast('Ukuran gambar maksimal 2MB.', 'error');
+                        this.value = '';
+                        return;
+                    }
+                    var hapusGambar = document.getElementById('form-hapus-gambar');
+                    if (hapusGambar) hapusGambar.checked = false;
+                    setGambarPreview(URL.createObjectURL(file));
+                });
+            }
+        });
+
+
         // ── Toast ────────────────────────────────────────────────────────────────────
         var toastTimer;
 
@@ -1114,6 +1410,28 @@ $rightActionHtml = '
         });
         document.getElementById('modal-stok').addEventListener('click', function(e) {
             if (e.target === this) closeStokModal();
+        });
+    </script>
+
+    <div id="preview-image-modal" class="preview-image-modal" onclick="closePreviewProdukImage()">
+        <button type="button" class="preview-close-btn" onclick="event.stopPropagation();closePreviewProdukImage();">✕</button>
+        <img id="preview-image-target" src="" alt="Preview Produk">
+    </div>
+
+    <script>
+        function previewProdukImage(src) {
+            document.getElementById('preview-image-target').src = src;
+            document.getElementById('preview-image-modal').classList.add('show');
+        }
+
+        function closePreviewProdukImage() {
+            document.getElementById('preview-image-modal').classList.remove('show');
+        }
+
+        document.addEventListener('keydown', function(e) {
+            if (e.key === 'Escape') {
+                closePreviewProdukImage();
+            }
         });
     </script>
 </body>

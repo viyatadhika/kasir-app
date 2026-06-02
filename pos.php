@@ -170,6 +170,25 @@ if (!function_exists('pos_auto_jurnal_penjualan')) {
 }
 
 
+
+if (!function_exists('pos_ensure_gambar_column')) {
+    function pos_ensure_gambar_column(PDO $pdo): void
+    {
+        static $done = false;
+        if ($done) return;
+        $done = true;
+        try {
+            $cols = $pdo->query("SHOW COLUMNS FROM produk")->fetchAll(PDO::FETCH_COLUMN);
+            if (!in_array('gambar', $cols, true)) {
+                $pdo->exec("ALTER TABLE produk ADD COLUMN gambar VARCHAR(255) NULL AFTER satuan");
+            }
+        } catch (Throwable $e) {
+        }
+    }
+}
+
+pos_ensure_gambar_column($pdo);
+
 define('POINT_RUPIAH', 1000);
 
 function diskonColumns(PDO $pdo): array
@@ -323,7 +342,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_GET['action'])) {
     header('Content-Type: application/json; charset=utf-8');
     switch ($_GET['action']) {
         case 'get_products':
-            $stmt = $pdo->query("SELECT id, kode, nama, kategori, harga_jual, stok, satuan FROM produk WHERE status = 'aktif' ORDER BY kategori, nama");
+            $stmt = $pdo->query("SELECT id, kode, nama, kategori, harga_jual, stok, satuan, gambar FROM produk WHERE status = 'aktif' ORDER BY kategori, nama");
             echo json_encode(['success' => true, 'data' => $stmt->fetchAll(PDO::FETCH_ASSOC)], JSON_UNESCAPED_UNICODE);
             exit;
 
@@ -548,6 +567,27 @@ catat_view_once($pdo, 'Mesin Kasir', 'Membuka halaman Mesin Kasir');
             grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
             gap: 12px;
         }
+
+        .pos-product-image {
+            width: 100%;
+            aspect-ratio: 1 / 1;
+            background: #f9fafb;
+            border: 1px solid #f0f0f0;
+            border-radius: 12px;
+            margin-bottom: 12px;
+            overflow: hidden;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: #d1d5db;
+        }
+
+        .pos-product-image img {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+        }
+
 
         .cart-item-anim {
             animation: slideIn .2s ease-out;
@@ -1774,8 +1814,10 @@ catat_view_once($pdo, 'Mesin Kasir', 'Membuka halaman Mesin Kasir');
                     low = p.stok > 0 && p.stok <= 5;
                 return `<div onclick="${habis?'':'addToCart('+p.id+')'}"
             class="bg-white p-3 rounded-2xl border border-subtle transition-all cursor-pointer group active:scale-95 shadow-sm ${habis?'opacity-40 cursor-not-allowed':'hover:border-black hover:shadow-md'}">
-            <div class="w-full aspect-square bg-gray-50 rounded-xl mb-3 flex items-center justify-center text-gray-200 ${habis?'':'group-hover:text-blue-500'} transition-colors">
-                <svg class="h-8 w-8" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4"/></svg>
+            <div class="pos-product-image ${habis?'':'group-hover:text-blue-500'} transition-colors">
+                ${p.gambar
+                    ? `<img src="${p.gambar}" alt="${p.nama || 'Produk'}">`
+                    : `<svg class="h-8 w-8" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4"/></svg>`}
             </div>
             <p class="text-[8px] font-black uppercase text-gray-400 tracking-widest mb-1">${p.kategori||'-'}</p>
             <h4 class="text-[12px] font-bold leading-tight h-8 overflow-hidden text-slate-800">${p.nama}</h4>
