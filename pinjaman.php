@@ -1685,6 +1685,14 @@ $filterStatus = isset($_GET['status']) ? $_GET['status'] : '';
 $filterJenis  = isset($_GET['jenis'])  ? $_GET['jenis']  : '';
 $q = trim(isset($_GET['q']) ? $_GET['q'] : '');
 
+$perPagePengajuan = max(5, min(100, (int)($_GET['per_pengajuan'] ?? 25)));
+$pagePengajuan = max(1, (int)($_GET['page_pengajuan'] ?? 1));
+$offsetPengajuan = ($pagePengajuan - 1) * $perPagePengajuan;
+
+$perPageAktif = max(5, min(100, (int)($_GET['per_aktif'] ?? 25)));
+$pageAktif = max(1, (int)($_GET['page_aktif'] ?? 1));
+$offsetAktif = ($pageAktif - 1) * $perPageAktif;
+
 $where  = ['1=1'];
 $params = [];
 
@@ -1714,6 +1722,20 @@ if ($q) {
 
 $whereStr = implode(' AND ', $where);
 
+$countStmt = $pdo->prepare("
+    SELECT COUNT(*)
+    FROM pengajuan_pinjaman pp
+    LEFT JOIN member m ON m.id = pp.member_id
+    WHERE $whereStr
+");
+$countStmt->execute($params);
+$totalPengajuan = (int)$countStmt->fetchColumn();
+$totalPagePengajuan = max(1, (int)ceil($totalPengajuan / $perPagePengajuan));
+if ($pagePengajuan > $totalPagePengajuan) {
+    $pagePengajuan = $totalPagePengajuan;
+    $offsetPengajuan = ($pagePengajuan - 1) * $perPagePengajuan;
+}
+
 $stmt = $pdo->prepare("
     SELECT pp.*, m.nama AS member_nama, m.kode AS member_kode, m.no_hp AS member_hp,
            u.nama AS petugas_nama
@@ -1722,14 +1744,33 @@ $stmt = $pdo->prepare("
     LEFT JOIN users u  ON u.id = pp.disetujui_oleh
     WHERE $whereStr
     ORDER BY FIELD(pp.status,'pending','diseleksi','disetujui','ditolak','dibatalkan','dicairkan'), pp.created_at DESC
-    LIMIT 100
+    LIMIT :limit_pengajuan OFFSET :offset_pengajuan
 ");
-$stmt->execute($params);
+foreach ($params as $key => $value) {
+    $stmt->bindValue($key, $value);
+}
+$stmt->bindValue(':limit_pengajuan', $perPagePengajuan, PDO::PARAM_INT);
+$stmt->bindValue(':offset_pengajuan', $offsetPengajuan, PDO::PARAM_INT);
+$stmt->execute();
 
 $pengajuanList = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
 $peminjamBerjalan = [];
+$totalPeminjamBerjalan = 0;
+$totalPageAktif = 1;
 try {
+    $countAktifStmt = $pdo->query("
+        SELECT COUNT(*)
+        FROM pinjaman p
+        WHERE p.status IN ('aktif','berjalan')
+    ");
+    $totalPeminjamBerjalan = (int)$countAktifStmt->fetchColumn();
+    $totalPageAktif = max(1, (int)ceil($totalPeminjamBerjalan / $perPageAktif));
+    if ($pageAktif > $totalPageAktif) {
+        $pageAktif = $totalPageAktif;
+        $offsetAktif = ($pageAktif - 1) * $perPageAktif;
+    }
+
     $stmtAktif = $pdo->prepare("
         SELECT
             p.*,
@@ -1742,7 +1783,8 @@ try {
             COALESCE(a.total_terbayar, 0) AS total_terbayar,
             COALESCE(a.sisa_tagihan, 0) AS sisa_tagihan,
             COALESCE(a.tagihan_terdekat, 0) AS tagihan_terdekat,
-            a.jatuh_tempo_terdekat
+            a.jatuh_tempo_terdekat,
+            COALESCE(hp.total_pinjaman_member, 0) AS total_pinjaman_member
         FROM pinjaman p
         LEFT JOIN member m ON m.id = p.member_id
         LEFT JOIN (
@@ -1758,14 +1800,25 @@ try {
             FROM angsuran_pinjaman
             GROUP BY pinjaman_id
         ) a ON a.pinjaman_id = p.id
+        LEFT JOIN (
+            SELECT
+                member_id,
+                COUNT(*) AS total_pinjaman_member
+            FROM pinjaman
+            GROUP BY member_id
+        ) hp ON hp.member_id = p.member_id
         WHERE p.status IN ('aktif','berjalan')
-        ORDER BY a.jatuh_tempo_terdekat ASC, p.created_at DESC
-        LIMIT 100
+        ORDER BY p.id DESC, p.created_at DESC
+        LIMIT :limit_aktif OFFSET :offset_aktif
     ");
+    $stmtAktif->bindValue(':limit_aktif', $perPageAktif, PDO::PARAM_INT);
+    $stmtAktif->bindValue(':offset_aktif', $offsetAktif, PDO::PARAM_INT);
     $stmtAktif->execute();
     $peminjamBerjalan = $stmtAktif->fetchAll(PDO::FETCH_ASSOC);
 } catch (Throwable $e) {
     $peminjamBerjalan = [];
+    $totalPeminjamBerjalan = 0;
+    $totalPageAktif = 1;
 }
 
 
@@ -1809,6 +1862,55 @@ $rightActionHtml = '
 <a href="sp.php" class="inline-flex items-center gap-2 px-4 py-2 text-[10px] font-black uppercase tracking-widest border border-gray-200 hover:bg-gray-50 transition-all">
     Konfigurasi SP
 </a>';
+
+
+if (!function_exists('sp_pagination_url')) {
+    function sp_pagination_url(string $param, int $page): string
+    {
+        $qs = $_GET;
+        $qs[$param] = max(1, $page);
+        return '?' . http_build_query($qs);
+    }
+}
+
+if (!function_exists('sp_render_pagination')) {
+    function sp_render_pagination(int $page, int $totalRows, int $perPage, string $param, string $label): void
+    {
+        $totalPages = max(1, (int)ceil($totalRows / max(1, $perPage)));
+        $page = max(1, min($page, $totalPages));
+        $start = $totalRows > 0 ? (($page - 1) * $perPage) + 1 : 0;
+        $end = min($totalRows, $page * $perPage);
+?>
+        <div class="px-5 py-4 border-t border-gray-100 bg-white flex flex-col md:flex-row md:items-center md:justify-between gap-3">
+            <p class="text-[10px] font-bold uppercase tracking-widest text-gray-400">
+                <?php echo h($label); ?>: <?php echo number_format($start); ?>-<?php echo number_format($end); ?> dari <?php echo number_format($totalRows); ?> data
+            </p>
+            <?php if ($totalPages > 1): ?>
+                <div class="flex flex-wrap items-center gap-1">
+                    <a href="<?php echo h(sp_pagination_url($param, max(1, $page - 1))); ?>" class="px-3 py-2 text-[10px] font-black uppercase border border-gray-200 <?php echo $page <= 1 ? 'pointer-events-none opacity-40' : 'hover:bg-gray-50'; ?>">Prev</a>
+                    <?php
+                    $from = max(1, $page - 2);
+                    $to = min($totalPages, $page + 2);
+                    if ($from > 1) {
+                        echo '<a href="' . h(sp_pagination_url($param, 1)) . '" class="px-3 py-2 text-[10px] font-black border border-gray-200 hover:bg-gray-50">1</a>';
+                        if ($from > 2) echo '<span class="px-2 text-[10px] text-gray-400">...</span>';
+                    }
+                    for ($i = $from; $i <= $to; $i++) {
+                        $active = $i === $page ? 'bg-black text-white border-black' : 'border-gray-200 hover:bg-gray-50';
+                        echo '<a href="' . h(sp_pagination_url($param, $i)) . '" class="px-3 py-2 text-[10px] font-black border ' . $active . '">' . number_format($i) . '</a>';
+                    }
+                    if ($to < $totalPages) {
+                        if ($to < $totalPages - 1) echo '<span class="px-2 text-[10px] text-gray-400">...</span>';
+                        echo '<a href="' . h(sp_pagination_url($param, $totalPages)) . '" class="px-3 py-2 text-[10px] font-black border border-gray-200 hover:bg-gray-50">' . number_format($totalPages) . '</a>';
+                    }
+                    ?>
+                    <a href="<?php echo h(sp_pagination_url($param, min($totalPages, $page + 1))); ?>" class="px-3 py-2 text-[10px] font-black uppercase border border-gray-200 <?php echo $page >= $totalPages ? 'pointer-events-none opacity-40' : 'hover:bg-gray-50'; ?>">Next</a>
+                </div>
+            <?php endif; ?>
+        </div>
+<?php
+    }
+}
 
 catat_view_once($pdo, 'Pengajuan Pinjaman', 'Membuka halaman Pengajuan Pinjaman');
 ?>
@@ -2045,7 +2147,7 @@ catat_view_once($pdo, 'Pengajuan Pinjaman', 'Membuka halaman Pengajuan Pinjaman'
                             </tr>
                         </thead>
                         <tbody class="divide-y divide-gray-50">
-                            <?php foreach ($importPinjamanPreview as $row): ?>
+                            <?php foreach ($importPinjamanPreview as $importPreviewIndex => $row): ?>
                                 <?php
                                 $status = (string)($row['status_import'] ?? '');
                                 $cls = 'bg-gray-50 text-gray-700 border-gray-200';
@@ -2057,7 +2159,7 @@ catat_view_once($pdo, 'Pengajuan Pinjaman', 'Membuka halaman Pengajuan Pinjaman'
                                     $cls = 'bg-red-50 text-red-700 border-red-200';
                                 }
                                 ?>
-                                <tr>
+                                <tr class="import-preview-row" data-index="<?php echo (int)$importPreviewIndex; ?>">
                                     <td class="px-4 py-3">
                                         <p class="text-xs font-bold"><?php echo h($row['sheet_name'] ?? '-'); ?></p>
                                         <p class="text-[10px] text-gray-400">Row <?php echo number_format((int)($row['row_no'] ?? 0)); ?> · <?php echo h($row['tahun'] ?? '-'); ?></p>
@@ -2087,6 +2189,7 @@ catat_view_once($pdo, 'Pengajuan Pinjaman', 'Membuka halaman Pengajuan Pinjaman'
                         </tbody>
                     </table>
                 </div>
+                <div id="import-preview-pagination" class="px-5 py-4 border-t border-gray-100 bg-white flex flex-col md:flex-row md:items-center md:justify-between gap-3"></div>
             </section>
         <?php endif; ?>
 
@@ -2133,7 +2236,7 @@ catat_view_once($pdo, 'Pengajuan Pinjaman', 'Membuka halaman Pengajuan Pinjaman'
                 <?php endforeach; ?>
             </select>
             <span class="text-xs text-gray-400 font-medium self-center hidden sm:block">
-                <?php echo number_format(count($pengajuanList)); ?> pengajuan
+                <?php echo number_format($totalPengajuan); ?> pengajuan
             </span>
         </div>
 
@@ -2143,7 +2246,7 @@ catat_view_once($pdo, 'Pengajuan Pinjaman', 'Membuka halaman Pengajuan Pinjaman'
                 <div>
                     <p class="text-[10px] font-black uppercase tracking-widest text-gray-400">Peminjam Berjalan</p>
                     <h2 class="text-lg font-black mt-1">Pinjaman Aktif Member</h2>
-                    <p class="text-xs text-gray-400 mt-1"><?php echo number_format(count($peminjamBerjalan)); ?> member/pinjaman sedang berjalan</p>
+                    <p class="text-xs text-gray-400 mt-1"><?php echo number_format($totalPeminjamBerjalan); ?> member/pinjaman sedang berjalan</p>
                 </div>
                 <a href="angsuran_pinjaman.php" class="inline-flex justify-center px-4 py-2 bg-black text-white text-[10px] font-black uppercase tracking-widest">
                     Kelola Angsuran
@@ -2184,6 +2287,9 @@ catat_view_once($pdo, 'Pengajuan Pinjaman', 'Membuka halaman Pengajuan Pinjaman'
                                     <div class="border-l-4 border-black pl-3">
                                         <p class="text-sm font-black"><?php echo h($pb['member_nama']); ?></p>
                                         <p class="text-[10px] text-gray-400 font-mono mt-0.5"><?php echo h($pb['member_kode']); ?> · <?php echo h($pb['member_hp']); ?></p>
+                                        <p class="text-[10px] text-gray-500 font-black mt-1 uppercase tracking-wider">
+                                            Sudah <?php echo number_format((int)($pb['total_pinjaman_member'] ?? 0)); ?>x pinjaman
+                                        </p>
                                     </div>
                                 </td>
 
@@ -2254,6 +2360,9 @@ catat_view_once($pdo, 'Pengajuan Pinjaman', 'Membuka halaman Pengajuan Pinjaman'
                             <div>
                                 <p class="text-sm font-black"><?php echo h($pb['member_nama']); ?></p>
                                 <p class="text-[10px] text-gray-400 font-mono"><?php echo h($pb['member_kode']); ?> · <?php echo h($pb['member_hp']); ?></p>
+                                <p class="text-[10px] text-gray-500 font-black mt-1 uppercase tracking-wider">
+                                    Sudah <?php echo number_format((int)($pb['total_pinjaman_member'] ?? 0)); ?>x pinjaman
+                                </p>
                             </div>
                             <span class="text-[9px] font-black uppercase px-2 py-1 border <?php echo $telat ? 'bg-red-50 text-red-700 border-red-200' : 'bg-green-50 text-green-700 border-green-200'; ?>">
                                 <?php echo $telat ? 'Telat' : 'Aktif'; ?>
@@ -2286,6 +2395,7 @@ catat_view_once($pdo, 'Pengajuan Pinjaman', 'Membuka halaman Pengajuan Pinjaman'
                     </div>
                 <?php endforeach; ?>
             </div>
+            <?php sp_render_pagination($pageAktif, $totalPeminjamBerjalan, $perPageAktif, 'page_aktif', 'Pinjaman aktif'); ?>
         </section>
 
         <!-- DESKTOP: Tabel -->
@@ -2460,6 +2570,9 @@ catat_view_once($pdo, 'Pengajuan Pinjaman', 'Membuka halaman Pengajuan Pinjaman'
                 <?php endforeach; ?>
             <?php endif; ?>
         </div>
+        <div class="mt-3 bg-white border border-gray-100 overflow-hidden">
+            <?php sp_render_pagination($pagePengajuan, $totalPengajuan, $perPagePengajuan, 'page_pengajuan', 'Pengajuan pinjaman'); ?>
+        </div>
 
     </main>
 
@@ -2485,6 +2598,48 @@ catat_view_once($pdo, 'Pengajuan Pinjaman', 'Membuka halaman Pengajuan Pinjaman'
     <script>
         var PENGAJUAN_DATA = <?php echo json_encode(array_column($pengajuanList, null, 'id')); ?>;
         var KONFIG = <?php echo json_encode($konfig ?: []); ?>;
+
+
+        // Pagination client-side untuk tabel Preview Import (karena datanya berasal dari POST upload).
+        (function initImportPreviewPagination() {
+            var rows = Array.prototype.slice.call(document.querySelectorAll('.import-preview-row'));
+            var holder = document.getElementById('import-preview-pagination');
+            if (!rows.length || !holder) return;
+
+            var perPage = 25;
+            var page = 1;
+            var totalPages = Math.max(1, Math.ceil(rows.length / perPage));
+
+            function render() {
+                var start = (page - 1) * perPage;
+                var end = start + perPage;
+                rows.forEach(function(row, idx) {
+                    row.style.display = idx >= start && idx < end ? '' : 'none';
+                });
+
+                var html = '<p class="text-[10px] font-bold uppercase tracking-widest text-gray-400">Preview import: ' + (start + 1) + '-' + Math.min(end, rows.length) + ' dari ' + rows.length + ' data</p>';
+                if (totalPages > 1) {
+                    html += '<div class="flex flex-wrap items-center gap-1">';
+                    html += '<button type="button" data-page="' + Math.max(1, page - 1) + '" class="import-page-btn px-3 py-2 text-[10px] font-black uppercase border border-gray-200 ' + (page <= 1 ? 'pointer-events-none opacity-40' : 'hover:bg-gray-50') + '">Prev</button>';
+                    var from = Math.max(1, page - 2);
+                    var to = Math.min(totalPages, page + 2);
+                    for (var i = from; i <= to; i++) {
+                        html += '<button type="button" data-page="' + i + '" class="import-page-btn px-3 py-2 text-[10px] font-black border ' + (i === page ? 'bg-black text-white border-black' : 'border-gray-200 hover:bg-gray-50') + '">' + i + '</button>';
+                    }
+                    html += '<button type="button" data-page="' + Math.min(totalPages, page + 1) + '" class="import-page-btn px-3 py-2 text-[10px] font-black uppercase border border-gray-200 ' + (page >= totalPages ? 'pointer-events-none opacity-40' : 'hover:bg-gray-50') + '">Next</button>';
+                    html += '</div>';
+                }
+                holder.innerHTML = html;
+                Array.prototype.slice.call(holder.querySelectorAll('.import-page-btn')).forEach(function(btn) {
+                    btn.addEventListener('click', function() {
+                        page = parseInt(this.getAttribute('data-page') || '1', 10);
+                        render();
+                    });
+                });
+            }
+
+            render();
+        })();
 
         // ── Filter ───────────────────────────────────────────────────────────────────
         var searchTimer;

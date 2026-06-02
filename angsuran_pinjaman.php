@@ -2109,6 +2109,66 @@ $statusFilter = strtolower(trim((string)($_GET['status'] ?? '')));
 $awal = trim((string)($_GET['awal'] ?? ''));
 $akhir = trim((string)($_GET['akhir'] ?? ''));
 
+$perPage = max(5, min(100, (int)($_GET['per_page'] ?? 25)));
+$pageRingkasan = max(1, (int)($_GET['page_ringkasan'] ?? 1));
+$pagePinjaman = max(1, (int)($_GET['page_pinjaman'] ?? 1));
+
+if (!function_exists('pagination_url_ap')) {
+    /**
+     * @param array<string,mixed> $replace
+     */
+    function pagination_url_ap(array $replace): string
+    {
+        $query = $_GET;
+        foreach ($replace as $key => $value) {
+            if ($value === null) {
+                unset($query[$key]);
+            } else {
+                $query[$key] = $value;
+            }
+        }
+        return '?' . http_build_query($query);
+    }
+}
+
+if (!function_exists('render_pagination_ap')) {
+    function render_pagination_ap(string $pageKey, int $currentPage, int $totalPages): void
+    {
+        if ($totalPages <= 1) {
+            return;
+        }
+
+        $start = max(1, $currentPage - 2);
+        $end = min($totalPages, $currentPage + 2);
+?>
+        <div class="flex flex-wrap items-center justify-between gap-2 px-5 py-4 border-t border-gray-100 bg-white">
+            <p class="text-[10px] font-bold uppercase tracking-widest text-gray-400">
+                Halaman <?= angka_ap($currentPage) ?> dari <?= angka_ap($totalPages) ?>
+            </p>
+            <div class="flex flex-wrap items-center gap-1">
+                <a href="<?= h(pagination_url_ap([$pageKey => max(1, $currentPage - 1)])) ?>"
+                    class="px-3 py-2 border border-gray-200 text-[10px] font-black uppercase <?= $currentPage <= 1 ? 'pointer-events-none opacity-40' : 'hover:bg-gray-50' ?>">
+                    Prev
+                </a>
+
+                <?php for ($i = $start; $i <= $end; $i++): ?>
+                    <a href="<?= h(pagination_url_ap([$pageKey => $i])) ?>"
+                        class="px-3 py-2 border text-[10px] font-black uppercase <?= $i === $currentPage ? 'bg-black text-white border-black' : 'border-gray-200 hover:bg-gray-50' ?>">
+                        <?= angka_ap($i) ?>
+                    </a>
+                <?php endfor; ?>
+
+                <a href="<?= h(pagination_url_ap([$pageKey => min($totalPages, $currentPage + 1)])) ?>"
+                    class="px-3 py-2 border border-gray-200 text-[10px] font-black uppercase <?= $currentPage >= $totalPages ? 'pointer-events-none opacity-40' : 'hover:bg-gray-50' ?>">
+                    Next
+                </a>
+            </div>
+        </div>
+<?php
+    }
+}
+
+
 $where = [];
 $params = [];
 
@@ -2184,6 +2244,9 @@ try {
             p.tenor AS pinjaman_tenor,
             p.status AS pinjaman_status,
             u.nama AS dibayar_oleh_nama,
+            COALESCE(mh.total_pinjaman_member, 0) AS total_pinjaman_member,
+            COALESCE(mh.total_pinjaman_lunas_member, 0) AS total_pinjaman_lunas_member,
+            COALESCE(mh.total_pinjaman_aktif_member, 0) AS total_pinjaman_aktif_member,
 
             COALESCE(pr.total_angsuran, 0) AS total_angsuran_pinjaman,
             COALESCE(pr.angsuran_lunas, 0) AS angsuran_lunas_pinjaman,
@@ -2192,9 +2255,19 @@ try {
             COALESCE(pr.total_terbayar_pinjaman, 0) AS total_terbayar_pinjaman,
             COALESCE(pr.sisa_tagihan_pinjaman, 0) AS sisa_tagihan_pinjaman
         FROM angsuran_pinjaman ap
-        LEFT JOIN member m ON m.id = ap.member_id
         LEFT JOIN pinjaman p ON p.id = ap.pinjaman_id
+        LEFT JOIN member m ON m.id = COALESCE(NULLIF(ap.member_id, 0), p.member_id)
         LEFT JOIN users u ON u.id = ap.dibayar_oleh
+        LEFT JOIN (
+            SELECT
+                member_id,
+                COUNT(*) AS total_pinjaman_member,
+                SUM(CASE WHEN LOWER(TRIM(COALESCE(status,''))) = 'lunas' THEN 1 ELSE 0 END) AS total_pinjaman_lunas_member,
+                SUM(CASE WHEN LOWER(TRIM(COALESCE(status,''))) IN ('aktif','berjalan') THEN 1 ELSE 0 END) AS total_pinjaman_aktif_member
+            FROM pinjaman
+            WHERE member_id IS NOT NULL AND member_id > 0
+            GROUP BY member_id
+        ) mh ON mh.member_id = p.member_id
         LEFT JOIN (
             SELECT
                 pinjaman_id,
@@ -2209,9 +2282,8 @@ try {
         ) pr ON pr.pinjaman_id = ap.pinjaman_id
         $whereSql
         ORDER BY
-            CASE WHEN LOWER(TRIM(COALESCE(ap.status,''))) IN ('lunas', 'dibayar', 'bayar') THEN 1 ELSE 0 END ASC,
-            ap.jatuh_tempo ASC,
-            ap.id DESC
+            ap.id DESC,
+            ap.jatuh_tempo DESC
         LIMIT 300
     ");
     $stmt->execute($params);
@@ -2239,6 +2311,9 @@ foreach ($angsuranList as $row) {
             'member_nama' => $row['member_nama'] ?? '-',
             'member_kode' => $row['member_kode'] ?? '-',
             'member_hp' => $row['member_hp'] ?? '-',
+            'total_pinjaman_member' => (int)($row['total_pinjaman_member'] ?? 0),
+            'total_pinjaman_lunas_member' => (int)($row['total_pinjaman_lunas_member'] ?? 0),
+            'total_pinjaman_aktif_member' => (int)($row['total_pinjaman_aktif_member'] ?? 0),
             'jenis' => $row['pinjaman_jenis'] ?? '-',
             'pokok' => $row['pinjaman_pokok'] ?? 0,
             'status_pinjaman' => $row['pinjaman_status'] ?? '-',
@@ -2276,6 +2351,16 @@ foreach ($angsuranList as $row) {
 }
 
 $pinjamanRingkas = array_values($pinjamanRingkas);
+
+usort($pinjamanRingkas, static function ($a, $b): int {
+    return (int)($b['pinjaman_id'] ?? 0) <=> (int)($a['pinjaman_id'] ?? 0);
+});
+
+$totalPinjamanRingkas = count($pinjamanRingkas);
+$totalPagesPinjaman = max(1, (int)ceil($totalPinjamanRingkas / $perPage));
+$pagePinjaman = min($pagePinjaman, $totalPagesPinjaman);
+$pinjamanRingkasPage = array_slice($pinjamanRingkas, ($pagePinjaman - 1) * $perPage, $perPage);
+
 
 if (function_exists('catat_view_once')) {
     catat_view_once($pdo, 'Angsuran Pinjaman', 'Membuka halaman Angsuran Pinjaman');
@@ -2653,7 +2738,72 @@ if (function_exists('catat_view_once')) {
         }
 
 
+
+        .ringkasan-desktop-wrap {
+            display: block;
+        }
+
+        .ringkasan-mobile-cards {
+            display: none;
+        }
+
+        .ringkasan-table {
+            width: 100%;
+            min-width: 1080px;
+            border-collapse: collapse;
+            table-layout: fixed;
+        }
+
+        .ringkasan-table th {
+            background: #fafafa;
+            border-bottom: 1px solid #f0f0f0;
+            padding: 13px 14px;
+            font-size: 10px;
+            line-height: 1.2;
+            font-weight: 900;
+            color: #9ca3af;
+            text-transform: uppercase;
+            letter-spacing: .10em;
+            white-space: nowrap;
+        }
+
+        .ringkasan-table td {
+            padding: 15px 14px;
+            border-bottom: 1px solid #f5f5f5;
+            vertical-align: top;
+        }
+
+        @media (max-width: 1023px) {
+            .ringkasan-desktop-wrap {
+                display: none !important;
+            }
+
+            .ringkasan-mobile-cards {
+                display: grid !important;
+                grid-template-columns: repeat(2, minmax(0, 1fr));
+                gap: .75rem;
+                padding: .75rem;
+                background: #fff;
+            }
+        }
+
+        @media (max-width: 640px) {
+            .ringkasan-mobile-cards {
+                grid-template-columns: 1fr;
+            }
+        }
+
+
         /* RINGKAS MODE FINAL */
+
+        .summary-table-wrap {
+            display: block;
+        }
+
+        .summary-card-list {
+            display: none;
+        }
+
         .summary-table {
             width: 100%;
             min-width: 1080px;
@@ -2979,48 +3129,124 @@ if (function_exists('catat_view_once')) {
                 <div class="px-5 py-4 border-b border-subtle flex items-center justify-between gap-3">
                     <div>
                         <h2 class="text-[10px] font-bold uppercase tracking-widest text-gray-400">Ringkasan Per Pinjaman</h2>
-                        <p class="text-xs text-gray-400 mt-0.5">Agar mudah melihat siapa yang mengangsur, cicilan ke berapa, dan sisa angsuran.</p>
+                        <p class="text-xs text-gray-400 mt-0.5">Desktop tampil tabel. Tablet dan mobile tampil card.</p>
                     </div>
+                    <p class="text-[10px] font-black uppercase tracking-widest text-gray-400">
+                        <?= angka_ap($totalPinjamanRingkas ?? count($pinjamanRingkas)) ?> data
+                    </p>
                 </div>
 
-                <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3 p-4">
-                    <?php
-                    $pinjamanGroups = [];
-                    foreach ($angsuranList as $row) {
-                        $pid = (int)($row['pinjaman_id'] ?? 0);
-                        if ($pid <= 0 || isset($pinjamanGroups[$pid])) {
-                            continue;
-                        }
-                        $totalAng = (int)($row['total_angsuran_pinjaman'] ?? $row['pinjaman_tenor'] ?? 0);
-                        $lunasAng = (int)($row['angsuran_lunas_pinjaman'] ?? 0);
-                        $sisaAng = sisa_angsuran_ap($totalAng, $lunasAng);
-                        $persen = progress_width_ap($lunasAng, $totalAng);
-                        $pinjamanGroups[$pid] = [
-                            'id' => $pid,
-                            'member_nama' => $row['member_nama'] ?? '-',
-                            'member_kode' => $row['member_kode'] ?? '-',
-                            'member_hp' => $row['member_hp'] ?? '-',
-                            'jenis' => $row['pinjaman_jenis'] ?? '-',
-                            'pokok' => $row['pinjaman_pokok'] ?? 0,
-                            'status' => $row['pinjaman_status'] ?? '-',
-                            'total' => $totalAng,
-                            'lunas' => $lunasAng,
-                            'sisa' => $sisaAng,
-                            'persen' => $persen,
-                            'tagihan' => $row['total_tagihan_pinjaman'] ?? 0,
-                            'terbayar' => $row['total_terbayar_pinjaman'] ?? 0,
-                            'sisa_tagihan' => $row['sisa_tagihan_pinjaman'] ?? 0,
-                        ];
-                    }
-                    ?>
+                <div class="ringkasan-desktop-wrap overflow-x-auto no-scrollbar">
+                    <table class="ringkasan-table text-left">
+                        <thead>
+                            <tr>
+                                <th style="width:230px">Member</th>
+                                <th style="width:170px">Riwayat</th>
+                                <th style="width:160px">Pinjaman</th>
+                                <th style="width:220px">Progress</th>
+                                <th style="width:150px" class="text-right">Terbayar</th>
+                                <th style="width:150px" class="text-right">Sisa Tagihan</th>
+                                <th style="width:120px">Status</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <?php
+                            $pinjamanGroups = [];
+                            foreach ($angsuranList as $row) {
+                                $pid = (int)($row['pinjaman_id'] ?? 0);
+                                if ($pid <= 0 || isset($pinjamanGroups[$pid])) {
+                                    continue;
+                                }
+                                $totalAng = (int)($row['total_angsuran_pinjaman'] ?? $row['pinjaman_tenor'] ?? 0);
+                                $lunasAng = (int)($row['angsuran_lunas_pinjaman'] ?? 0);
+                                $sisaAng = sisa_angsuran_ap($totalAng, $lunasAng);
+                                $persen = progress_width_ap($lunasAng, $totalAng);
+                                $pinjamanGroups[$pid] = [
+                                    'id' => $pid,
+                                    'member_nama' => $row['member_nama'] ?? '-',
+                                    'member_kode' => $row['member_kode'] ?? '-',
+                                    'member_hp' => $row['member_hp'] ?? '-',
+                                    'jenis' => $row['pinjaman_jenis'] ?? '-',
+                                    'pokok' => $row['pinjaman_pokok'] ?? 0,
+                                    'status' => $row['pinjaman_status'] ?? '-',
+                                    'total' => $totalAng,
+                                    'lunas' => $lunasAng,
+                                    'sisa' => $sisaAng,
+                                    'persen' => $persen,
+                                    'tagihan' => $row['total_tagihan_pinjaman'] ?? 0,
+                                    'terbayar' => $row['total_terbayar_pinjaman'] ?? 0,
+                                    'sisa_tagihan' => $row['sisa_tagihan_pinjaman'] ?? 0,
+                                    'total_pinjaman_member' => $row['total_pinjaman_member'] ?? 0,
+                                    'pinjaman_lunas_member' => $row['total_pinjaman_lunas_member'] ?? 0,
+                                    'pinjaman_aktif_member' => $row['total_pinjaman_aktif_member'] ?? 0,
+                                ];
+                            }
 
-                    <?php if (!$pinjamanGroups): ?>
-                        <div class="md:col-span-2 xl:col-span-3 py-10 text-center text-[10px] font-bold uppercase tracking-widest text-gray-300">
-                            Belum ada ringkasan pinjaman
-                        </div>
-                    <?php endif; ?>
+                            $pinjamanGroups = array_values($pinjamanGroups);
 
-                    <?php foreach ($pinjamanGroups as $g): ?>
+                            usort($pinjamanGroups, static function ($a, $b): int {
+                                return (int)($b['id'] ?? 0) <=> (int)($a['id'] ?? 0);
+                            });
+                            $totalRingkasan = count($pinjamanGroups);
+                            $totalPagesRingkasan = max(1, (int)ceil($totalRingkasan / $perPage));
+                            $pageRingkasan = min($pageRingkasan, $totalPagesRingkasan);
+                            $pinjamanGroupsPage = array_slice($pinjamanGroups, ($pageRingkasan - 1) * $perPage, $perPage);
+                            ?>
+
+                            <?php if (!$pinjamanGroupsPage): ?>
+                                <tr>
+                                    <td colspan="7" class="py-14 text-center text-[10px] font-bold uppercase tracking-widest text-gray-300">
+                                        Belum ada ringkasan pinjaman
+                                    </td>
+                                </tr>
+                            <?php endif; ?>
+
+                            <?php foreach ($pinjamanGroupsPage as $g): ?>
+                                <tr>
+                                    <td>
+                                        <div class="ap-member-box">
+                                            <p class="member-title-clean"><?= h($g['member_nama']) ?></p>
+                                            <p class="small-muted-clean font-mono mt-0.5"><?= h($g['member_kode']) ?> · <?= h($g['member_hp']) ?></p>
+                                        </div>
+                                    </td>
+                                    <td>
+                                        <div class="flex flex-wrap gap-1">
+                                            <span class="chip-clean">Sudah <?= angka_ap($g['total_pinjaman_member'] ?? 0) ?>x pinjaman</span>
+                                            <span class="chip-clean"><?= angka_ap($g['pinjaman_lunas_member'] ?? 0) ?>x lunas</span>
+                                            <span class="chip-clean"><?= angka_ap($g['pinjaman_aktif_member'] ?? 0) ?> aktif</span>
+                                        </div>
+                                    </td>
+                                    <td>
+                                        <p class="text-sm font-black">#<?= (int)$g['id'] ?></p>
+                                        <p class="small-muted-clean"><?= h(ucfirst((string)$g['jenis'])) ?> · <?= rupiah_ap($g['pokok']) ?></p>
+                                    </td>
+                                    <td>
+                                        <div class="progress-text">
+                                            <span><?= angka_ap($g['lunas']) ?>/<?= angka_ap($g['total']) ?> cicilan lunas</span>
+                                            <span><?= angka_ap($g['persen']) ?>%</span>
+                                        </div>
+                                        <div class="ap-progress">
+                                            <div class="ap-progress-fill" style="width: <?= (int)$g['persen'] ?>%;"></div>
+                                        </div>
+                                        <p class="small-muted-clean mt-1">Sisa <?= angka_ap($g['sisa']) ?>x</p>
+                                    </td>
+                                    <td class="text-right">
+                                        <p class="money-clean text-green-600"><?= rupiah_ap($g['terbayar']) ?></p>
+                                    </td>
+                                    <td class="text-right">
+                                        <p class="money-clean text-red-600"><?= rupiah_ap($g['sisa_tagihan']) ?></p>
+                                    </td>
+                                    <td>
+                                        <span class="chip-clean"><?= h($g['status']) ?></span>
+                                    </td>
+                                </tr>
+                            <?php endforeach; ?>
+                        </tbody>
+                    </table>
+                </div>
+
+                <div class="ringkasan-mobile-cards">
+                    <?php foreach ($pinjamanGroupsPage as $g): ?>
                         <div class="border border-subtle bg-white p-4">
                             <div class="flex items-start justify-between gap-3">
                                 <div>
@@ -3030,6 +3256,12 @@ if (function_exists('catat_view_once')) {
                                 <span class="text-[9px] font-black uppercase px-2 py-1 border border-gray-200 bg-gray-50">
                                     #<?= (int)$g['id'] ?>
                                 </span>
+                            </div>
+
+                            <div class="flex flex-wrap gap-1 mt-3">
+                                <span class="chip-clean">Sudah <?= angka_ap($g['total_pinjaman_member'] ?? 0) ?>x pinjaman</span>
+                                <span class="chip-clean"><?= angka_ap($g['pinjaman_lunas_member'] ?? 0) ?>x lunas</span>
+                                <span class="chip-clean"><?= angka_ap($g['pinjaman_aktif_member'] ?? 0) ?> aktif</span>
                             </div>
 
                             <div class="grid grid-cols-3 gap-2 mt-4 text-center">
@@ -3066,13 +3298,17 @@ if (function_exists('catat_view_once')) {
                         </div>
                     <?php endforeach; ?>
                 </div>
+
+                <?php render_pagination_ap('page_ringkasan', $pageRingkasan, $totalPagesRingkasan); ?>
             </section>
+
+
 
             <section class="angsuran-section">
                 <div class="toolbar-clean">
                     <div>
                         <h2 class="text-[10px] font-bold uppercase tracking-widest text-gray-400">Daftar Pinjaman Aktif</h2>
-                        <p class="text-xs text-gray-400 mt-0.5"><?= angka_ap(count($pinjamanRingkas)) ?> pinjaman/member ditampilkan secara ringkas</p>
+                        <p class="text-xs text-gray-400 mt-0.5"><?= angka_ap(($totalPinjamanRingkas ?? count($pinjamanRingkas))) ?> pinjaman/member ditampilkan secara ringkas, termasuk total riwayat pinjaman member</p>
                     </div>
 
                     <div class="toolbar-clean-actions">
@@ -3107,7 +3343,7 @@ if (function_exists('catat_view_once')) {
                         </thead>
 
                         <tbody>
-                            <?php if (!$pinjamanRingkas): ?>
+                            <?php if (!$pinjamanRingkasPage): ?>
                                 <tr>
                                     <td colspan="8" class="py-20 text-center text-[10px] font-bold uppercase tracking-widest text-gray-300">
                                         Belum ada data pinjaman
@@ -3115,7 +3351,7 @@ if (function_exists('catat_view_once')) {
                                 </tr>
                             <?php endif; ?>
 
-                            <?php foreach ($pinjamanRingkas as $g): ?>
+                            <?php foreach ($pinjamanRingkasPage as $g): ?>
                                 <?php
                                 $aktifId = (int)($g['tagihan_aktif_id'] ?? 0);
                                 $isLunasAll = $aktifId <= 0;
@@ -3133,6 +3369,11 @@ if (function_exists('catat_view_once')) {
                                         <div class="ap-member-box">
                                             <div class="member-title-clean"><?= h($g['member_nama']) ?></div>
                                             <div class="small-muted-clean font-mono mt-0.5"><?= h($g['member_kode']) ?> · <?= h($g['member_hp']) ?></div>
+                                            <div class="flex flex-wrap gap-1 mt-2">
+                                                <span class="chip-clean">Sudah <?= angka_ap($g['total_pinjaman_member'] ?? 0) ?>x pinjaman</span>
+                                                <span class="chip-clean"><?= angka_ap($g['total_pinjaman_lunas_member'] ?? 0) ?>x lunas</span>
+                                                <span class="chip-clean"><?= angka_ap($g['total_pinjaman_aktif_member'] ?? 0) ?> aktif</span>
+                                            </div>
                                         </div>
                                     </td>
 
@@ -3229,7 +3470,7 @@ if (function_exists('catat_view_once')) {
                 </div>
 
                 <div class="summary-card-list">
-                    <?php foreach ($pinjamanRingkas as $g): ?>
+                    <?php foreach ($pinjamanRingkasPage as $g): ?>
                         <?php
                         $aktifId = (int)($g['tagihan_aktif_id'] ?? 0);
                         $isLunasAll = $aktifId <= 0;
@@ -3241,6 +3482,11 @@ if (function_exists('catat_view_once')) {
                                 <div>
                                     <p class="font-black text-sm"><?= h($g['member_nama']) ?></p>
                                     <p class="text-[10px] text-gray-400"><?= h($g['member_kode']) ?> · <?= h($g['member_hp']) ?></p>
+                                    <div class="flex flex-wrap gap-1 mt-2">
+                                        <span class="chip-clean">Sudah <?= angka_ap($g['total_pinjaman_member'] ?? 0) ?>x pinjaman</span>
+                                        <span class="chip-clean"><?= angka_ap($g['total_pinjaman_lunas_member'] ?? 0) ?>x lunas</span>
+                                        <span class="chip-clean"><?= angka_ap($g['total_pinjaman_aktif_member'] ?? 0) ?> aktif</span>
+                                    </div>
                                 </div>
                                 <span class="<?= h($statusClass) ?> border text-[9px] font-bold uppercase px-2 py-1"><?= h($statusRingkas) ?></span>
                             </div>
@@ -3294,6 +3540,8 @@ if (function_exists('catat_view_once')) {
                         </div>
                     <?php endforeach; ?>
                 </div>
+
+                <?php render_pagination_ap('page_pinjaman', $pagePinjaman, $totalPagesPinjaman); ?>
             </section>
 
         </main>

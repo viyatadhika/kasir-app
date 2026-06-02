@@ -149,10 +149,35 @@ function has_column_member(PDO $pdo, string $table, string $column): bool
 
 function has_table_member(PDO $pdo, string $table): bool
 {
+    $table = preg_replace('/[^a-zA-Z0-9_]/', '', (string)$table);
+    if ($table === '') {
+        return false;
+    }
+
     try {
-        $stmt = $pdo->prepare("SHOW TABLES LIKE :t");
-        $stmt->execute([':t' => $table]);
-        return (bool)$stmt->fetch(PDO::FETCH_NUM);
+        $stmt = $pdo->prepare('SHOW TABLES LIKE ?');
+        $stmt->execute([$table]);
+        if ($stmt->fetch(PDO::FETCH_NUM)) {
+            return true;
+        }
+    } catch (Throwable $e) {
+        // Lanjut ke information_schema.
+    }
+
+    try {
+        $stmt = $pdo->prepare('SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE() AND LOWER(table_name) = LOWER(?)');
+        $stmt->execute([$table]);
+        if ((int)$stmt->fetchColumn() > 0) {
+            return true;
+        }
+    } catch (Throwable $e) {
+        // Lanjut ke direct select.
+    }
+
+    try {
+        $safeTable = str_replace('`', '', $table);
+        $pdo->query('SELECT 1 FROM `' . $safeTable . '` LIMIT 1');
+        return true;
     } catch (Throwable $e) {
         return false;
     }
@@ -699,12 +724,18 @@ try {
         $simpananTahunOptions = array_map('intval', $stmtTahunSimpanan->fetchAll(PDO::FETCH_COLUMN));
 
         $tahunReq = (int)($_GET['simpanan_tahun'] ?? 0);
+        $tahunBerjalan = (int)date('Y');
+
+        // Default tampilan mengikuti tahun berjalan. Tahun lama tetap bisa dipilih dari dropdown.
         if ($tahunReq > 0 && in_array($tahunReq, $simpananTahunOptions, true)) {
             $simpananTahunAktif = $tahunReq;
-        } elseif ($simpananTahunOptions) {
-            $simpananTahunAktif = (int)$simpananTahunOptions[0];
         } else {
-            $simpananTahunAktif = (int)date('Y');
+            $simpananTahunAktif = $tahunBerjalan;
+        }
+
+        if (!in_array($simpananTahunAktif, $simpananTahunOptions, true)) {
+            $simpananTahunOptions[] = $simpananTahunAktif;
+            rsort($simpananTahunOptions, SORT_NUMERIC);
         }
 
         $stmtSimpanan = $pdo->prepare("\n            SELECT\n                bulan,\n                jenis,\n                COALESCE(SUM(jumlah), 0) AS total\n            FROM simpanan\n            WHERE member_id = :member_id\n              AND tahun = :tahun\n            GROUP BY bulan, jenis\n            ORDER BY bulan ASC\n        ");
@@ -728,13 +759,49 @@ try {
             $simpananSummary['total'] += $jumlah;
         }
 
+        // Nominal bulan aktif tetap murni transaksi bulan tersebut.
         $simpananBulanIni = $simpananBulanan[$simpananBulanAktif] ?? $simpananBulanIni;
+
+        // Saldo/total utama adalah akumulasi dari semua data sebelumnya sampai bulan & tahun aktif.
+        $simpananSummary = [
+            'pokok' => 0,
+            'wajib' => 0,
+            'sukarela' => 0,
+            'total' => 0,
+        ];
+        $stmtAkumulasiSimpanan = $pdo->prepare("
+            SELECT
+                jenis,
+                COALESCE(SUM(jumlah), 0) AS total
+            FROM simpanan
+            WHERE member_id = :member_id_akumulasi
+              AND (
+                    tahun < :tahun_sebelum
+                    OR (tahun = :tahun_sama AND bulan <= :bulan_sampai)
+                  )
+            GROUP BY jenis
+        ");
+        $stmtAkumulasiSimpanan->execute([
+            ':member_id_akumulasi' => $memberId,
+            ':tahun_sebelum' => $simpananTahunAktif,
+            ':tahun_sama' => $simpananTahunAktif,
+            ':bulan_sampai' => $simpananBulanAktif,
+        ]);
+        foreach ($stmtAkumulasiSimpanan->fetchAll(PDO::FETCH_ASSOC) as $rowAkumulasi) {
+            $jenisAkumulasi = strtolower(trim((string)($rowAkumulasi['jenis'] ?? '')));
+            $jumlahAkumulasi = (float)($rowAkumulasi['total'] ?? 0);
+            if (!array_key_exists($jenisAkumulasi, $simpananSummary)) {
+                continue;
+            }
+            $simpananSummary[$jenisAkumulasi] += $jumlahAkumulasi;
+            $simpananSummary['total'] += $jumlahAkumulasi;
+        }
 
         $stmtRiwayatSimpanan = $pdo->prepare("\n            SELECT id, jenis, jumlah, bulan, tahun, keterangan, created_at\n            FROM simpanan\n            WHERE member_id = :member_id\n            ORDER BY tahun DESC, bulan DESC, id DESC\n            LIMIT 30\n        ");
         $stmtRiwayatSimpanan->execute([':member_id' => $memberId]);
         $simpananRiwayat = $stmtRiwayatSimpanan->fetchAll(PDO::FETCH_ASSOC);
     } else {
-        $simpananError = 'Tabel simpanan belum tersedia di database.';
+        $simpananError = 'Tabel simpanan belum terbaca dari koneksi database member_dashboard.php. Pastikan tabel simpanan ada di database yang dipakai config.php.';
         $simpananTahunAktif = (int)date('Y');
     }
 } catch (Throwable $e) {
@@ -3903,7 +3970,7 @@ catat_view_once($pdo, 'Member Dashboard', 'Membuka halaman Member Dashboard');
                 <div class="promo-hero-bar">
                     <div style="font-size:10px;font-weight:900;text-transform:uppercase;letter-spacing:.15em;opacity:.4;margin-bottom:8px;">Layanan Simpanan</div>
                     <h2>Simpanan<br>Member</h2>
-                    <p>Data simpanan diambil langsung dari database koperasi.</p>
+                    <p>Saldo ditampilkan akumulasi sampai bulan berjalan dari seluruh data sebelumnya.</p>
                 </div>
 
                 <?php if ($simpananError): ?>
@@ -3918,7 +3985,7 @@ catat_view_once($pdo, 'Member Dashboard', 'Membuka halaman Member Dashboard');
                     <div class="transport-section-head" style="margin-bottom:12px;">
                         <div>
                             <h3>Filter Simpanan</h3>
-                            <div style="font-size:11px;font-weight:600;color:var(--g4);margin-top:4px;">Pilih tahun dan bulan yang ingin dilihat.</div>
+                            <div style="font-size:11px;font-weight:600;color:var(--g4);margin-top:4px;">Default mengikuti bulan dan tahun berjalan. Tahun/bulan lama tetap bisa dipilih.</div>
                         </div>
                         <span><?= h((string)$simpananTahunAktif) ?></span>
                     </div>
@@ -3949,19 +4016,19 @@ catat_view_once($pdo, 'Member Dashboard', 'Membuka halaman Member Dashboard');
 
                 <div class="transport-service-grid" style="grid-template-columns:repeat(4,minmax(0,1fr));">
                     <div class="transport-service-card">
-                        <div class="transport-service-label">Pokok Tahun</div>
+                        <div class="transport-service-label">Pokok Akumulasi</div>
                         <div style="font-size:13px;font-weight:900;color:#111;margin-top:8px;line-height:1.3;"><?= rupiah_member($simpananSummary['pokok']) ?></div>
                     </div>
                     <div class="transport-service-card">
-                        <div class="transport-service-label">Wajib Tahun</div>
+                        <div class="transport-service-label">Wajib Akumulasi</div>
                         <div style="font-size:13px;font-weight:900;color:#111;margin-top:8px;line-height:1.3;"><?= rupiah_member($simpananSummary['wajib']) ?></div>
                     </div>
                     <div class="transport-service-card">
-                        <div class="transport-service-label">Sukarela Tahun</div>
+                        <div class="transport-service-label">Sukarela Akumulasi</div>
                         <div style="font-size:13px;font-weight:900;color:#111;margin-top:8px;line-height:1.3;"><?= rupiah_member($simpananSummary['sukarela']) ?></div>
                     </div>
                     <div class="transport-service-card">
-                        <div class="transport-service-label">Total Tahun</div>
+                        <div class="transport-service-label">Total Akumulasi</div>
                         <div style="font-size:13px;font-weight:900;color:#111;margin-top:8px;line-height:1.3;"><?= rupiah_member($simpananSummary['total']) ?></div>
                     </div>
                 </div>
@@ -3970,7 +4037,7 @@ catat_view_once($pdo, 'Member Dashboard', 'Membuka halaman Member Dashboard');
                     <div class="transport-section-head">
                         <div>
                             <h3>Simpanan Bulan <?= h($bulanNamaMember[$simpananBulanAktif] ?? '-') ?> <?= h((string)$simpananTahunAktif) ?></h3>
-                            <div style="font-size:11px;font-weight:600;color:var(--g4);margin-top:4px;">Ringkasan sesuai bulan yang dipilih</div>
+                            <div style="font-size:11px;font-weight:600;color:var(--g4);margin-top:4px;">Transaksi khusus bulan yang dipilih</div>
                         </div>
                         <span><?= rupiah_member($simpananBulanIni['total']) ?></span>
                     </div>
@@ -4027,30 +4094,17 @@ catat_view_once($pdo, 'Member Dashboard', 'Membuka halaman Member Dashboard');
                 <div class="transport-card-box">
                     <div class="transport-section-head">
                         <div>
-                            <h3>Riwayat Simpanan</h3>
-                            <div style="font-size:11px;font-weight:600;color:var(--g4);margin-top:4px;">30 data simpanan terbaru dari database</div>
+                            <h3>Riwayat Detail</h3>
+                            <div style="font-size:11px;font-weight:600;color:var(--g4);margin-top:4px;">Riwayat tidak ditampilkan langsung agar halaman tetap ringkas.</div>
                         </div>
                         <span><?= angka_member(count($simpananRiwayat)) ?></span>
                     </div>
 
-                    <div class="transport-history-wrap">
-                        <?php if (!$simpananRiwayat): ?>
-                            <div class="transport-empty">Belum ada riwayat simpanan</div>
-                        <?php endif; ?>
-
-                        <?php foreach ($simpananRiwayat as $rowSimpanan): ?>
-                            <div class="transport-history-card">
-                                <div class="transport-history-top">
-                                    <div>
-                                        <div class="transport-booking-code">Simpanan <?= h(ucfirst((string)$rowSimpanan['jenis'])) ?></div>
-                                        <div class="transport-booking-date"><?= h($bulanNamaMember[(int)$rowSimpanan['bulan']] ?? '-') ?> <?= h((string)$rowSimpanan['tahun']) ?><?= !empty($rowSimpanan['keterangan']) ? ' · ' . h($rowSimpanan['keterangan']) : '' ?></div>
-                                    </div>
-                                    <div class="transport-status transport-status-green">
-                                        <?= rupiah_member($rowSimpanan['jumlah']) ?>
-                                    </div>
-                                </div>
-                            </div>
-                        <?php endforeach; ?>
+                    <button type="button" class="transport-submit" onclick="openModal('modal-riwayat-simpanan')">
+                        Lihat Riwayat Detail
+                    </button>
+                    <div style="font-size:10px;font-weight:700;color:var(--g4);margin-top:10px;line-height:1.6;">
+                        Menampilkan maksimal 30 data terbaru saat tombol dibuka. Saldo utama di atas tetap memakai akumulasi sampai bulan yang dipilih.
                     </div>
                 </div>
             </div><!-- /page-simpanan -->
@@ -5062,6 +5116,44 @@ catat_view_once($pdo, 'Member Dashboard', 'Membuka halaman Member Dashboard');
                 </div>
                 <div style="font-size:11px;font-weight:600;color:var(--g4);line-height:1.7;">Aplikasi dashboard member Koperasi BSDK memungkinkan anggota untuk memantau transaksi, mengelola point, dan memanfaatkan promo eksklusif secara mudah dan efisien.</div>
                 <div style="margin-top:16px;font-size:10px;font-weight:700;color:var(--g5);text-transform:uppercase;letter-spacing:.1em;">© 2025 Koperasi BSDK · All rights reserved</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Modal Riwayat Simpanan -->
+    <div class="modal-overlay" id="modal-riwayat-simpanan" onclick="overlayClose(event,this)">
+        <div class="modal-sheet">
+            <div class="modal-header">
+                <div class="modal-title">Riwayat Simpanan</div>
+                <button class="modal-close" onclick="closeModal('modal-riwayat-simpanan')"><svg viewBox="0 0 24 24">
+                        <line x1="18" y1="6" x2="6" y2="18" />
+                        <line x1="6" y1="6" x2="18" y2="18" />
+                    </svg></button>
+            </div>
+            <div class="modal-body">
+                <div style="font-size:11px;font-weight:700;color:var(--g4);line-height:1.7;margin-bottom:14px;">
+                    30 data simpanan terbaru dari database. Untuk melihat saldo, gunakan ringkasan akumulasi pada halaman Simpanan.
+                </div>
+
+                <div class="transport-history-wrap" style="margin-top:0;">
+                    <?php if (!$simpananRiwayat): ?>
+                        <div class="transport-empty">Belum ada riwayat simpanan</div>
+                    <?php endif; ?>
+
+                    <?php foreach ($simpananRiwayat as $rowSimpanan): ?>
+                        <div class="transport-history-card">
+                            <div class="transport-history-top">
+                                <div>
+                                    <div class="transport-booking-code">Simpanan <?= h(ucfirst((string)$rowSimpanan['jenis'])) ?></div>
+                                    <div class="transport-booking-date"><?= h($bulanNamaMember[(int)$rowSimpanan['bulan']] ?? '-') ?> <?= h((string)$rowSimpanan['tahun']) ?><?= !empty($rowSimpanan['keterangan']) ? ' · ' . h($rowSimpanan['keterangan']) : '' ?></div>
+                                </div>
+                                <div class="transport-status transport-status-green">
+                                    <?= rupiah_member($rowSimpanan['jumlah']) ?>
+                                </div>
+                            </div>
+                        </div>
+                    <?php endforeach; ?>
+                </div>
             </div>
         </div>
     </div>

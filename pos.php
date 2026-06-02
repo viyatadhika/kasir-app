@@ -895,10 +895,85 @@ catat_view_once($pdo, 'Mesin Kasir', 'Membuka halaman Mesin Kasir');
                 margin-left: 220px;
             }
         }
+
+        /* FIX POS SCROLL PRODUK + CART TETAP TERLIHAT */
+        html,
+        body {
+            height: 100%;
+        }
+
+        body.pos-page-fixed {
+            overflow: hidden;
+        }
+
+        .pos-shell-fixed {
+            height: calc(100vh - 60px);
+            max-height: calc(100vh - 60px);
+            overflow: hidden !important;
+        }
+
+        .pos-product-panel-fixed {
+            height: calc(100vh - 60px);
+            max-height: calc(100vh - 60px);
+            min-height: 0;
+            overflow: hidden !important;
+            padding-bottom: 0 !important;
+        }
+
+        .pos-product-header-fixed {
+            flex: 0 0 auto;
+        }
+
+        .pos-product-scroll-fixed {
+            flex: 1 1 auto;
+            min-height: 0 !important;
+            overflow-y: auto !important;
+            overflow-x: hidden !important;
+            -webkit-overflow-scrolling: touch;
+            overscroll-behavior: contain;
+            padding-bottom: 96px !important;
+        }
+
+        .pos-cart-desktop-fixed {
+            height: calc(100vh - 60px) !important;
+            max-height: calc(100vh - 60px) !important;
+            position: sticky !important;
+            top: 60px !important;
+            align-self: flex-start;
+            overflow: hidden !important;
+        }
+
+        @media (min-width: 1024px) {
+            .pos-cart-desktop-fixed {
+                display: flex !important;
+            }
+        }
+
+        @media (max-width: 1023px) {
+            body.pos-page-fixed {
+                overflow: auto;
+            }
+
+            .pos-shell-fixed {
+                height: calc(100vh - 60px);
+                max-height: none;
+                overflow: hidden !important;
+            }
+
+            .pos-product-panel-fixed {
+                height: calc(100vh - 60px);
+                max-height: calc(100vh - 60px);
+                overflow: hidden !important;
+            }
+
+            .pos-product-scroll-fixed {
+                padding-bottom: 150px !important;
+            }
+        }
     </style>
 </head>
 
-<body class="antialiased min-h-screen flex flex-col overflow-x-hidden pb-0">
+<body class="pos-page-fixed antialiased min-h-screen flex flex-col overflow-x-hidden pb-0">
 
     <?php require_once 'sidebar.php'; ?>
     <?php require_once 'navbar.php'; ?>
@@ -913,12 +988,11 @@ catat_view_once($pdo, 'Mesin Kasir', 'Membuka halaman Mesin Kasir');
          Desktop: side by side (produk kiri, cart kanan)
          Mobile/Tablet: produk full width + cart sebagai bottom sheet
          ══════════════════════════════════════════════════════════════ -->
-    <div class="content flex-1 flex flex-col lg:flex-row overflow-visible lg:overflow-hidden" style="min-height:calc(100vh - 60px)">
+    <div class="content pos-shell-fixed flex-1 flex flex-col lg:flex-row overflow-hidden" style="height:calc(100vh - 60px);max-height:calc(100vh - 60px);">
 
         <!-- ── Kiri: Produk ─────────────────────────────────────────── -->
-        <div class="flex-1 flex flex-col bg-gray-50/50 border-b lg:border-b-0 lg:border-r border-subtle min-h-0"
-            style="padding-bottom: 80px" id="product-panel">
-            <div class="p-4 sm:p-6 bg-white border-b border-subtle space-y-4">
+        <div class="pos-product-panel-fixed flex-1 flex flex-col bg-gray-50/50 border-b lg:border-b-0 lg:border-r border-subtle min-h-0" id="product-panel">
+            <div class="pos-product-header-fixed p-4 sm:p-6 bg-white border-b border-subtle space-y-4">
                 <div class="relative">
                     <span class="absolute inset-y-0 left-4 flex items-center text-gray-400">
                         <svg class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -936,7 +1010,7 @@ catat_view_once($pdo, 'Mesin Kasir', 'Membuka halaman Mesin Kasir');
                     <?php endforeach; ?>
                 </div>
             </div>
-            <div class="flex-1 overflow-y-auto p-4 sm:p-6 no-scrollbar">
+            <div class="pos-product-scroll-fixed flex-1 overflow-y-auto p-4 sm:p-6 no-scrollbar">
                 <div class="product-grid" id="product-list">
                     <div class="col-span-full flex justify-center py-20">
                         <div class="spinner"></div>
@@ -946,7 +1020,7 @@ catat_view_once($pdo, 'Mesin Kasir', 'Membuka halaman Mesin Kasir');
         </div>
 
         <!-- ── Kanan: Cart (Desktop only, always visible) ────────────── -->
-        <div class="hidden lg:flex w-[420px] bg-white flex-col shadow-2xl z-20 h-[calc(100vh-60px)] sticky top-0 min-h-0">
+        <div class="pos-cart-desktop-fixed hidden lg:flex w-[420px] bg-white flex-col shadow-2xl z-20 min-h-0">
             <!-- Member Input -->
             <div class="p-4 sm:p-6 border-b border-subtle flex justify-between items-center bg-gray-50/30">
                 <h2 class="text-xs font-black uppercase tracking-[0.2em]">Daftar Belanja</h2>
@@ -996,7 +1070,7 @@ catat_view_once($pdo, 'Mesin Kasir', 'Membuka halaman Mesin Kasir');
             </div>
 
             <!-- Desktop Cart Items -->
-            <div class="flex-1 min-h-0 overflow-y-auto p-4 space-y-3 no-scrollbar" id="cart-container">
+            <div class="flex-1 min-h-0 overflow-y-auto p-4 space-y-3 no-scrollbar" id="cart-container" style="min-height:0;-webkit-overflow-scrolling:touch;">
                 <div class="cart-empty-state">
                     <svg class="h-16 w-16 mb-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1" d="M16 11V7a4 4 0 00-8 0v4M5 9h14l1 12H4L5 9z" />

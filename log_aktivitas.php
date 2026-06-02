@@ -155,6 +155,75 @@ $roleFilter = strtolower(trim((string)($_GET['role'] ?? '')));
 $awal = trim((string)($_GET['awal'] ?? ''));
 $akhir = trim((string)($_GET['akhir'] ?? ''));
 
+$perPage = max(5, min(100, (int)($_GET['per_page'] ?? 25)));
+$page = max(1, (int)($_GET['page'] ?? 1));
+$offset = ($page - 1) * $perPage;
+
+if (!function_exists('log_pagination_url')) {
+    function log_pagination_url(int $page): string
+    {
+        $qs = $_GET;
+        $qs['page'] = max(1, $page);
+        return '?' . http_build_query($qs);
+    }
+}
+
+if (!function_exists('render_log_pagination')) {
+    function render_log_pagination(int $page, int $totalRows, int $perPage): void
+    {
+        $totalPages = max(1, (int)ceil($totalRows / max(1, $perPage)));
+        $page = max(1, min($page, $totalPages));
+        $start = $totalRows > 0 ? (($page - 1) * $perPage) + 1 : 0;
+        $end = min($totalRows, $page * $perPage);
+?>
+        <div class="px-5 py-4 border-t border-subtle bg-white flex flex-col md:flex-row md:items-center md:justify-between gap-3">
+            <p class="text-[10px] font-bold uppercase tracking-widest text-gray-400">
+                Menampilkan <?= angka($start) ?>-<?= angka($end) ?> dari <?= angka($totalRows) ?> log
+            </p>
+
+            <?php if ($totalPages > 1): ?>
+                <div class="flex flex-wrap items-center gap-1">
+                    <a href="<?= h(log_pagination_url(max(1, $page - 1))) ?>"
+                        class="px-3 py-2 text-[10px] font-black uppercase border border-gray-200 <?= $page <= 1 ? 'pointer-events-none opacity-40' : 'hover:bg-gray-50' ?>">
+                        Prev
+                    </a>
+
+                    <?php
+                    $from = max(1, $page - 2);
+                    $to = min($totalPages, $page + 2);
+
+                    if ($from > 1) {
+                        echo '<a href="' . h(log_pagination_url(1)) . '" class="px-3 py-2 text-[10px] font-black border border-gray-200 hover:bg-gray-50">1</a>';
+                        if ($from > 2) {
+                            echo '<span class="px-2 text-[10px] text-gray-400">...</span>';
+                        }
+                    }
+
+                    for ($i = $from; $i <= $to; $i++) {
+                        $active = $i === $page ? 'bg-black text-white border-black' : 'border-gray-200 hover:bg-gray-50';
+                        echo '<a href="' . h(log_pagination_url($i)) . '" class="px-3 py-2 text-[10px] font-black border ' . $active . '">' . angka($i) . '</a>';
+                    }
+
+                    if ($to < $totalPages) {
+                        if ($to < $totalPages - 1) {
+                            echo '<span class="px-2 text-[10px] text-gray-400">...</span>';
+                        }
+                        echo '<a href="' . h(log_pagination_url($totalPages)) . '" class="px-3 py-2 text-[10px] font-black border border-gray-200 hover:bg-gray-50">' . angka($totalPages) . '</a>';
+                    }
+                    ?>
+
+                    <a href="<?= h(log_pagination_url(min($totalPages, $page + 1))) ?>"
+                        class="px-3 py-2 text-[10px] font-black uppercase border border-gray-200 <?= $page >= $totalPages ? 'pointer-events-none opacity-40' : 'hover:bg-gray-50' ?>">
+                        Next
+                    </a>
+                </div>
+            <?php endif; ?>
+        </div>
+<?php
+    }
+}
+
+
 $summary = [
     'total' => 0,
     'hari_ini' => 0,
@@ -165,6 +234,7 @@ $summary = [
 ];
 
 $logs = [];
+$totalFilteredLogs = 0;
 $aksiList = [];
 $roleList = [];
 $error = '';
@@ -242,6 +312,20 @@ try {
 
     $whereSql = $where ? 'WHERE ' . implode(' AND ', $where) : '';
 
+    $stmtCountLogs = $pdo->prepare("
+        SELECT COUNT(*)
+        FROM log_aktivitas
+        $whereSql
+    ");
+    $stmtCountLogs->execute($params);
+    $totalFilteredLogs = (int)$stmtCountLogs->fetchColumn();
+
+    $totalPages = max(1, (int)ceil($totalFilteredLogs / $perPage));
+    if ($page > $totalPages) {
+        $page = $totalPages;
+        $offset = ($page - 1) * $perPage;
+    }
+
     $stmtLogs = $pdo->prepare("
         SELECT
             id,
@@ -257,9 +341,14 @@ try {
         FROM log_aktivitas
         $whereSql
         ORDER BY created_at DESC, id DESC
-        LIMIT 300
+        LIMIT :limit OFFSET :offset
     ");
-    $stmtLogs->execute($params);
+    foreach ($params as $key => $value) {
+        $stmtLogs->bindValue($key, $value);
+    }
+    $stmtLogs->bindValue(':limit', $perPage, PDO::PARAM_INT);
+    $stmtLogs->bindValue(':offset', $offset, PDO::PARAM_INT);
+    $stmtLogs->execute();
     $logs = $stmtLogs->fetchAll(PDO::FETCH_ASSOC);
 } catch (Throwable $e) {
     $error = 'Gagal memuat log aktivitas: ' . $e->getMessage();
@@ -501,7 +590,7 @@ try {
                 <div class="px-5 py-4 border-b border-subtle flex items-center justify-between gap-3">
                     <div>
                         <h2 class="text-[10px] font-bold uppercase tracking-widest text-gray-400">Riwayat Aktivitas</h2>
-                        <p class="text-xs text-gray-400 mt-0.5"><?= angka(count($logs)) ?> log ditampilkan</p>
+                        <p class="text-xs text-gray-400 mt-0.5"><?= angka($totalFilteredLogs) ?> log ditemukan</p>
                     </div>
                 </div>
 
@@ -615,6 +704,8 @@ try {
                         </div>
                     <?php endforeach; ?>
                 </div>
+
+                <?php render_log_pagination($page, $totalFilteredLogs, $perPage); ?>
             </section>
         </main>
     </div>
