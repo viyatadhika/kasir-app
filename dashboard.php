@@ -499,7 +499,7 @@ $title = 'Dashboard - ' . ($_SESSION['nama'] ?? 'SEJAHUB');
         }
 
         .dashboard-action-btn {
-            min-width: 142px;
+            min-width: 170px;
             height: 56px;
             padding: 0 14px;
             display: inline-flex;
@@ -569,7 +569,7 @@ $title = 'Dashboard - ' . ($_SESSION['nama'] ?? 'SEJAHUB');
                         <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                             <path stroke-width="2" d="M12 4v16m8-8H4" />
                         </svg>
-                        <span>MESIN KASIR<br class="sm:hidden">(POS)</span>
+                        <span>MESIN KASIR <span class="opacity-70">(POS)</span></span>
                     </a>
                 <?php endif; ?>
                 <?php if (has_role('admin', 'rental')): ?>
@@ -577,7 +577,7 @@ $title = 'Dashboard - ' . ($_SESSION['nama'] ?? 'SEJAHUB');
                         <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                             <path stroke-width="2" d="M12 4v16m8-8H4" />
                         </svg>
-                        <span>RENTAL<br class="sm:hidden">BANDARA</span>
+                        <span>RENTAL<span class="hidden sm:inline"> </span><br class="sm:hidden">BANDARA</span>
                     </a>
                 <?php endif; ?>
                 <?php if (has_role('admin', 'ksp')): ?>
@@ -585,7 +585,7 @@ $title = 'Dashboard - ' . ($_SESSION['nama'] ?? 'SEJAHUB');
                         <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                             <path stroke-width="2" d="M12 4v16m8-8H4" />
                         </svg>
-                        <span>PENGAJUAN<br class="sm:hidden">PINJAMAN</span>
+                        <span>PENGAJUAN<span class="hidden sm:inline"> </span><br class="sm:hidden">PINJAMAN</span>
                     </a>
                 <?php endif; ?>
             </div>
