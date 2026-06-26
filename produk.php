@@ -58,9 +58,11 @@ if (!function_exists('produk_upload_gambar')) {
         }
 
         $file = $_FILES[$fieldName];
+
         if (($file['error'] ?? UPLOAD_ERR_OK) !== UPLOAD_ERR_OK) {
-            throw new Exception('Upload gambar gagal.');
+            throw new Exception('Upload gambar gagal. Kode error: ' . (int)($file['error'] ?? 0));
         }
+
         if (($file['size'] ?? 0) > 2 * 1024 * 1024) {
             throw new Exception('Ukuran gambar maksimal 2MB.');
         }
@@ -76,31 +78,53 @@ if (!function_exists('produk_upload_gambar')) {
             'image/webp' => 'webp',
             'image/gif' => 'gif',
         ];
+
         $mime = (string)($info['mime'] ?? '');
         if (!isset($extMap[$mime])) {
             throw new Exception('Format gambar harus JPG, PNG, WEBP, atau GIF.');
         }
 
-        $dir = __DIR__ . '/uploads/produk';
-        if (!is_dir($dir)) {
-            mkdir($dir, 0775, true);
+        $uploadOptions = [
+            ['dir' => __DIR__ . '/uploads/produk', 'url' => 'uploads/produk/'],
+            ['dir' => __DIR__ . '/assets/produk',  'url' => 'assets/produk/'],
+        ];
+
+        $targetDir = '';
+        $targetUrl = '';
+
+        foreach ($uploadOptions as $opt) {
+            if (!is_dir($opt['dir'])) {
+                @mkdir($opt['dir'], 0775, true);
+            }
+
+            if (is_dir($opt['dir']) && is_writable($opt['dir'])) {
+                $targetDir = $opt['dir'];
+                $targetUrl = $opt['url'];
+                break;
+            }
+        }
+
+        if ($targetDir === '') {
+            throw new Exception(
+                'Folder upload gambar belum bisa ditulis. Buat dan beri izin tulis pada folder uploads/produk atau assets/produk.'
+            );
         }
 
         $filename = 'produk_' . date('YmdHis') . '_' . bin2hex(random_bytes(4)) . '.' . $extMap[$mime];
-        $dest = $dir . '/' . $filename;
+        $dest = $targetDir . '/' . $filename;
 
         if (!move_uploaded_file((string)$file['tmp_name'], $dest)) {
-            throw new Exception('Gagal menyimpan gambar produk.');
+            throw new Exception('Gagal menyimpan gambar produk ke folder upload.');
         }
 
-        if ($oldPath !== '' && strpos($oldPath, 'uploads/produk/') === 0) {
+        if ($oldPath !== '' && (strpos($oldPath, 'uploads/produk/') === 0 || strpos($oldPath, 'assets/produk/') === 0)) {
             $oldFile = __DIR__ . '/' . $oldPath;
             if (is_file($oldFile)) {
                 @unlink($oldFile);
             }
         }
 
-        return 'uploads/produk/' . $filename;
+        return $targetUrl . $filename;
     }
 }
 
@@ -121,7 +145,17 @@ produk_ensure_gambar_column($pdo);
 
 // ── API Handler (AJAX) ────────────────────────────────────────────────────────
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_GET['action'])) {
+    ini_set('display_errors', '0');
     header('Content-Type: application/json');
+
+    set_exception_handler(function (Throwable $e): void {
+        http_response_code(500);
+        echo json_encode([
+            'success' => false,
+            'message' => $e->getMessage()
+        ], JSON_UNESCAPED_UNICODE);
+        exit;
+    });
 
     switch ($_GET['action']) {
 
@@ -588,6 +622,48 @@ $rightActionHtml = '
         .preview-close-btn:hover {
             background: #f3f4f6
         }
+
+        .scanner-hint {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            background: #f8fafc;
+            border: 1px solid #e5e7eb;
+            padding: 10px 12px;
+            font-size: 10px;
+            font-weight: 800;
+            color: #64748b;
+            text-transform: uppercase;
+            letter-spacing: .08em;
+        }
+
+        .scanner-hint-dot {
+            width: 8px;
+            height: 8px;
+            background: #22c55e;
+            border-radius: 9999px;
+            box-shadow: 0 0 0 4px rgba(34, 197, 94, .12);
+            flex-shrink: 0;
+        }
+
+        .scanner-btn {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            background: #111827;
+            color: #fff;
+            border: 1px solid #111827;
+            padding: 10px 14px;
+            font-size: 10px;
+            font-weight: 900;
+            text-transform: uppercase;
+            letter-spacing: .10em;
+        }
+
+        .scanner-btn:hover {
+            background: #000;
+        }
     </style>
 </head>
 
@@ -633,7 +709,7 @@ $rightActionHtml = '
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
                 </svg>
                 <input type="text" id="search-input" value="<?php echo e($search); ?>"
-                    placeholder="Cari nama, kode, atau kategori..."
+                    placeholder="Cari nama, kode, kategori, atau scan barcode..."
                     class="w-full bg-gray-50 border border-gray-100 rounded-sm pl-10 pr-4 py-2.5 text-sm focus:bg-white transition-all">
             </div>
             <select id="filter-kat" class="bg-gray-50 border border-gray-100 rounded-sm px-3 py-2.5 text-xs font-bold uppercase text-gray-500 focus:bg-white transition-all">
@@ -647,6 +723,9 @@ $rightActionHtml = '
                 <option value="nonaktif" <?php echo $statusFilter === 'nonaktif' ? 'selected' : ''; ?>>Nonaktif</option>
                 <option value="semua" <?php echo $statusFilter === 'semua'    ? 'selected' : ''; ?>>Semua Status</option>
             </select>
+            <button type="button" onclick="openModal('tambah')" class="scanner-btn">
+                Scan / Tambah Produk
+            </button>
             <span class="text-xs text-gray-400 font-medium ml-auto hidden sm:block">
                 <?php echo number_format($totalRows); ?> produk ditemukan
             </span>
@@ -913,8 +992,14 @@ $rightActionHtml = '
                 <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
                     <div>
                         <label class="block text-[10px] font-bold uppercase tracking-widest text-gray-500 mb-1.5">Kode Produk *</label>
-                        <input type="text" id="form-kode" placeholder="contoh: 899100111001"
+                        <input type="text" id="form-kode" placeholder="Scan barcode / ketik kode produk"
+                            inputmode="numeric" autocomplete="off"
+                            onkeydown="handleKodeProdukKeydown(event)"
                             class="w-full bg-gray-50 border border-gray-200 px-3 py-2.5 text-sm font-mono transition-all">
+                        <div class="scanner-hint mt-2">
+                            <span class="scanner-hint-dot"></span>
+                            <span>Scanner aktif di field ini. Scan barcode lalu Enter otomatis lanjut.</span>
+                        </div>
                     </div>
                     <div>
                         <label class="block text-[10px] font-bold uppercase tracking-widest text-gray-500 mb-1.5">Satuan</label>
@@ -949,7 +1034,7 @@ $rightActionHtml = '
                                 <input type="checkbox" id="form-hapus-gambar" value="1" class="accent-red-600">
                                 Hapus foto produk saat disimpan
                             </label>
-                            <p class="text-[9px] text-gray-400 mt-1">Foto opsional. Format JPG, PNG, WEBP, atau GIF. Maksimal 2MB.</p>
+                            <p class="text-[9px] text-gray-400 mt-1">Foto opsional. Format JPG, PNG, WEBP, atau GIF. Maksimal 2MB. Jika gagal tampil, cek permission folder uploads/produk.</p>
                         </div>
                     </div>
                 </div>
@@ -1090,6 +1175,30 @@ $rightActionHtml = '
         });
         document.getElementById('filter-status').addEventListener('change', applyFilter);
 
+        document.addEventListener('DOMContentLoaded', function() {
+            var kodeInput = document.getElementById('form-kode');
+            if (kodeInput) {
+                kodeInput.addEventListener('input', function() {
+                    var clean = normalizeBarcodeValue(this.value);
+                    if (this.value !== clean) {
+                        this.value = clean;
+                    }
+                });
+            }
+
+            var searchInput = document.getElementById('search-input');
+            if (searchInput) {
+                searchInput.addEventListener('keydown', function(e) {
+                    if (e.key === 'Enter') {
+                        e.preventDefault();
+                        this.value = normalizeBarcodeValue(this.value);
+                        applyFilter();
+                    }
+                });
+            }
+        });
+
+
         function applyFilter() {
             var url = new URL(window.location.href);
             url.searchParams.set('q', document.getElementById('search-input').value);
@@ -1106,6 +1215,11 @@ $rightActionHtml = '
             document.getElementById('modal-title').innerText = editMode ? 'Edit Produk' : 'Tambah Produk';
             document.getElementById('modal-subtitle').innerText = editMode ? 'Ubah data produk di bawah' : 'Isi form di bawah dengan benar';
             document.getElementById('modal-produk').style.display = 'flex';
+
+            if (!editMode) {
+                focusKodeProduk();
+                startProdukKodeAutoFocus();
+            }
         }
 
         function closeModal() {
@@ -1222,7 +1336,7 @@ $rightActionHtml = '
 
             var payload = new FormData();
             if (id) payload.append('id', id);
-            payload.append('kode', document.getElementById('form-kode').value.trim());
+            payload.append('kode', normalizeBarcodeValue(document.getElementById('form-kode').value));
             payload.append('nama', document.getElementById('form-nama').value.trim());
             payload.append('kategori', getKategoriProduk());
             payload.append('harga_beli', document.getElementById('form-harga-beli').value || 0);
@@ -1385,6 +1499,113 @@ $rightActionHtml = '
             }
         });
 
+
+
+
+        // ── Barcode Scanner USB HID Keyboard (Kassen) ───────────────────────────────
+        // Scanner Kassen bekerja seperti keyboard: mengirim kode lalu Enter.
+        // Fungsi ini sengaja dibuat global karena dipanggil langsung dari atribut HTML.
+        var produkKodeFocusTimer = null;
+
+        function normalizeBarcodeValue(value) {
+            value = String(value || '');
+
+            // Bersihkan karakter bawaan scanner: Enter, Tab, spasi, invisible char.
+            value = value.replace(/[\r\n\t]/g, '');
+            value = value.replace(/[\u200B-\u200D\uFEFF]/g, '');
+            value = value.trim();
+
+            // Jika scanner mengirim format aneh seperti ]C18991002100017,
+            // ambil angka utamanya agar tetap cocok dengan kode produk.
+            var numericOnly = value.replace(/[^0-9]/g, '');
+            if (numericOnly.length >= 6 && numericOnly.length <= 32) {
+                return numericOnly;
+            }
+
+            return value;
+        }
+
+        function focusKodeProduk() {
+            var kode = document.getElementById('form-kode');
+            if (!kode) return;
+            kode.focus();
+            kode.select();
+        }
+
+        function handleKodeProdukKeydown(e) {
+            e = e || window.event;
+            var input = document.getElementById('form-kode');
+            if (!input) return true;
+
+            // Scanner Kassen mengirim Enter setelah kode terbaca.
+            if (e.key === 'Enter' || e.keyCode === 13) {
+                if (e.preventDefault) e.preventDefault();
+                if (e.stopPropagation) e.stopPropagation();
+
+                input.value = normalizeBarcodeValue(input.value);
+
+                if (input.value === '') {
+                    showToast('Barcode belum terbaca. Silakan scan ulang.', 'error');
+                    focusKodeProduk();
+                    return false;
+                }
+
+                // Setelah barcode masuk, lanjut ke Nama Produk agar input manual berikutnya cepat.
+                var nama = document.getElementById('form-nama');
+                if (nama) {
+                    setTimeout(function() {
+                        nama.focus();
+                        if (nama.value === '') nama.select();
+                    }, 50);
+                }
+
+                showToast('Barcode terbaca: ' + input.value, 'success');
+                return false;
+            }
+
+            return true;
+        }
+
+        function startProdukKodeAutoFocus() {
+            clearInterval(produkKodeFocusTimer);
+
+            produkKodeFocusTimer = setInterval(function() {
+                var modal = document.getElementById('modal-produk');
+                var kode = document.getElementById('form-kode');
+                var active = document.activeElement;
+
+                if (!modal || modal.style.display === 'none' || editMode) {
+                    clearInterval(produkKodeFocusTimer);
+                    produkKodeFocusTimer = null;
+                    return;
+                }
+
+                if (!kode) return;
+
+                // Jangan rebut fokus saat user sedang isi field lain.
+                if (active && active !== document.body && active !== kode) {
+                    var tag = (active.tagName || '').toLowerCase();
+                    if (['input', 'textarea', 'select', 'button'].indexOf(tag) !== -1) {
+                        return;
+                    }
+                }
+
+                kode.focus();
+            }, 700);
+
+            setTimeout(focusKodeProduk, 120);
+            setTimeout(focusKodeProduk, 350);
+        }
+
+        document.addEventListener('click', function(e) {
+            var modal = document.getElementById('modal-produk');
+            if (modal && modal.style.display !== 'none' && !editMode) {
+                var tag = (e.target && e.target.tagName || '').toLowerCase();
+                if (!['input', 'textarea', 'select', 'button'].includes(tag)) {
+                    startProdukKodeAutoFocus();
+                }
+            }
+        });
 
         // ── Toast ────────────────────────────────────────────────────────────────────
         var toastTimer;
