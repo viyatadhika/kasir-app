@@ -22,6 +22,7 @@ if (!isset($activeMenu)) {
         'pos.php'                  => 'pos',
         'produk.php'               => 'produk',
         'stok_opname.php'          => 'stok',
+        'kas_harian.php'           => 'kas_harian',
         'diskon.php'               => 'diskon',
         'rental_bandara.php'       => 'rental',
         'driver.php'               => 'driver',
@@ -59,7 +60,30 @@ if (!function_exists('sidebar_can_show')) {
      */
     function sidebar_can_show($role, array $menu)
     {
-        return isset($menu['key']) && canSeeMenu((string)$role, (string)$menu['key']);
+        if (!isset($menu['key'])) {
+            return false;
+        }
+
+        $roleRaw = strtolower(trim((string)$role));
+        $roleRaw = str_replace(array('_', '-'), ' ', $roleRaw);
+        $roleRaw = preg_replace('/\s+/', ' ', $roleRaw);
+
+        if (function_exists('normalizeRoleName')) {
+            $role = normalizeRoleName($role);
+        }
+
+        // Fallback khusus supaya menu kas tetap muncul untuk akun Kasir,
+        // baik session berisi "kasir", "Kasir Utama", "staff kasir", atau variasinya.
+        if ((string)$menu['key'] === 'kas_harian') {
+            if (in_array((string)$role, array('admin', 'kasir'), true)) {
+                return true;
+            }
+            if (strpos($roleRaw, 'kasir') !== false) {
+                return true;
+            }
+        }
+
+        return canSeeMenu((string)$role, (string)$menu['key']);
     }
 }
 
@@ -102,6 +126,9 @@ $loginNama = isset($_SESSION['nama'])
     : (isset($_SESSION['user']['nama']) ? $_SESSION['user']['nama'] : '-');
 
 $currentRole = function_exists('getCurrentRole') ? getCurrentRole() : '';
+if (function_exists('normalizeRoleName')) {
+    $currentRole = normalizeRoleName($currentRole);
+}
 
 $menuGroups = array(
     array(
@@ -115,8 +142,9 @@ $menuGroups = array(
         'items' => array(
             array('key' => 'pos',    'href' => 'pos.php',         'label' => 'Mesin Kasir'),
             array('key' => 'produk', 'href' => 'produk.php',      'label' => 'Produk'),
-            array('key' => 'stok',   'href' => 'stok_opname.php', 'label' => 'Stok Opname'),
-            array('key' => 'diskon', 'href' => 'diskon.php',      'label' => 'Diskon'),
+            array('key' => 'stok',       'href' => 'stok_opname.php', 'label' => 'Stok Opname'),
+            array('key' => 'diskon',     'href' => 'diskon.php',      'label' => 'Diskon'),
+            array('key' => 'kas_harian', 'href' => 'kas_harian.php',  'label' => 'Buka & Tutup Kas'),
         ),
     ),
     array(

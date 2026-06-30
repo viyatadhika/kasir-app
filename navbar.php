@@ -3,6 +3,11 @@
 |--------------------------------------------------------------------------
 | navbar.php — Compatible PHP 7 & 8
 |--------------------------------------------------------------------------
+| Navbar global SEJAHUB.
+| - Mobile: tombol menu + tombol kembali
+| - Desktop: tombol menu/back otomatis disembunyikan
+| - Mendukung tombol kanan dari variabel $rightActionHtml
+| - Aman dipakai di halaman kas_harian.php, produk.php, laporan, dll.
 */
 
 if (session_status() === PHP_SESSION_NONE) {
@@ -13,7 +18,7 @@ if (!isset($pageTitle))       $pageTitle       = 'Dashboard';
 if (!isset($backUrl))         $backUrl         = '';
 if (!isset($rightActionHtml)) $rightActionHtml = '';
 
-// ── Helper — tanpa type hint agar kompatibel PHP 7 ──────────────────────────
+// Helper aman untuk PHP 7 & 8
 if (!function_exists('navbar_h')) {
     /**
      * @param  mixed  $v
@@ -27,6 +32,10 @@ if (!function_exists('navbar_h')) {
 ?>
 
 <style>
+    .app-header {
+        min-height: 64px;
+    }
+
     .navbar-btn {
         width: 38px;
         height: 38px;
@@ -38,8 +47,12 @@ if (!function_exists('navbar_h')) {
         justify-content: center;
         font-size: 13px;
         font-weight: 800;
-        transition: background .15s ease, border-color .15s ease;
+        line-height: 1;
+        transition: background .15s ease, border-color .15s ease, color .15s ease;
         cursor: pointer;
+        color: #111827;
+        text-decoration: none;
+        flex-shrink: 0;
     }
 
     .navbar-btn:hover {
@@ -58,6 +71,7 @@ if (!function_exists('navbar_h')) {
         max-width: 42vw;
         overflow-x: auto;
         scrollbar-width: none;
+        -ms-overflow-style: none;
     }
 
     .navbar-actions::-webkit-scrollbar {
@@ -66,6 +80,14 @@ if (!function_exists('navbar_h')) {
 
     .mobile-only-btn {
         display: none;
+    }
+
+    @media (min-width: 1024px) {
+
+        .app-header,
+        .page-header {
+            margin-left: 220px;
+        }
     }
 
     @media (max-width: 1023px) {
@@ -88,7 +110,22 @@ if (!function_exists('navbar_h')) {
         }
 
         .navbar-actions {
-            max-width: 32vw;
+            max-width: 34vw;
+        }
+
+        .navbar-actions button,
+        .navbar-actions a {
+            white-space: nowrap;
+        }
+    }
+
+    @media print {
+
+        .app-header,
+        .page-header,
+        .navbar-actions,
+        .navbar-btn {
+            display: none !important;
         }
     }
 </style>
@@ -98,7 +135,7 @@ if (!function_exists('navbar_h')) {
     <div class="flex items-center gap-2 sm:gap-3 min-w-0">
 
         <button type="button"
-            onclick="toggleMobileMenu()"
+            onclick="if (typeof toggleMobileMenu === 'function') { toggleMobileMenu(); }"
             class="navbar-btn mobile-only-btn"
             aria-label="Buka menu">
             &#9776;

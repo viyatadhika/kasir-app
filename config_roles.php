@@ -8,7 +8,7 @@
 |
 | Role yang tersedia:
 |   admin   → akses semua menu
-|   kasir   → dashboard, pos, produk, diskon, stok_opname, laporan
+|   kasir   → dashboard, pos, produk, diskon, stok_opname, kas_harian, laporan
 |   rental  → dashboard, rental_bandara, driver, laporan
 |--------------------------------------------------------------------------
 */
@@ -29,8 +29,10 @@ define('ROLE_ACCESS', [
             'produk.php',
             'diskon.php',
             'stok_opname.php',
+            'kas_harian.php',
             'anggota.php',
             'laporan.php',
+
             // Halaman pendukung (ajax/sub-page) yang kasir butuhkan
             'struk.php',
             'buat_po.php',
@@ -41,6 +43,7 @@ define('ROLE_ACCESS', [
             'produk',
             'diskon',
             'stok',
+            'kas_harian',
             'anggota',
             'laporan',
         ],

@@ -1,0 +1,1216 @@
+<?php
+if (session_status() === PHP_SESSION_NONE) {
+    session_start();
+}
+require_once 'config.php';
+requireAccess();
+
+$activeMenu = 'kas_harian';
+$pageTitle  = 'Buka & Tutup Kas';
+$backUrl    = 'dashboard.php';
+
+if (!function_exists('e')) {
+    /**
+     * @param mixed $v
+     * @return string
+     */
+    function e($v)
+    {
+        return htmlspecialchars((string)($v ?? ''), ENT_QUOTES, 'UTF-8');
+    }
+}
+if (!function_exists('rupiah')) {
+    /**
+     * @param mixed $n
+     * @return string
+     */
+    function rupiah($n)
+    {
+        return 'Rp' . number_format((float)($n ?? 0), 0, ',', '.');
+    }
+}
+if (!function_exists('tanggal_id')) {
+    /**
+     * @param string|null $dateTime
+     * @return string
+     */
+    function tanggal_id($dateTime)
+    {
+        $hari = ['Minggu', 'Senin', 'Selasa', 'Rabu', 'Kamis', 'Jumat', 'Sabtu'];
+        $bulan = [1 => 'Januari', 'Februari', 'Maret', 'April', 'Mei', 'Juni', 'Juli', 'Agustus', 'September', 'Oktober', 'November', 'Desember'];
+        $ts = strtotime($dateTime ?: date('Y-m-d H:i:s'));
+        return $hari[(int)date('w', $ts)] . ', ' . date('d', $ts) . ' ' . $bulan[(int)date('n', $ts)] . ' ' . date('Y H:i', $ts);
+    }
+}
+if (!function_exists('current_user_id_safe')) {
+    function current_user_id_safe()
+    {
+        foreach (['user_id', 'id_user', 'id', 'admin_id'] as $k) {
+            if (!empty($_SESSION[$k])) return (int)$_SESSION[$k];
+        }
+        if (!empty($_SESSION['user']['id'])) return (int)$_SESSION['user']['id'];
+        return 0;
+    }
+}
+if (!function_exists('current_user_name_safe')) {
+    function current_user_name_safe()
+    {
+        foreach (['nama', 'name', 'username', 'user_name'] as $k) {
+            if (!empty($_SESSION[$k])) return (string)$_SESSION[$k];
+        }
+        if (!empty($_SESSION['user']['nama'])) return (string)$_SESSION['user']['nama'];
+        if (!empty($_SESSION['user']['name'])) return (string)$_SESSION['user']['name'];
+        if (!empty($_SESSION['user']['username'])) return (string)$_SESSION['user']['username'];
+        return 'Operator';
+    }
+}
+if (!function_exists('has_table')) {
+    /**
+     * @param PDO $pdo
+     * @param string $table
+     * @return bool
+     */
+    function has_table(PDO $pdo, $table)
+    {
+        try {
+            $st = $pdo->prepare("SHOW TABLES LIKE :t");
+            $st->execute([':t' => $table]);
+            return (bool)$st->fetchColumn();
+        } catch (Throwable $e) {
+            return false;
+        }
+    }
+}
+if (!function_exists('has_column')) {
+    /**
+     * @param PDO $pdo
+     * @param string $table
+     * @param string $col
+     * @return bool
+     */
+    function has_column(PDO $pdo, $table, $col)
+    {
+        try {
+            $st = $pdo->prepare("SHOW COLUMNS FROM `$table` LIKE :c");
+            $st->execute([':c' => $col]);
+            return (bool)$st->fetchColumn();
+        } catch (Throwable $e) {
+            return false;
+        }
+    }
+}
+if (!function_exists('first_existing_column')) {
+    /**
+     * @param PDO $pdo
+     * @param string $table
+     * @param string[] $cols
+     * @param string $default
+     * @return string
+     */
+    function first_existing_column(PDO $pdo, $table, array $cols, $default = '')
+    {
+        foreach ($cols as $c) if (has_column($pdo, $table, $c)) return $c;
+        return $default;
+    }
+}
+if (!function_exists('ensure_kas_harian_table')) {
+    function ensure_kas_harian_table(PDO $pdo)
+    {
+        $pdo->exec("CREATE TABLE IF NOT EXISTS kas_harian (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            tanggal DATE NOT NULL,
+            user_id INT NULL,
+            operator VARCHAR(150) NULL,
+            kas_awal DECIMAL(15,2) NOT NULL DEFAULT 0,
+            kas_akhir_sistem DECIMAL(15,2) NOT NULL DEFAULT 0,
+            kas_aktual DECIMAL(15,2) NULL,
+            total_sales DECIMAL(15,2) NOT NULL DEFAULT 0,
+            total_tunai DECIMAL(15,2) NOT NULL DEFAULT 0,
+            total_nontunai DECIMAL(15,2) NOT NULL DEFAULT 0,
+            total_struk INT NOT NULL DEFAULT 0,
+            margin DECIMAL(15,2) NOT NULL DEFAULT 0,
+            fee_promosi DECIMAL(15,2) NOT NULL DEFAULT 0,
+            catatan TEXT NULL,
+            status ENUM('buka','tutup') NOT NULL DEFAULT 'buka',
+            opened_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            closed_at DATETIME NULL,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME NULL,
+            INDEX idx_tanggal (tanggal),
+            INDEX idx_user_tanggal (user_id, tanggal),
+            INDEX idx_status (status)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+    }
+}
+ensure_kas_harian_table($pdo);
+
+$userId        = current_user_id_safe();
+$operatorName  = current_user_name_safe();
+$today         = date('Y-m-d');
+
+/**
+ * @param PDO $pdo
+ * @param string $tanggal
+ * @param int $userId
+ * @return array|null
+ */
+function get_shift_buka(PDO $pdo, $tanggal, $userId)
+{
+    // STRICT per user: tidak fallback ke shift milik user lain.
+    $st = $pdo->prepare("SELECT * FROM kas_harian WHERE tanggal=:tanggal AND user_id=:user_id AND status='buka' ORDER BY id DESC LIMIT 1");
+    $st->execute([':tanggal' => $tanggal, ':user_id' => $userId]);
+    $row = $st->fetch(PDO::FETCH_ASSOC);
+    return $row ?: null;
+}
+
+/**
+ * @param PDO $pdo
+ * @param string $tanggal
+ * @param int $userId
+ * @return array|null
+ */
+function get_shift_terakhir(PDO $pdo, $tanggal, $userId)
+{
+    // STRICT per user: hanya riwayat milik user yang sedang login.
+    $st = $pdo->prepare("SELECT * FROM kas_harian WHERE tanggal=:tanggal AND user_id=:user_id ORDER BY id DESC LIMIT 1");
+    $st->execute([':tanggal' => $tanggal, ':user_id' => $userId]);
+    $row = $st->fetch(PDO::FETCH_ASSOC);
+    return $row ?: null;
+}
+
+/**
+ * @param PDO $pdo
+ * @param string $openedAt
+ * @param string|null $closedAt
+ * @return array
+ */
+function hitung_penjualan_shift(PDO $pdo, $openedAt, $closedAt = null)
+{
+    $data = [
+        'total_sales'    => 0,
+        'total_tunai'    => 0,
+        'total_nontunai' => 0,
+        'total_struk'    => 0,
+        'margin'         => 0,
+        'fee_promosi'    => 0
+    ];
+    if (!has_table($pdo, 'transaksi')) return $data;
+
+    $dateCol   = first_existing_column($pdo, 'transaksi', ['created_at', 'tanggal', 'waktu', 'tgl_transaksi', 'tanggal_transaksi'], 'created_at');
+    $totalCol  = first_existing_column($pdo, 'transaksi', ['grand_total', 'total_bayar', 'total', 'subtotal', 'total_harga'], '');
+    $payCol    = first_existing_column($pdo, 'transaksi', ['metode_pembayaran', 'metode_bayar', 'payment_method', 'jenis_bayar', 'pembayaran'], '');
+    $statusCol = first_existing_column($pdo, 'transaksi', ['status', 'status_transaksi'], '');
+    $promoCol  = first_existing_column($pdo, 'transaksi', ['fee_promosi', 'biaya_promosi', 'promo_fee'], '');
+
+    if ($totalCol === '') return $data;
+
+    $where  = "`$dateCol` >= :start";
+    $params = [':start' => $openedAt];
+    if ($closedAt) {
+        $where .= " AND `$dateCol` <= :end";
+        $params[':end'] = $closedAt;
+    }
+    if ($statusCol !== '') {
+        $where .= " AND (`$statusCol` IS NULL OR `$statusCol` NOT IN ('batal','cancel','cancelled','void'))";
+    }
+
+    $tunaiExpr    = "0";
+    $nontunaiExpr = "0";
+    if ($payCol !== '') {
+        $tunaiExpr    = "SUM(CASE WHEN LOWER(COALESCE(`$payCol`,'')) IN ('tunai','cash') THEN `$totalCol` ELSE 0 END)";
+        $nontunaiExpr = "SUM(CASE WHEN LOWER(COALESCE(`$payCol`,'')) NOT IN ('tunai','cash') THEN `$totalCol` ELSE 0 END)";
+    }
+    $promoExpr = $promoCol !== '' ? "SUM(COALESCE(`$promoCol`,0))" : "0";
+
+    $sql = "SELECT COALESCE(SUM(`$totalCol`),0) total_sales, COALESCE($tunaiExpr,0) total_tunai, COALESCE($nontunaiExpr,0) total_nontunai, COUNT(*) total_struk, COALESCE($promoExpr,0) fee_promosi FROM transaksi WHERE $where";
+    $st  = $pdo->prepare($sql);
+    $st->execute($params);
+    $r = $st->fetch(PDO::FETCH_ASSOC) ?: [];
+    foreach ($data as $k => $v) if (isset($r[$k])) $data[$k] = (float)$r[$k];
+
+    if (has_table($pdo, 'transaksi_detail')) {
+        $detailTransCol = first_existing_column($pdo, 'transaksi_detail', ['transaksi_id', 'id_transaksi'], 'transaksi_id');
+        $detailQtyCol   = first_existing_column($pdo, 'transaksi_detail', ['qty', 'jumlah', 'kuantitas'], '');
+        $detailHargaCol = first_existing_column($pdo, 'transaksi_detail', ['harga', 'harga_jual', 'harga_satuan'], '');
+        $detailBeliCol  = first_existing_column($pdo, 'transaksi_detail', ['harga_beli', 'modal', 'hpp'], '');
+        if ($detailQtyCol !== '' && $detailHargaCol !== '' && $detailBeliCol !== '') {
+            $idCol = first_existing_column($pdo, 'transaksi', ['id', 'transaksi_id'], 'id');
+            $sqlM  = "SELECT COALESCE(SUM((COALESCE(d.`$detailHargaCol`,0)-COALESCE(d.`$detailBeliCol`,0))*COALESCE(d.`$detailQtyCol`,0)),0) AS margin
+                     FROM transaksi_detail d JOIN transaksi t ON t.`$idCol` = d.`$detailTransCol` WHERE t.`$dateCol` >= :start";
+            if ($closedAt) $sqlM .= " AND t.`$dateCol` <= :end";
+            if ($statusCol !== '') $sqlM .= " AND (t.`$statusCol` IS NULL OR t.`$statusCol` NOT IN ('batal','cancel','cancelled','void'))";
+            $stm = $pdo->prepare($sqlM);
+            $stm->execute($params);
+            $data['margin'] = (float)$stm->fetchColumn();
+        }
+    }
+    return $data;
+}
+
+/**
+ * @param array $arr
+ * @return void
+ */
+function json_response($arr)
+{
+    header('Content-Type: application/json; charset=utf-8');
+    echo json_encode($arr, JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_GET['action'])) {
+    ini_set('display_errors', '0');
+    try {
+        $input = !empty($_POST) ? $_POST : (json_decode(file_get_contents('php://input'), true) ?: []);
+
+        if ($_GET['action'] === 'buka') {
+            $kasAwal = (float)preg_replace('/[^0-9]/', '', (string)($input['kas_awal'] ?? 0));
+            if ($kasAwal < 0) json_response(['success' => false, 'message' => 'Kas awal tidak valid.']);
+            $aktif = get_shift_buka($pdo, $today, $userId);
+            if ($aktif) json_response(['success' => false, 'message' => 'Kas hari ini masih terbuka. Tutup kas terlebih dahulu.']);
+            $st = $pdo->prepare("INSERT INTO kas_harian (tanggal,user_id,operator,kas_awal,status,opened_at) VALUES (:tanggal,:user_id,:operator,:kas_awal,'buka',NOW())");
+            $st->execute([':tanggal' => $today, ':user_id' => $userId, ':operator' => $operatorName, ':kas_awal' => $kasAwal]);
+            json_response(['success' => true, 'message' => 'Kas berhasil dibuka.', 'id' => $pdo->lastInsertId()]);
+        }
+
+        if ($_GET['action'] === 'tutup') {
+            $aktif = get_shift_buka($pdo, $today, $userId);
+            if (!$aktif) json_response(['success' => false, 'message' => 'Belum ada kas yang terbuka hari ini.']);
+            $kasAktual = (float)preg_replace('/[^0-9]/', '', (string)($input['kas_aktual'] ?? 0));
+            $catatan   = trim((string)($input['catatan'] ?? ''));
+            $sales     = hitung_penjualan_shift($pdo, $aktif['opened_at'], date('Y-m-d H:i:s'));
+            $kasAkhir  = (float)$aktif['kas_awal'] + (float)$sales['total_tunai'];
+            $st = $pdo->prepare("UPDATE kas_harian SET
+                kas_akhir_sistem=:kas_akhir_sistem, kas_aktual=:kas_aktual, total_sales=:total_sales,
+                total_tunai=:total_tunai, total_nontunai=:total_nontunai, total_struk=:total_struk,
+                margin=:margin, fee_promosi=:fee_promosi, catatan=:catatan, status='tutup', closed_at=NOW(), updated_at=NOW()
+                WHERE id=:id");
+            $st->execute([
+                ':kas_akhir_sistem' => $kasAkhir,
+                ':kas_aktual'       => $kasAktual,
+                ':total_sales'      => $sales['total_sales'],
+                ':total_tunai'      => $sales['total_tunai'],
+                ':total_nontunai'   => $sales['total_nontunai'],
+                ':total_struk'      => $sales['total_struk'],
+                ':margin'           => $sales['margin'],
+                ':fee_promosi'      => $sales['fee_promosi'],
+                ':catatan'          => $catatan,
+                ':id'               => $aktif['id']
+            ]);
+            json_response(['success' => true, 'message' => 'Kas berhasil ditutup.', 'id' => $aktif['id']]);
+        }
+
+        if ($_GET['action'] === 'ringkasan') {
+            $aktif = get_shift_buka($pdo, $today, $userId);
+            $last  = $aktif ?: get_shift_terakhir($pdo, $today, $userId);
+            if (!$last) json_response(['success' => true, 'data' => null]);
+            $sales = ($last['status'] === 'buka') ? hitung_penjualan_shift($pdo, $last['opened_at']) : [
+                'total_sales'    => $last['total_sales'],
+                'total_tunai'    => $last['total_tunai'],
+                'total_nontunai' => $last['total_nontunai'],
+                'total_struk'    => $last['total_struk'],
+                'margin'         => $last['margin'],
+                'fee_promosi'    => $last['fee_promosi']
+            ];
+            $last['kas_akhir_sistem'] = ($last['status'] === 'buka') ? ((float)$last['kas_awal'] + (float)$sales['total_tunai']) : (float)$last['kas_akhir_sistem'];
+            json_response(['success' => true, 'data' => $last, 'sales' => $sales]);
+        }
+
+        if ($_GET['action'] === 'detail') {
+            $id = (int)($input['id'] ?? 0);
+            if ($id <= 0) json_response(['success' => false, 'message' => 'ID tidak valid.']);
+            $st = $pdo->prepare("SELECT * FROM kas_harian WHERE id=:id LIMIT 1");
+            $st->execute([':id' => $id]);
+            $row = $st->fetch(PDO::FETCH_ASSOC);
+            if (!$row) json_response(['success' => false, 'message' => 'Data tidak ditemukan.']);
+            $sales = ($row['status'] === 'buka') ? hitung_penjualan_shift($pdo, $row['opened_at']) : [
+                'total_sales'    => $row['total_sales'],
+                'total_tunai'    => $row['total_tunai'],
+                'total_nontunai' => $row['total_nontunai'],
+                'total_struk'    => $row['total_struk'],
+                'margin'         => $row['margin'],
+                'fee_promosi'    => $row['fee_promosi']
+            ];
+            $kasAkhir = ($row['status'] === 'buka') ? ((float)$row['kas_awal'] + (float)$sales['total_tunai']) : (float)$row['kas_akhir_sistem'];
+            $kasAktual = $row['kas_aktual'] !== null ? (float)$row['kas_aktual'] : $kasAkhir;
+            $row['kas_akhir_sistem'] = $kasAkhir;
+            $row['kas_aktual_display'] = $kasAktual;
+            $row['selisih'] = $kasAktual - $kasAkhir;
+            json_response(['success' => true, 'data' => $row, 'sales' => $sales]);
+        }
+    } catch (Throwable $e) {
+        json_response(['success' => false, 'message' => $e->getMessage()]);
+    }
+}
+
+$shiftAktif = get_shift_buka($pdo, $today, $userId);
+$shiftLast  = $shiftAktif ?: get_shift_terakhir($pdo, $today, $userId);
+$salesNow   = $shiftLast ? (($shiftLast['status'] === 'buka') ? hitung_penjualan_shift($pdo, $shiftLast['opened_at']) : [
+    'total_sales'    => $shiftLast['total_sales'],
+    'total_tunai'    => $shiftLast['total_tunai'],
+    'total_nontunai' => $shiftLast['total_nontunai'],
+    'total_struk'    => $shiftLast['total_struk'],
+    'margin'         => $shiftLast['margin'],
+    'fee_promosi'    => $shiftLast['fee_promosi']
+]) : ['total_sales' => 0, 'total_tunai' => 0, 'total_nontunai' => 0, 'total_struk' => 0, 'margin' => 0, 'fee_promosi' => 0];
+
+$kasAkhirNow  = $shiftLast ? (($shiftLast['status'] === 'buka') ? ((float)$shiftLast['kas_awal'] + (float)$salesNow['total_tunai']) : (float)$shiftLast['kas_akhir_sistem']) : 0;
+$kasAktualNow = $shiftLast && $shiftLast['kas_aktual'] !== null ? (float)$shiftLast['kas_aktual'] : $kasAkhirNow;
+$selisihNow   = $kasAktualNow - $kasAkhirNow;
+
+$history = [];
+try {
+    $st = $pdo->prepare("SELECT * FROM kas_harian WHERE user_id=:user_id ORDER BY id DESC LIMIT 20");
+    $st->execute([':user_id' => $userId]);
+    $history = $st->fetchAll(PDO::FETCH_ASSOC);
+} catch (Throwable $e) {
+}
+
+// ── Data untuk cetak Bluetooth (format sama dengan struk.php) ──────────────
+$kasReceiptData = [
+    'operator'       => strtoupper((string)($shiftLast['operator'] ?? $operatorName)),
+    'tanggal'        => tanggal_id(($shiftLast['closed_at'] ?? '') ?: date('Y-m-d H:i:s')),
+    'status'         => $shiftAktif ? 'KAS BUKA' : strtoupper((string)($shiftLast['status'] ?? '-')),
+    'kas_awal'       => (int)($shiftLast['kas_awal'] ?? 0),
+    'total_sales'    => (int)$salesNow['total_sales'],
+    'kas_akhir'      => (int)$kasAkhirNow,
+    'kas_aktual'     => (int)$kasAktualNow,
+    'total_tunai'    => (int)$salesNow['total_tunai'],
+    'total_nontunai' => (int)$salesNow['total_nontunai'],
+    'selisih'        => (int)$selisihNow,
+    'margin'         => (int)$salesNow['margin'],
+    'fee_promosi'    => (int)$salesNow['fee_promosi'],
+    'total_struk'    => (int)$salesNow['total_struk'],
+];
+
+$rightActionHtml = '
+<div class="flex items-center gap-2">
+    <button onclick="cetakBluetooth()" id="btnBluetoothKas" class="inline-flex items-center gap-2 px-4 py-2 text-[10px] font-black uppercase tracking-widest bg-black text-white hover:bg-gray-800 transition-all">
+        <span>&#128424; Print</span>
+    </button>
+</div>';
+?>
+<!DOCTYPE html>
+<html lang="id">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Buka & Tutup Kas</title>
+    <link rel="icon" type="image/png" href="assets/sejahub_icon.png">
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800;900&display=swap" rel="stylesheet">
+    <style>
+        body {
+            font-family: 'Plus Jakarta Sans', sans-serif;
+            background: #fcfcfc;
+            color: #1a1a1a
+        }
+
+        .border-subtle {
+            border-color: #f0f0f0
+        }
+
+        input:focus,
+        textarea:focus {
+            outline: none;
+            box-shadow: 0 0 0 3px rgba(0, 0, 0, .06);
+            border-color: #111 !important
+        }
+
+        .box {
+            background: #fff;
+            border: 1px solid #f0f0f0;
+            border-radius: 0;
+            box-shadow: none
+        }
+
+        .btn {
+            border-radius: 0 !important
+        }
+
+        .row-clickable {
+            cursor: pointer;
+            transition: background-color .15s ease;
+        }
+
+        .row-clickable:hover {
+            background-color: #fafafa;
+        }
+
+        .receipt {
+            font-family: 'Courier New', monospace;
+            width: 80mm;
+            max-width: 100%;
+            background: #fff;
+            color: #111;
+            padding: 10px 12px;
+            font-size: 12px;
+            line-height: 1.2
+        }
+
+        .receipt .center {
+            text-align: center
+        }
+
+        .receipt .row {
+            display: flex;
+            justify-content: space-between;
+            gap: 8px
+        }
+
+        .receipt .label {
+            white-space: nowrap
+        }
+
+        .receipt .value {
+            text-align: right;
+            white-space: nowrap
+        }
+
+        .receipt .line {
+            border-top: 1px dashed #111;
+            margin: 8px 0
+        }
+
+        .receipt-title {
+            font-weight: bold;
+            letter-spacing: .04em
+        }
+
+        /* ── Status bar Bluetooth ── */
+        #kasStatusBar {
+            display: none;
+            padding: 8px 14px;
+            font-size: 11px;
+            font-weight: 700;
+            text-align: center;
+            font-family: Arial, sans-serif;
+        }
+
+        #kasStatusBar.info {
+            background: #dbeafe;
+            color: #1e40af;
+            display: block;
+        }
+
+        #kasStatusBar.success {
+            background: #dcfce7;
+            color: #166534;
+            display: block;
+        }
+
+        #kasStatusBar.error {
+            background: #fee2e2;
+            color: #991b1b;
+            display: block;
+        }
+
+        #kasHttpsNotice {
+            display: none;
+            margin: 10px 0 0;
+            padding: 9px 11px;
+            background: #fffbeb;
+            border: 1px dashed #d97706;
+            border-radius: 3px;
+            font-family: Arial, sans-serif;
+            font-size: 10px;
+            color: #92400e;
+            line-height: 1.6;
+        }
+
+        #kasHttpsNotice strong {
+            display: block;
+            margin-bottom: 3px;
+            font-size: 10.5px;
+        }
+
+        #kasHttpsNotice code {
+            background: #fef3c7;
+            padding: 1px 3px;
+            border-radius: 2px;
+            font-size: 9.5px;
+        }
+
+        /* ── Modal Detail Riwayat Kas ── */
+        #kasDetailOverlay {
+            display: none;
+            position: fixed;
+            inset: 0;
+            background: rgba(0, 0, 0, .45);
+            z-index: 60;
+            align-items: center;
+            justify-content: center;
+            padding: 16px;
+        }
+
+        #kasDetailOverlay.open {
+            display: flex;
+        }
+
+        #kasDetailModal {
+            background: #fff;
+            width: 100%;
+            max-width: 420px;
+            max-height: 90vh;
+            overflow-y: auto;
+            border: 1px solid #eee;
+        }
+
+        #kasDetailModal .modal-row {
+            display: flex;
+            justify-content: space-between;
+            padding: 9px 0;
+            border-bottom: 1px solid #f5f5f5;
+            font-size: 12.5px;
+        }
+
+        #kasDetailModal .modal-row span:first-child {
+            color: #888;
+            font-weight: 700;
+            text-transform: uppercase;
+            font-size: 10px;
+            letter-spacing: .04em;
+        }
+
+        #kasDetailModal .modal-row span:last-child {
+            font-weight: 800;
+            text-align: right;
+        }
+
+        @media (min-width:1024px) {
+
+            .kas-main,
+            .app-header,
+            .page-header {
+                margin-left: 220px
+            }
+        }
+
+        @media (max-width:1023px) {
+            body {
+                padding-bottom: 76px
+            }
+
+            .kas-main {
+                padding-bottom: 5.5rem !important
+            }
+        }
+
+        @media print {
+            body {
+                background: #fff !important;
+                padding: 0 !important
+            }
+
+            .kas-main {
+                margin: 0 !important;
+                padding: 0 !important
+            }
+
+            .no-print,
+            aside,
+            nav,
+            .app-header,
+            .page-header,
+            .sidebar,
+            .navbar {
+                display: none !important
+            }
+
+            .print-area {
+                display: block !important
+            }
+
+            .receipt {
+                width: 80mm !important;
+                margin: 0 !important;
+                padding: 0 4mm !important;
+                font-size: 12px !important;
+                box-shadow: none !important;
+                border: 0 !important
+            }
+
+            .receipt-wrap {
+                border: 0 !important;
+                padding: 0 !important;
+                margin: 0 !important
+            }
+
+            .screen-only {
+                display: none !important
+            }
+
+            @page {
+                size: 80mm auto;
+                margin: 4mm
+            }
+        }
+    </style>
+</head>
+
+<body class="antialiased bg-[#fcfcfc] min-h-screen pb-20 lg:pb-0">
+    <?php if (is_file(__DIR__ . '/sidebar.php')) require_once 'sidebar.php'; ?>
+    <?php if (is_file(__DIR__ . '/navbar.php')) require_once 'navbar.php'; ?>
+
+    <div id="kasStatusBar" class="no-print"></div>
+
+    <main class="kas-main p-4 sm:p-5 md:p-8 lg:p-10">
+        <div class="no-print mb-6 flex flex-col md:flex-row md:items-end md:justify-between gap-4">
+            <div>
+                <p class="text-[10px] font-black uppercase tracking-widest text-gray-400">Operasional Kas</p>
+                <h1 class="text-2xl md:text-3xl font-black tracking-tight">Buka & Tutup Kas</h1>
+                <p class="text-xs text-gray-500 mt-1">Kelola kas awal, kas akhir, dan print laporan shift thermal 80mm.</p>
+            </div>
+            <div class="flex gap-2">
+                <button onclick="cetakBluetooth()" id="btnBluetoothKas2" class="btn px-4 py-3 bg-black text-white text-xs font-black uppercase tracking-widest hover:bg-gray-800 transition-all">&#128424; Print</button>
+            </div>
+        </div>
+
+        <div id="kasHttpsNotice" class="no-print">
+            <strong>&#9888; Web Bluetooth butuh HTTPS / localhost</strong>
+            Aktifkan di Chrome Android:<br>
+            Buka <code>chrome://flags/#unsafely-treat-insecure-origin-as-secure</code><br>
+            Isi: <code>http://<?php echo e($_SERVER['HTTP_HOST'] ?? '192.168.x.x'); ?></code> &#8594; Enable &#8594; Relaunch
+        </div>
+
+        <div class="no-print grid grid-cols-2 md:grid-cols-4 gap-3 md:gap-4 mb-6 mt-6">
+            <div class="box p-4">
+                <p class="text-[10px] font-bold text-gray-400 uppercase tracking-widest">Status</p>
+                <p class="text-xl font-black mt-1 <?php echo $shiftAktif ? 'text-green-600' : 'text-gray-900'; ?>"><?php echo $shiftAktif ? 'Kas Buka' : 'Kas Tutup'; ?></p>
+            </div>
+            <div class="box p-4">
+                <p class="text-[10px] font-bold text-gray-400 uppercase tracking-widest">Kas Awal</p>
+                <p class="text-xl font-black mt-1"><?php echo rupiah($shiftLast['kas_awal'] ?? 0); ?></p>
+            </div>
+            <div class="box p-4">
+                <p class="text-[10px] font-bold text-gray-400 uppercase tracking-widest">Total Sales</p>
+                <p class="text-xl font-black mt-1 text-blue-600"><?php echo rupiah($salesNow['total_sales']); ?></p>
+            </div>
+            <div class="box p-4">
+                <p class="text-[10px] font-bold text-gray-400 uppercase tracking-widest">Kas Akhir</p>
+                <p class="text-xl font-black mt-1"><?php echo rupiah($kasAkhirNow); ?></p>
+            </div>
+        </div>
+
+        <div class="grid grid-cols-1 xl:grid-cols-[1fr_380px] gap-6">
+            <div class="no-print space-y-6">
+                <?php if (!$shiftAktif): ?>
+                    <div class="box p-5 md:p-7">
+                        <h2 class="text-sm font-black uppercase tracking-widest mb-5">Buka Kas Hari Ini</h2>
+                        <label class="block text-[10px] font-bold uppercase tracking-widest text-gray-500 mb-1.5">Kas Awal</label>
+                        <input type="text" id="kas-awal" placeholder="Contoh: 431000" inputmode="numeric" class="w-full bg-gray-50 border border-gray-200 px-4 py-3 text-lg font-black">
+                        <button onclick="bukaKas()" class="btn mt-4 w-full py-3 bg-black text-white text-xs font-black uppercase tracking-widest">Buka Kas</button>
+                    </div>
+                <?php else: ?>
+                    <div class="box p-5 md:p-7">
+                        <h2 class="text-sm font-black uppercase tracking-widest mb-5">Tutup Kas Hari Ini</h2>
+                        <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+                            <div class="bg-gray-50 border border-subtle p-4">
+                                <p class="text-[10px] font-bold uppercase tracking-widest text-gray-400">Kas Akhir Sistem</p>
+                                <p class="text-2xl font-black mt-1"><?php echo rupiah($kasAkhirNow); ?></p>
+                            </div>
+                            <div class="bg-gray-50 border border-subtle p-4">
+                                <p class="text-[10px] font-bold uppercase tracking-widest text-gray-400">Tunai</p>
+                                <p class="text-2xl font-black mt-1"><?php echo rupiah($salesNow['total_tunai']); ?></p>
+                            </div>
+                        </div>
+                        <label class="block text-[10px] font-bold uppercase tracking-widest text-gray-500 mb-1.5">Kas Aktual di Laci</label>
+                        <input type="text" id="kas-aktual" value="<?php echo number_format($kasAkhirNow, 0, ',', '.'); ?>" inputmode="numeric" class="w-full bg-gray-50 border border-gray-200 px-4 py-3 text-lg font-black">
+                        <label class="block text-[10px] font-bold uppercase tracking-widest text-gray-500 mb-1.5 mt-4">Catatan</label>
+                        <textarea id="catatan" rows="3" class="w-full bg-gray-50 border border-gray-200 px-4 py-3 text-sm" placeholder="Opsional"></textarea>
+                        <button onclick="tutupKas()" class="btn mt-4 w-full py-3 bg-black text-white text-xs font-black uppercase tracking-widest">Tutup Kas & Print</button>
+                    </div>
+                <?php endif; ?>
+
+                <div class="box overflow-hidden">
+                    <div class="p-5 border-b border-subtle flex items-center justify-between">
+                        <h2 class="text-sm font-black uppercase tracking-widest">Riwayat Kas</h2>
+                        <span class="text-[10px] text-gray-400 font-bold uppercase tracking-widest">Klik baris untuk detail</span>
+                    </div>
+                    <div class="overflow-x-auto">
+                        <table class="w-full text-left min-w-[760px]">
+                            <thead class="bg-gray-50 border-b border-subtle">
+                                <tr>
+                                    <th class="px-4 py-3 text-[10px] font-black uppercase tracking-widest text-gray-400">Tanggal</th>
+                                    <th class="px-4 py-3 text-[10px] font-black uppercase tracking-widest text-gray-400">Operator</th>
+                                    <th class="px-4 py-3 text-[10px] font-black uppercase tracking-widest text-gray-400 text-right">Kas Awal</th>
+                                    <th class="px-4 py-3 text-[10px] font-black uppercase tracking-widest text-gray-400 text-right">Sales</th>
+                                    <th class="px-4 py-3 text-[10px] font-black uppercase tracking-widest text-gray-400 text-right">Kas Akhir</th>
+                                    <th class="px-4 py-3 text-[10px] font-black uppercase tracking-widest text-gray-400 text-center">Status</th>
+                                </tr>
+                            </thead>
+                            <tbody class="divide-y divide-[#f5f5f5]">
+                                <?php foreach ($history as $h): ?>
+                                    <tr class="row-clickable" onclick="bukaDetailKas(<?php echo (int)$h['id']; ?>)">
+                                        <td class="px-4 py-3 text-xs font-bold"><?php echo e(date('d/m/Y', strtotime($h['tanggal']))); ?></td>
+                                        <td class="px-4 py-3 text-xs"><?php echo e($h['operator']); ?></td>
+                                        <td class="px-4 py-3 text-xs text-right"><?php echo rupiah($h['kas_awal']); ?></td>
+                                        <td class="px-4 py-3 text-xs text-right"><?php echo rupiah($h['total_sales']); ?></td>
+                                        <td class="px-4 py-3 text-xs text-right"><?php echo rupiah($h['kas_akhir_sistem']); ?></td>
+                                        <td class="px-4 py-3 text-center"><span class="text-[9px] font-black uppercase px-2 py-1 <?php echo $h['status'] === 'buka' ? 'bg-green-50 text-green-700' : 'bg-gray-100 text-gray-700'; ?>"><?php echo e($h['status']); ?></span></td>
+                                    </tr>
+                                <?php endforeach;
+                                if (empty($history)): ?>
+                                    <tr>
+                                        <td colspan="6" class="px-4 py-10 text-center text-xs text-gray-400 font-bold uppercase tracking-widest">Belum ada riwayat</td>
+                                    </tr>
+                                <?php endif; ?>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+
+            <div class="receipt-wrap box p-4 print-area">
+                <div class="receipt mx-auto" id="receipt">
+                    <div class="center receipt-title">[COPY]</div>
+                    <div>Laporan Shift</div>
+                    <div>Tanggal</div>
+                    <div><?php echo tanggal_id(($shiftLast['closed_at'] ?? '') ?: date('Y-m-d H:i:s')); ?></div>
+                    <br>
+                    <div class="row"><span class="label">Operator</span><span class="value">: <?php echo e(strtoupper($shiftLast['operator'] ?? $operatorName)); ?></span></div>
+                    <div class="row"><span class="label">Kas Awal</span><span class="value">: <?php echo rupiah($shiftLast['kas_awal'] ?? 0); ?></span></div>
+                    <div class="row"><span class="label">Total Sales</span><span class="value">: <?php echo rupiah($salesNow['total_sales']); ?></span></div>
+                    <div class="row"><span class="label">Kas Akhir</span><span class="value">: <?php echo rupiah($kasAkhirNow); ?></span></div>
+                    <div class="row"><span class="label">Kas Aktual</span><span class="value">: <?php echo rupiah($kasAktualNow); ?></span></div>
+                    <div class="row"><span class="label">TUNAI</span><span class="value">: <?php echo rupiah($salesNow['total_tunai']); ?></span></div>
+                    <div class="row"><span class="label">NON-TUNAI</span><span class="value">: <?php echo rupiah($salesNow['total_nontunai']); ?></span></div>
+                    <div class="row"><span class="label">Selisih</span><span class="value">: <?php echo ($selisihNow >= 0 ? '+' : '-') . rupiah(abs($selisihNow)); ?></span></div>
+                    <div class="row"><span class="label">Margin</span><span class="value">: <?php echo rupiah($salesNow['margin']); ?></span></div>
+                    <div class="row"><span class="label">Fee Promosi</span><span class="value">: <?php echo rupiah($salesNow['fee_promosi']); ?></span></div>
+                    <div class="row"><span class="label">Total Struk</span><span class="value">: <?php echo number_format((int)$salesNow['total_struk'], 0, ',', '.'); ?></span></div>
+                    <br><br>
+                    <div><?php echo e(strtoupper('TMI KOPERASI KONSUMEN PRIMER BSDK SEJAHTERA')); ?></div>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <!-- ── Modal Detail Riwayat Kas ── -->
+    <div id="kasDetailOverlay" class="no-print" onclick="if(event.target===this) tutupDetailKas()">
+        <div id="kasDetailModal">
+            <div class="p-5 border-b border-subtle flex items-center justify-between">
+                <h3 class="text-sm font-black uppercase tracking-widest">Detail Kas</h3>
+                <button onclick="tutupDetailKas()" class="text-gray-400 hover:text-black text-xl leading-none font-black">&times;</button>
+            </div>
+            <div class="p-5" id="kasDetailBody">
+                <p class="text-xs text-gray-400 text-center py-6">Memuat...</p>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        function angka(v) {
+            return String(v || '').replace(/[^0-9]/g, '');
+        }
+
+        function formatInput(el) {
+            el.value = angka(el.value).replace(/\B(?=(\d{3})+(?!\d))/g, '.');
+        }
+        ['kas-awal', 'kas-aktual'].forEach(function(id) {
+            var el = document.getElementById(id);
+            if (el) {
+                el.addEventListener('input', function() {
+                    formatInput(this);
+                });
+            }
+        });
+
+        function postAction(action, body) {
+            return fetch('kas_harian.php?action=' + action, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify(body || {})
+            }).then(function(r) {
+                return r.json();
+            });
+        }
+
+        function bukaKas() {
+            var el = document.getElementById('kas-awal');
+            var val = angka(el ? el.value : '');
+            if (val === '') {
+                alert('Kas awal wajib diisi.');
+                return;
+            }
+            postAction('buka', {
+                kas_awal: val
+            }).then(function(d) {
+                alert(d.message || 'Selesai');
+                if (d.success) location.reload();
+            }).catch(function() {
+                alert('Gagal membuka kas.');
+            });
+        }
+
+        function tutupKas() {
+            var el = document.getElementById('kas-aktual');
+            var val = angka(el ? el.value : '');
+            if (val === '') {
+                alert('Kas aktual wajib diisi.');
+                return;
+            }
+            if (!confirm('Tutup kas hari ini?')) return;
+            postAction('tutup', {
+                kas_aktual: val,
+                catatan: (document.getElementById('catatan') || {}).value || ''
+            }).then(function(d) {
+                alert(d.message || 'Selesai');
+                if (!d.success) return;
+
+                // Ambil data terbaru hasil tutup kas (kas_aktual, total sales final, dll)
+                // supaya struk yang dicetak bukan data lama dari sebelum kas ditutup.
+                return postAction('detail', {
+                    id: d.id
+                }).then(function(detail) {
+                    if (detail && detail.success && detail.data) {
+                        var r = detail.data,
+                            s = detail.sales;
+                        KAS_RECEIPT = {
+                            operator: String(r.operator || '').toUpperCase(),
+                            tanggal: tglIdJs(r.closed_at || r.opened_at),
+                            status: String(r.status || '').toUpperCase(),
+                            kas_awal: Math.round(Number(r.kas_awal || 0)),
+                            total_sales: Math.round(Number(s.total_sales || 0)),
+                            kas_akhir: Math.round(Number(r.kas_akhir_sistem || 0)),
+                            kas_aktual: Math.round(Number(r.kas_aktual_display || 0)),
+                            total_tunai: Math.round(Number(s.total_tunai || 0)),
+                            total_nontunai: Math.round(Number(s.total_nontunai || 0)),
+                            selisih: Math.round(Number(r.selisih || 0)),
+                            margin: Math.round(Number(s.margin || 0)),
+                            fee_promosi: Math.round(Number(s.fee_promosi || 0)),
+                            total_struk: Math.round(Number(s.total_struk || 0))
+                        };
+                    }
+                    // Print dulu via Bluetooth, baru reload setelah proses cetak selesai/gagal.
+                    return cetakBluetooth().finally(function() {
+                        location.reload();
+                    });
+                });
+            }).catch(function() {
+                alert('Gagal menutup kas.');
+            });
+        }
+
+        function rupiahJs(n) {
+            n = Number(n || 0);
+            return 'Rp' + n.toLocaleString('id-ID', {
+                maximumFractionDigits: 0
+            });
+        }
+
+        function tglIdJs(str) {
+            if (!str) return '-';
+            var d = new Date(str.replace(' ', 'T'));
+            if (isNaN(d.getTime())) return str;
+            return d.toLocaleDateString('id-ID', {
+                weekday: 'long',
+                day: '2-digit',
+                month: 'long',
+                year: 'numeric'
+            }) + ' ' + d.toLocaleTimeString('id-ID', {
+                hour: '2-digit',
+                minute: '2-digit'
+            });
+        }
+
+        function bukaDetailKas(id) {
+            var overlay = document.getElementById('kasDetailOverlay');
+            var body = document.getElementById('kasDetailBody');
+            body.innerHTML = '<p class="text-xs text-gray-400 text-center py-6">Memuat...</p>';
+            overlay.classList.add('open');
+
+            postAction('detail', {
+                id: id
+            }).then(function(d) {
+                if (!d.success || !d.data) {
+                    body.innerHTML = '<p class="text-xs text-red-500 text-center py-6">' + (d.message || 'Data tidak ditemukan.') + '</p>';
+                    return;
+                }
+                var r = d.data,
+                    s = d.sales;
+                var selisih = Number(r.selisih || 0);
+                var rows = [
+                    ['Tanggal', tglIdJs(r.tanggal + ' 00:00:00').split(' ').slice(0, 4).join(' ')],
+                    ['Operator', r.operator || '-'],
+                    ['Status', (r.status || '-').toUpperCase()],
+                    ['Dibuka', tglIdJs(r.opened_at)],
+                    ['Ditutup', r.closed_at ? tglIdJs(r.closed_at) : '-'],
+                    ['Kas Awal', rupiahJs(r.kas_awal)],
+                    ['Total Sales', rupiahJs(s.total_sales)],
+                    ['Total Tunai', rupiahJs(s.total_tunai)],
+                    ['Total Non-Tunai', rupiahJs(s.total_nontunai)],
+                    ['Kas Akhir Sistem', rupiahJs(r.kas_akhir_sistem)],
+                    ['Kas Aktual', rupiahJs(r.kas_aktual_display)],
+                    ['Selisih', (selisih >= 0 ? '+' : '-') + rupiahJs(Math.abs(selisih))],
+                    ['Margin', rupiahJs(s.margin)],
+                    ['Fee Promosi', rupiahJs(s.fee_promosi)],
+                    ['Total Struk', Number(s.total_struk || 0).toLocaleString('id-ID')],
+                    ['Catatan', r.catatan ? r.catatan : '-']
+                ];
+                var html = rows.map(function(row) {
+                    return '<div class="modal-row"><span>' + row[0] + '</span><span>' + row[1] + '</span></div>';
+                }).join('');
+                body.innerHTML = html;
+            }).catch(function() {
+                body.innerHTML = '<p class="text-xs text-red-500 text-center py-6">Gagal memuat detail.</p>';
+            });
+        }
+
+        function tutupDetailKas() {
+            document.getElementById('kasDetailOverlay').classList.remove('open');
+        }
+    </script>
+
+    <!-- ════════════════════════════════════════════
+         WEB BLUETOOTH + ESC/POS ENGINE — Laporan Kas
+         Mengikuti pola yang sama dengan struk.php
+         ════════════════════════════════════════════ -->
+    <script>
+        'use strict';
+
+        var KAS_RECEIPT = <?php echo json_encode($kasReceiptData, JSON_UNESCAPED_UNICODE); ?>;
+
+        var KAS_BT_CONFIG = [{
+                service: '000018f0-0000-1000-8000-00805f9b34fb',
+                characteristic: '00002af1-0000-1000-8000-00805f9b34fb'
+            },
+            {
+                service: '49535343-fe7d-4ae5-8fa9-9fafd205e455',
+                characteristic: '49535343-8841-43f4-a8d4-ecbe34729bb3'
+            },
+            {
+                service: '6e400001-b5a3-f393-e0a9-e50e24dcca9e',
+                characteristic: '6e400002-b5a3-f393-e0a9-e50e24dcca9e'
+            }
+        ];
+
+        var KAS_STORAGE_KEY = 'bt_printer_id';
+        var KAS_ESC = 0x1B,
+            KAS_GS = 0x1D;
+        var KAS_CMD = {
+            init: [KAS_ESC, 0x40],
+            alignLeft: [KAS_ESC, 0x61, 0x00],
+            alignCenter: [KAS_ESC, 0x61, 0x01],
+            boldOn: [KAS_ESC, 0x45, 0x01],
+            boldOff: [KAS_ESC, 0x45, 0x00],
+            fontBig: [KAS_GS, 0x21, 0x11],
+            fontNormal: [KAS_GS, 0x21, 0x00],
+            feed: function(n) {
+                return [KAS_ESC, 0x64, n];
+            },
+            cut: [KAS_GS, 0x56, 0x41, 0x03]
+        };
+        var KAS_W = 32;
+
+        function kasFmt(n) {
+            return Number(n || 0).toLocaleString('id-ID');
+        }
+
+        function kasLr(l, r, w) {
+            var width = w || KAS_W,
+                ls = String(l),
+                rs = String(r);
+            var sp = Math.max(1, width - ls.length - rs.length);
+            return ls + ' '.repeat(sp) + rs;
+        }
+
+        function kasDash() {
+            return '-'.repeat(KAS_W);
+        }
+
+        function kasSolid() {
+            return '='.repeat(KAS_W);
+        }
+
+        function kasEnc(str) {
+            var out = [];
+            for (var i = 0; i < str.length; i++) {
+                var c = str.charCodeAt(i);
+                out.push(c < 256 ? c : 0x3F);
+            }
+            return out;
+        }
+
+        function buildKasEscPos() {
+            var buf = [];
+
+            function push(a) {
+                for (var i = 0; i < a.length; i++) buf.push(a[i]);
+            }
+
+            function text(s) {
+                push(kasEnc(s + '\n'));
+            }
+
+            function line(s) {
+                push(kasEnc(s));
+            }
+
+            var d = KAS_RECEIPT;
+
+            push(KAS_CMD.init);
+
+            /* HEADER */
+            push(KAS_CMD.alignCenter);
+            push(KAS_CMD.boldOn);
+            push(KAS_CMD.fontBig);
+            text('KOPERASI BSDK');
+            push(KAS_CMD.fontNormal);
+            push(KAS_CMD.boldOff);
+            text('LAPORAN SHIFT KAS');
+            push(KAS_CMD.alignLeft);
+
+            /* INFO */
+            line(kasDash() + '\n');
+            line(kasLr('Tanggal', d.tanggal) + '\n');
+            line(kasLr('Operator', String(d.operator).substring(0, 18)) + '\n');
+            line(kasLr('Status', d.status) + '\n');
+            line(kasDash() + '\n');
+
+            /* RINGKASAN KAS */
+            line(kasLr('Kas Awal', kasFmt(d.kas_awal)) + '\n');
+            line(kasLr('Total Sales', kasFmt(d.total_sales)) + '\n');
+            line(kasLr('  Tunai', kasFmt(d.total_tunai)) + '\n');
+            line(kasLr('  Non-Tunai', kasFmt(d.total_nontunai)) + '\n');
+            line(kasDash() + '\n');
+
+            push(KAS_CMD.boldOn);
+            line(kasLr('Kas Akhir (Sistem)', kasFmt(d.kas_akhir)) + '\n');
+            push(KAS_CMD.boldOff);
+            line(kasLr('Kas Aktual', kasFmt(d.kas_aktual)) + '\n');
+
+            var selisihLabel = (d.selisih >= 0 ? '+' : '-') + kasFmt(Math.abs(d.selisih));
+            push(KAS_CMD.boldOn);
+            line(kasLr('Selisih', selisihLabel) + '\n');
+            push(KAS_CMD.boldOff);
+
+            line(kasSolid() + '\n');
+            line(kasLr('Margin', kasFmt(d.margin)) + '\n');
+            line(kasLr('Fee Promosi', kasFmt(d.fee_promosi)) + '\n');
+            line(kasLr('Total Struk', kasFmt(d.total_struk)) + '\n');
+
+            /* FOOTER */
+            line(kasDash() + '\n');
+            push(KAS_CMD.alignCenter);
+            text('TMI KOPERASI KONSUMEN PRIMER');
+            text('BSDK SEJAHTERA');
+            push(KAS_CMD.alignLeft);
+            push(KAS_CMD.feed(5));
+            push(KAS_CMD.cut);
+
+            return new Uint8Array(buf);
+        }
+
+        function kasSetStatus(msg, type) {
+            var el = document.getElementById('kasStatusBar');
+            if (!el) return;
+            el.textContent = msg;
+            el.className = 'no-print ' + (type || 'info');
+            el.style.display = 'block';
+            if (type === 'success') {
+                setTimeout(function() {
+                    el.style.display = 'none';
+                    el.className = 'no-print';
+                }, 3500);
+            }
+        }
+
+        function kasSendData(characteristic, data) {
+            var CHUNK = 100;
+            var chain = Promise.resolve();
+            for (var pos = 0; pos < data.length; pos += CHUNK) {
+                (function(slice) {
+                    chain = chain
+                        .then(function() {
+                            return characteristic.writeValueWithoutResponse(slice);
+                        })
+                        .then(function() {
+                            return new Promise(function(r) {
+                                setTimeout(r, 60);
+                            });
+                        });
+                })(data.slice(pos, pos + CHUNK));
+            }
+            return chain;
+        }
+
+        function kasConnectAndPrint(device) {
+            kasSetStatus('Menghubungkan ke ' + device.name + '...', 'info');
+            return device.gatt.connect().then(function(server) {
+                var tryUUID = function(idx) {
+                    if (idx >= KAS_BT_CONFIG.length) return Promise.reject(new Error('UUID printer tidak cocok. Cek dengan nRF Connect.'));
+                    return server.getPrimaryService(KAS_BT_CONFIG[idx].service)
+                        .then(function(svc) {
+                            return svc.getCharacteristic(KAS_BT_CONFIG[idx].characteristic);
+                        })
+                        .catch(function() {
+                            return tryUUID(idx + 1);
+                        });
+                };
+                return tryUUID(0).then(function(characteristic) {
+                    kasSetStatus('Mengirim laporan...', 'info');
+                    return kasSendData(characteristic, buildKasEscPos()).then(function() {
+                        kasSetStatus('Laporan terkirim ke ' + device.name + '!', 'success');
+                        try {
+                            server.disconnect();
+                        } catch (e) {}
+                    });
+                });
+            });
+        }
+
+        function cetakBluetooth() {
+            if (!navigator.bluetooth) {
+                var notice = document.getElementById('kasHttpsNotice');
+                if (!window.isSecureContext) {
+                    if (notice) notice.style.display = 'block';
+                    kasSetStatus('Web Bluetooth butuh HTTPS. Lihat panduan di bawah.', 'error');
+                } else {
+                    kasSetStatus('Browser tidak mendukung Bluetooth. Gunakan Chrome/Edge.', 'error');
+                }
+                return Promise.resolve();
+            }
+
+            var btns = [document.getElementById('btnBluetoothKas'), document.getElementById('btnBluetoothKas2')];
+            btns.forEach(function(b) {
+                if (b) b.disabled = true;
+            });
+            kasSetStatus('Mencari printer...', 'info');
+
+            return navigator.bluetooth.requestDevice({
+                    acceptAllDevices: true,
+                    optionalServices: KAS_BT_CONFIG.map(function(c) {
+                        return c.service;
+                    })
+                })
+                .then(function(device) {
+                    try {
+                        localStorage.setItem(KAS_STORAGE_KEY, device.name || '');
+                    } catch (e) {}
+                    return kasConnectAndPrint(device);
+                })
+                .catch(function(err) {
+                    if (err.name === 'NotFoundError') {
+                        kasSetStatus('Tidak ada printer dipilih.', 'info');
+                    } else if (err.name === 'SecurityError') {
+                        var n = document.getElementById('kasHttpsNotice');
+                        if (n) n.style.display = 'block';
+                        kasSetStatus('Bluetooth diblokir. Lihat panduan di bawah.', 'error');
+                    } else {
+                        kasSetStatus('Gagal: ' + err.message, 'error');
+                    }
+                })
+                .finally(function() {
+                    btns.forEach(function(b) {
+                        if (b) b.disabled = false;
+                    });
+                });
+        }
+    </script>
+</body>
+
+</html>
