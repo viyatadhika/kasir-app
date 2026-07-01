@@ -70,6 +70,103 @@ if (!function_exists('waktu')) {
     }
 }
 
+
+if (!function_exists('stok_build_url')) {
+    /** @param array<string,mixed> $override */
+    function stok_build_url(array $override = []): string
+    {
+        $params = $_GET;
+        foreach ($override as $k => $v) {
+            if ($v === null || $v === '') {
+                unset($params[$k]);
+            } else {
+                $params[$k] = $v;
+            }
+        }
+        $query = http_build_query($params);
+        return 'stok_opname.php' . ($query ? '?' . $query : '');
+    }
+}
+
+if (!function_exists('stok_limit_safe')) {
+    /**
+     * @param mixed $value
+     * @param int $default
+     * @return int
+     */
+    function stok_limit_safe($value, int $default = 25): int
+    {
+        $allowed = [10, 25, 50, 100, 200];
+        $value = (int)$value;
+        return in_array($value, $allowed, true) ? $value : $default;
+    }
+}
+
+if (!function_exists('stok_page_safe')) {
+    /**
+     * @param mixed $value
+     * @return int
+     */
+    function stok_page_safe($value): int
+    {
+        return max(1, (int)$value);
+    }
+}
+
+if (!function_exists('stok_render_pagination')) {
+    /** @param string $pageKey @param string $limitKey */
+    function stok_render_pagination(int $page, int $totalPages, int $totalRows, int $limit, string $pageKey, string $limitKey): string
+    {
+        if ($totalPages <= 1 && $totalRows <= $limit) {
+            return '';
+        }
+
+        $page = max(1, min($page, max(1, $totalPages)));
+        $start = $totalRows > 0 ? (($page - 1) * $limit) + 1 : 0;
+        $end = min($totalRows, $page * $limit);
+        $html = '<div class="pagination-wrap px-4 py-3 border-t border-subtle bg-white flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">';
+        $html .= '<p class="text-[10px] font-bold uppercase tracking-widest text-gray-400">Menampilkan ' . angka($start) . ' - ' . angka($end) . ' dari ' . angka($totalRows) . ' data</p>';
+        $html .= '<div class="pagination-buttons flex items-center gap-2 overflow-x-auto no-scrollbar">';
+
+        $prevDisabled = $page <= 1;
+        $nextDisabled = $page >= $totalPages;
+        $baseCls = 'inline-flex items-center justify-center min-w-[34px] h-9 px-3 border text-[10px] font-black uppercase tracking-widest';
+
+        if ($prevDisabled) {
+            $html .= '<span class="' . $baseCls . ' border-gray-100 text-gray-300 bg-gray-50">&lt;</span>';
+        } else {
+            $html .= '<a class="' . $baseCls . ' border-gray-200 text-gray-600 hover:bg-gray-50" href="' . h(stok_build_url([$pageKey => $page - 1])) . '">&lt;</a>';
+        }
+
+        $from = max(1, $page - 2);
+        $to = min($totalPages, $page + 2);
+        if ($from > 1) {
+            $html .= '<a class="' . $baseCls . ' border-gray-200 text-gray-600 hover:bg-gray-50" href="' . h(stok_build_url([$pageKey => 1])) . '">1</a>';
+            if ($from > 2) $html .= '<span class="' . $baseCls . ' border-transparent text-gray-300">...</span>';
+        }
+        for ($i = $from; $i <= $to; $i++) {
+            if ($i === $page) {
+                $html .= '<span class="' . $baseCls . ' border-black bg-black text-white">' . $i . '</span>';
+            } else {
+                $html .= '<a class="' . $baseCls . ' border-gray-200 text-gray-600 hover:bg-gray-50" href="' . h(stok_build_url([$pageKey => $i])) . '">' . $i . '</a>';
+            }
+        }
+        if ($to < $totalPages) {
+            if ($to < $totalPages - 1) $html .= '<span class="' . $baseCls . ' border-transparent text-gray-300">...</span>';
+            $html .= '<a class="' . $baseCls . ' border-gray-200 text-gray-600 hover:bg-gray-50" href="' . h(stok_build_url([$pageKey => $totalPages])) . '">' . $totalPages . '</a>';
+        }
+
+        if ($nextDisabled) {
+            $html .= '<span class="' . $baseCls . ' border-gray-100 text-gray-300 bg-gray-50">&gt;</span>';
+        } else {
+            $html .= '<a class="' . $baseCls . ' border-gray-200 text-gray-600 hover:bg-gray-50" href="' . h(stok_build_url([$pageKey => $page + 1])) . '">&gt;</a>';
+        }
+
+        $html .= '</div></div>';
+        return $html;
+    }
+}
+
 function ensure_stok_opname_tables(PDO $pdo): void
 {
     $pdo->exec("
@@ -121,6 +218,19 @@ $success = '';
 $q = trim($_GET['q'] ?? '');
 $kategoriFilter = trim($_GET['kategori'] ?? '');
 $statusFilter = $_GET['status'] ?? 'aktif';
+
+// Pagination server-side
+$produkPage  = stok_page_safe($_GET['produk_page'] ?? 1);
+$produkLimit = stok_limit_safe($_GET['produk_limit'] ?? 25, 25);
+$produkOffset = ($produkPage - 1) * $produkLimit;
+$produkTotalRows = 0;
+$produkTotalPages = 1;
+
+$riwayatPage  = stok_page_safe($_GET['riwayat_page'] ?? 1);
+$riwayatLimit = stok_limit_safe($_GET['riwayat_limit'] ?? 10, 10);
+$riwayatOffset = ($riwayatPage - 1) * $riwayatLimit;
+$riwayatTotalRows = 0;
+$riwayatTotalPages = 1;
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $produkIds = $_POST['produk_id'] ?? [];
@@ -331,6 +441,19 @@ try {
 
     $whereSql = $where ? 'WHERE ' . implode(' AND ', $where) : '';
 
+    $stmtProdukCount = $pdo->prepare("
+        SELECT COUNT(*)
+        FROM produk
+        $whereSql
+    ");
+    $stmtProdukCount->execute($params);
+    $produkTotalRows = (int)$stmtProdukCount->fetchColumn();
+    $produkTotalPages = max(1, (int)ceil($produkTotalRows / $produkLimit));
+    if ($produkPage > $produkTotalPages) {
+        $produkPage = $produkTotalPages;
+        $produkOffset = ($produkPage - 1) * $produkLimit;
+    }
+
     $stmtProduk = $pdo->prepare("
         SELECT id, kode, nama, kategori, harga_beli, harga_jual, stok, stok_minimum, satuan, status
         FROM produk
@@ -338,12 +461,25 @@ try {
         ORDER BY
             CASE WHEN stok <= stok_minimum THEN 0 ELSE 1 END,
             nama ASC
-        LIMIT 150
+        LIMIT :limit OFFSET :offset
     ");
-    $stmtProduk->execute($params);
+    foreach ($params as $key => $value) {
+        $stmtProduk->bindValue($key, $value);
+    }
+    $stmtProduk->bindValue(':limit', $produkLimit, PDO::PARAM_INT);
+    $stmtProduk->bindValue(':offset', $produkOffset, PDO::PARAM_INT);
+    $stmtProduk->execute();
     $produk = $stmtProduk->fetchAll(PDO::FETCH_ASSOC);
 
-    $stmtRiwayat = $pdo->query("
+    $stmtRiwayatCount = $pdo->query("SELECT COUNT(*) FROM stok_opname");
+    $riwayatTotalRows = (int)$stmtRiwayatCount->fetchColumn();
+    $riwayatTotalPages = max(1, (int)ceil($riwayatTotalRows / $riwayatLimit));
+    if ($riwayatPage > $riwayatTotalPages) {
+        $riwayatPage = $riwayatTotalPages;
+        $riwayatOffset = ($riwayatPage - 1) * $riwayatLimit;
+    }
+
+    $stmtRiwayat = $pdo->prepare("
         SELECT
             id,
             kode,
@@ -354,8 +490,11 @@ try {
             catatan
         FROM stok_opname
         ORDER BY tanggal DESC, id DESC
-        LIMIT 20
+        LIMIT :limit OFFSET :offset
     ");
+    $stmtRiwayat->bindValue(':limit', $riwayatLimit, PDO::PARAM_INT);
+    $stmtRiwayat->bindValue(':offset', $riwayatOffset, PDO::PARAM_INT);
+    $stmtRiwayat->execute();
     $riwayat = $stmtRiwayat->fetchAll(PDO::FETCH_ASSOC);
 } catch (Throwable $e) {
     $error = $error ?: 'Gagal memuat data stok opname: ' . $e->getMessage();
@@ -502,9 +641,46 @@ catat_view_once($pdo, 'Stok Opname', 'Membuka halaman Stok Opname');
             }
         }
 
+
+        @media (max-width: 1023px) {
+            .stok-filter-form {
+                grid-template-columns: repeat(2, minmax(0, 1fr));
+                gap: .75rem;
+            }
+
+            .stok-filter-form>div:first-child,
+            .stok-filter-actions {
+                grid-column: 1 / -1;
+            }
+
+            .stok-form-header>div,
+            .stok-form-header button {
+                width: 100%;
+            }
+
+            .stok-form-header button {
+                justify-content: center;
+            }
+
+            .pagination-wrap {
+                align-items: stretch;
+            }
+
+            .pagination-buttons a,
+            .pagination-buttons span {
+                flex: 0 0 auto;
+            }
+        }
+
         @media (max-width: 640px) {
+            .stok-filter-form {
+                grid-template-columns: 1fr;
+            }
+
             .card-list {
                 grid-template-columns: 1fr;
+                padding: .625rem;
+                gap: .625rem;
             }
 
             .stok-main {
@@ -517,6 +693,298 @@ catat_view_once($pdo, 'Stok Opname', 'Membuka halaman Stok Opname');
                 overflow: hidden;
                 white-space: nowrap;
                 text-overflow: ellipsis;
+            }
+        }
+
+
+        .stok-main input,
+        .stok-main select,
+        .stok-main textarea,
+        .stok-main button,
+        .stok-main a {
+            border-radius: 0 !important;
+        }
+
+        .stok-filter-form {
+            display: grid;
+            grid-template-columns: minmax(220px, 2fr) minmax(160px, 1fr) minmax(140px, 1fr) minmax(140px, 1fr) auto auto;
+            gap: .75rem;
+            align-items: end;
+        }
+
+        .stok-form-header {
+            gap: .75rem;
+        }
+
+        .stok-save-mobile-bar {
+            display: none;
+        }
+
+        .stok-section-card {
+            background: #fff;
+            border: 1px solid #f0f0f0;
+        }
+
+        .stok-mobile-title {
+            line-height: 1.25;
+        }
+
+        .pagination-wrap {
+            overflow: hidden;
+        }
+
+        .pagination-buttons {
+            max-width: 100%;
+            padding-bottom: 2px;
+        }
+
+        .card-item input,
+        .card-item textarea {
+            font-size: 16px;
+        }
+
+        @media (max-width: 1279px) and (min-width: 1024px) {
+            .stok-filter-form {
+                grid-template-columns: repeat(4, minmax(0, 1fr));
+            }
+
+            .stok-filter-actions {
+                grid-column: span 2 / span 2;
+            }
+        }
+
+
+        @media (max-width: 640px) {
+            .stok-riwayat-limit-form {
+                width: 100%;
+                display: grid;
+                grid-template-columns: 1fr auto;
+            }
+
+            .stok-riwayat-limit-form select {
+                width: 100%;
+            }
+        }
+
+
+        /* ── Responsive polish: tablet and mobile ───────────────────── */
+        @media (max-width: 1023px) {
+            .stok-main {
+                gap: .875rem !important;
+            }
+
+            .stok-main>.grid:first-of-type {
+                grid-template-columns: repeat(3, minmax(0, 1fr));
+                gap: .625rem !important;
+            }
+
+            .stok-main>.grid:first-of-type>div {
+                padding: .875rem !important;
+                min-height: 92px;
+                display: flex;
+                flex-direction: column;
+                justify-content: space-between;
+            }
+
+            .stok-main>.grid:first-of-type p:first-child {
+                font-size: 9px !important;
+                line-height: 1.2;
+            }
+
+            .stok-main>.grid:first-of-type p:nth-child(2) {
+                font-size: 20px !important;
+                line-height: 1.15;
+            }
+
+            .stok-filter-form {
+                grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+            }
+
+            .stok-filter-form>div:first-child {
+                grid-column: 1 / -1;
+            }
+
+            .stok-filter-form button,
+            .stok-filter-form a {
+                width: 100%;
+                min-height: 44px;
+                display: inline-flex;
+                align-items: center;
+                justify-content: center;
+            }
+
+            .stok-form-header {
+                padding: 1rem !important;
+                align-items: stretch !important;
+            }
+
+            .stok-form-header button {
+                min-height: 44px;
+            }
+
+            .card-list {
+                grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+                gap: .875rem !important;
+                padding: .875rem !important;
+                background: #f8fafc !important;
+            }
+
+            .card-item {
+                border-color: #e5e7eb !important;
+                padding: 1rem !important;
+                min-width: 0;
+            }
+
+            .card-item p,
+            .card-item div {
+                min-width: 0;
+            }
+
+            .card-item input,
+            .card-item textarea,
+            .stok-main input,
+            .stok-main select,
+            .stok-main textarea {
+                min-height: 44px;
+            }
+
+            .pagination-wrap {
+                padding: .875rem !important;
+                background: #fff !important;
+            }
+
+            .pagination-buttons {
+                display: flex;
+                overflow-x: auto;
+                -webkit-overflow-scrolling: touch;
+                scrollbar-width: none;
+                gap: .4rem;
+                width: 100%;
+            }
+
+            .pagination-buttons::-webkit-scrollbar {
+                display: none;
+            }
+
+            .pagination-buttons a,
+            .pagination-buttons span {
+                min-width: 38px;
+                min-height: 38px;
+                display: inline-flex;
+                align-items: center;
+                justify-content: center;
+                white-space: nowrap;
+            }
+
+            .stok-riwayat-limit-form {
+                width: 100%;
+                display: grid;
+                grid-template-columns: 1fr;
+                gap: .5rem;
+            }
+        }
+
+        @media (min-width: 641px) and (max-width: 1023px) {
+            .stok-main {
+                padding: 1rem !important;
+                padding-bottom: 6rem !important;
+            }
+
+            .stok-main>section,
+            #form-opname,
+            .stok-main>section.bg-white {
+                border-color: #e5e7eb !important;
+            }
+
+            .card-item .grid.grid-cols-2 {
+                gap: .75rem !important;
+            }
+        }
+
+        @media (max-width: 640px) {
+            body {
+                background: #f8fafc !important;
+            }
+
+            .stok-main {
+                padding: .625rem !important;
+                padding-bottom: 6.75rem !important;
+                gap: .75rem !important;
+            }
+
+            .stok-main>.grid:first-of-type {
+                grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+                gap: .5rem !important;
+            }
+
+            .stok-main>.grid:first-of-type>div {
+                padding: .75rem !important;
+                min-height: 86px;
+            }
+
+            .stok-main>.grid:first-of-type p:nth-child(2) {
+                font-size: 18px !important;
+                word-break: break-word;
+            }
+
+            .stok-filter-form {
+                grid-template-columns: 1fr !important;
+                gap: .625rem !important;
+            }
+
+            .stok-filter-form>* {
+                grid-column: auto !important;
+            }
+
+            .card-list {
+                grid-template-columns: 1fr !important;
+                padding: .625rem !important;
+                gap: .625rem !important;
+                background: #f8fafc !important;
+            }
+
+            .card-item {
+                padding: .875rem !important;
+            }
+
+            .card-item .flex.items-start.justify-between {
+                gap: .75rem !important;
+            }
+
+            .card-item .grid.grid-cols-2 {
+                grid-template-columns: repeat(2, minmax(0, 1fr));
+            }
+
+            .card-item .grid.grid-cols-2>div {
+                background: #f9fafb;
+                border: 1px solid #f0f0f0;
+                padding: .625rem;
+            }
+
+            .stok-save-mobile-bar {
+                display: block !important;
+                position: sticky;
+                bottom: 0;
+                z-index: 30;
+                box-shadow: 0 -8px 20px rgba(15, 23, 42, .08);
+            }
+
+            .stok-form-header button.hidden.sm\:inline-flex {
+                display: none !important;
+            }
+
+            .pagination-wrap {
+                flex-direction: column !important;
+                align-items: stretch !important;
+            }
+
+            .pagination-wrap>span,
+            .pagination-wrap>div:first-child {
+                text-align: center;
+            }
+
+            .stok-riwayat-limit-form {
+                grid-template-columns: 1fr !important;
             }
         }
 
@@ -600,7 +1068,7 @@ catat_view_once($pdo, 'Stok Opname', 'Membuka halaman Stok Opname');
             </div>
 
             <section class="bg-white border border-subtle p-4">
-                <form method="GET" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-[2fr_1fr_1fr_auto_auto] gap-3 items-end">
+                <form method="GET" class="stok-filter-form">
                     <div>
                         <label class="block text-[10px] font-bold uppercase tracking-widest text-gray-400 mb-1.5">Cari Produk</label>
                         <input type="text" name="q" value="<?= h($q) ?>" class="w-full bg-gray-50 border border-gray-100 px-3 py-2.5 text-sm transition-all" placeholder="Nama / kode / kategori">
@@ -627,6 +1095,19 @@ catat_view_once($pdo, 'Stok Opname', 'Membuka halaman Stok Opname');
                         </select>
                     </div>
 
+                    <div>
+                        <label class="block text-[10px] font-bold uppercase tracking-widest text-gray-400 mb-1.5">Tampil Produk</label>
+                        <select name="produk_limit" class="w-full bg-gray-50 border border-gray-100 px-3 py-2.5 text-sm transition-all">
+                            <?php foreach ([10, 25, 50, 100, 200] as $limitOpt): ?>
+                                <option value="<?= $limitOpt ?>" <?= $produkLimit === $limitOpt ? 'selected' : '' ?>><?= $limitOpt ?> Data</option>
+                            <?php endforeach; ?>
+                        </select>
+                    </div>
+
+                    <input type="hidden" name="produk_page" value="1">
+                    <input type="hidden" name="riwayat_page" value="<?= (int)$riwayatPage ?>">
+                    <input type="hidden" name="riwayat_limit" value="<?= (int)$riwayatLimit ?>">
+
                     <button type="submit" class="px-5 py-2.5 bg-black text-white text-[10px] font-black uppercase tracking-widest hover:bg-gray-800 transition-all">
                         Tampilkan
                     </button>
@@ -638,10 +1119,10 @@ catat_view_once($pdo, 'Stok Opname', 'Membuka halaman Stok Opname');
             </section>
 
             <form method="POST" id="form-opname" class="bg-white border border-subtle overflow-hidden">
-                <div class="px-5 py-4 border-b border-subtle flex items-center justify-between gap-3">
+                <div class="stok-form-header px-5 py-4 border-b border-subtle flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
                     <div>
                         <h2 class="text-[10px] font-bold uppercase tracking-widest text-gray-400">Form Stok Opname</h2>
-                        <p class="text-xs text-gray-400 mt-0.5"><?= angka(count($produk)) ?> produk ditampilkan. Isi stok fisik hanya untuk produk yang dicek.</p>
+                        <p class="text-xs text-gray-400 mt-0.5"><?= angka(count($produk)) ?> dari <?= angka($produkTotalRows) ?> produk ditampilkan. Isi stok fisik hanya untuk produk yang dicek pada halaman ini.</p>
                     </div>
 
                     <button type="submit" onclick="return confirm('Simpan stok opname dan update stok produk?')" class="hidden sm:inline-flex px-5 py-2.5 bg-black text-white text-[10px] font-black uppercase tracking-widest hover:bg-gray-800">
@@ -790,20 +1271,41 @@ catat_view_once($pdo, 'Stok Opname', 'Membuka halaman Stok Opname');
                     <?php endforeach; ?>
                 </div>
 
+                <?= stok_render_pagination($produkPage, $produkTotalPages, $produkTotalRows, $produkLimit, 'produk_page', 'produk_limit') ?>
+
                 <div class="p-4 border-t border-subtle bg-gray-50">
                     <label class="block text-[10px] font-bold uppercase tracking-widest text-gray-400 mb-1.5">Catatan Opname</label>
                     <textarea name="catatan" rows="3" class="w-full bg-white border border-gray-100 px-3 py-2.5 text-sm transition-all" placeholder="Opsional, contoh: stok opname akhir bulan"></textarea>
 
-                    <button type="submit" onclick="return confirm('Simpan stok opname dan update stok produk?')" class="mt-3 w-full sm:hidden px-5 py-3 bg-black text-white text-[10px] font-black uppercase tracking-widest hover:bg-gray-800">
+                    <button type="submit" onclick="return confirm('Simpan stok opname dan update stok produk?')" class="stok-save-mobile-bar mt-3 w-full sm:hidden px-5 py-3 bg-black text-white text-[10px] font-black uppercase tracking-widest hover:bg-gray-800">
                         Simpan Opname
                     </button>
                 </div>
             </form>
 
             <section class="bg-white border border-subtle overflow-hidden">
-                <div class="px-5 py-4 border-b border-subtle">
-                    <h2 class="text-[10px] font-bold uppercase tracking-widest text-gray-400">Riwayat Stok Opname</h2>
-                    <p class="text-xs text-gray-400 mt-0.5">20 opname terakhir</p>
+                <div class="px-5 py-4 border-b border-subtle flex flex-col md:flex-row md:items-end md:justify-between gap-3">
+                    <div>
+                        <h2 class="text-[10px] font-bold uppercase tracking-widest text-gray-400">Riwayat Stok Opname</h2>
+                        <p class="text-xs text-gray-400 mt-0.5"><?= angka(count($riwayat)) ?> dari <?= angka($riwayatTotalRows) ?> riwayat ditampilkan</p>
+                    </div>
+                    <form method="GET" class="stok-riwayat-limit-form flex items-end gap-2">
+                        <input type="hidden" name="q" value="<?= h($q) ?>">
+                        <input type="hidden" name="kategori" value="<?= h($kategoriFilter) ?>">
+                        <input type="hidden" name="status" value="<?= h($statusFilter) ?>">
+                        <input type="hidden" name="produk_page" value="<?= (int)$produkPage ?>">
+                        <input type="hidden" name="produk_limit" value="<?= (int)$produkLimit ?>">
+                        <input type="hidden" name="riwayat_page" value="1">
+                        <div>
+                            <label class="block text-[10px] font-bold uppercase tracking-widest text-gray-400 mb-1.5">Tampil</label>
+                            <select name="riwayat_limit" class="bg-gray-50 border border-gray-100 px-3 py-2.5 text-sm transition-all">
+                                <?php foreach ([10, 25, 50, 100, 200] as $limitOpt): ?>
+                                    <option value="<?= $limitOpt ?>" <?= $riwayatLimit === $limitOpt ? 'selected' : '' ?>><?= $limitOpt ?></option>
+                                <?php endforeach; ?>
+                            </select>
+                        </div>
+                        <button type="submit" class="px-4 py-2.5 bg-black text-white text-[10px] font-black uppercase tracking-widest">OK</button>
+                    </form>
                 </div>
 
                 <div class="tbl-desktop overflow-x-auto no-scrollbar">
@@ -884,6 +1386,8 @@ catat_view_once($pdo, 'Stok Opname', 'Membuka halaman Stok Opname');
                         </div>
                     <?php endforeach; ?>
                 </div>
+
+                <?= stok_render_pagination($riwayatPage, $riwayatTotalPages, $riwayatTotalRows, $riwayatLimit, 'riwayat_page', 'riwayat_limit') ?>
             </section>
 
         </main>
@@ -913,6 +1417,32 @@ catat_view_once($pdo, 'Stok Opname', 'Membuka halaman Stok Opname');
     </nav> -->
 
     <script>
+        function stokSyncResponsiveInputs() {
+            var form = document.getElementById('form-opname');
+            if (!form) return;
+            var isDesktop = window.matchMedia('(min-width: 1024px)').matches;
+            var desktopInputs = form.querySelectorAll('.tbl-desktop input, .tbl-desktop textarea, .tbl-desktop select');
+            var mobileInputs = form.querySelectorAll('.card-list input, .card-list textarea, .card-list select');
+
+            desktopInputs.forEach(function(el) {
+                el.disabled = !isDesktop;
+            });
+            mobileInputs.forEach(function(el) {
+                el.disabled = isDesktop;
+            });
+        }
+
+        document.addEventListener('DOMContentLoaded', function() {
+            stokSyncResponsiveInputs();
+            window.addEventListener('resize', stokSyncResponsiveInputs);
+            var form = document.getElementById('form-opname');
+            if (form) {
+                form.addEventListener('submit', function() {
+                    stokSyncResponsiveInputs();
+                });
+            }
+        });
+
         function toggleMobileMenu() {
             const overlay = document.getElementById('mobileMenuOverlay');
             const content = document.getElementById('mobileMenuContent');

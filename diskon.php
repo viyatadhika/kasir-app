@@ -342,6 +342,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 $q             = trim(isset($_GET['q'])       ? $_GET['q']       : '');
 $filterStatus  = isset($_GET['status'])        ? diskon_status_norm($_GET['status'])  : '';
 $filterCakupan = isset($_GET['cakupan'])       ? $_GET['cakupan'] : '';
+$page          = max(1, (int)(isset($_GET['page']) ? $_GET['page'] : 1));
+$allowedLimit  = [10, 15, 25, 50, 100];
+$limit         = (int)(isset($_GET['limit']) ? $_GET['limit'] : 15);
+if (!in_array($limit, $allowedLimit, true)) {
+    $limit = 15;
+}
+$offset        = ($page - 1) * $limit;
 $where         = [];
 $params        = [];
 
@@ -359,12 +366,28 @@ if (in_array($filterCakupan, ['transaksi', 'produk', 'kategori'], true)) {
 }
 
 $sqlWhere = $where ? 'WHERE ' . implode(' AND ', $where) : '';
-$stmt     = $pdo->prepare("
+
+$stmtCount = $pdo->prepare("
+    SELECT COUNT(*)
+    FROM diskon d
+    LEFT JOIN produk p ON p.id = d.produk_id
+    $sqlWhere
+");
+$stmtCount->execute($params);
+$totalRows  = (int)$stmtCount->fetchColumn();
+$totalPages = max(1, (int)ceil($totalRows / $limit));
+if ($page > $totalPages) {
+    $page = $totalPages;
+    $offset = ($page - 1) * $limit;
+}
+
+$stmt = $pdo->prepare("
     SELECT d.*, p.kode AS produk_kode, p.nama AS produk_nama
     FROM diskon d
     LEFT JOIN produk p ON p.id = d.produk_id
     $sqlWhere
     ORDER BY CASE WHEN LOWER(TRIM(COALESCE(d.status,''))) IN ('aktif','active','1','true','yes','on') THEN 0 ELSE 1 END ASC, d.id DESC
+    LIMIT $limit OFFSET $offset
 ");
 $stmt->execute($params);
 $diskonList = $stmt->fetchAll(PDO::FETCH_ASSOC);
@@ -518,7 +541,33 @@ $rightActionHtml = '
             }
         }
 
+        @media (min-width: 641px) and (max-width: 1023px) {
+            .diskon-main {
+                padding-left: 1.25rem !important;
+                padding-right: 1.25rem !important;
+            }
+
+            .diskon-mobile-card {
+                min-height: 100%;
+            }
+        }
+
         @media (max-width: 640px) {
+            .diskon-main {
+                padding-left: .75rem !important;
+                padding-right: .75rem !important;
+            }
+
+            .filter-card {
+                gap: .6rem !important;
+            }
+
+            .filter-card select,
+            .filter-card input,
+            .filter-card button {
+                width: 100%;
+            }
+
             #toast {
                 left: 1rem;
                 right: 1rem;
@@ -618,8 +667,13 @@ $rightActionHtml = '
                 <option value="aktif" <?php echo $filterStatus === 'aktif'    ? 'selected' : ''; ?>>Aktif</option>
                 <option value="nonaktif" <?php echo $filterStatus === 'nonaktif' ? 'selected' : ''; ?>>Nonaktif</option>
             </select>
+            <select id="filter-limit" class="bg-gray-50 border border-gray-100 px-3 py-2.5 text-xs font-bold uppercase text-gray-500 focus:bg-white transition-all">
+                <?php foreach ($allowedLimit as $optLimit): ?>
+                    <option value="<?php echo (int)$optLimit; ?>" <?php echo $limit === (int)$optLimit ? 'selected' : ''; ?>><?php echo (int)$optLimit; ?> / halaman</option>
+                <?php endforeach; ?>
+            </select>
             <span class="text-xs text-gray-400 font-medium ml-auto hidden sm:block">
-                <?php echo number_format(count($diskonList)); ?> diskon ditemukan
+                <?php echo number_format($totalRows); ?> diskon ditemukan
             </span>
         </div>
 
@@ -672,7 +726,7 @@ $rightActionHtml = '
                                 $nilaiLabel = $d['jenis'] === 'persen' ? ((int)$d['nilai']) . '%' : rupiah_diskon($d['nilai']);
                             ?>
                                 <tr class="group">
-                                    <td class="px-5 py-4 text-[11px] text-gray-300 font-medium"><?php echo $i + 1; ?></td>
+                                    <td class="px-5 py-4 text-[11px] text-gray-300 font-medium"><?php echo $offset + $i + 1; ?></td>
                                     <td class="px-5 py-4">
                                         <div class="font-semibold text-sm leading-tight"><?php echo h($d['nama']); ?></div>
                                         <div class="text-[10px] text-gray-400 font-mono mt-0.5">ID #<?php echo (int)$d['id']; ?> &middot; Promo Umum</div>
@@ -775,7 +829,7 @@ $rightActionHtml = '
                                 <div class="flex items-start justify-between gap-3 mb-3">
                                     <div class="min-w-0">
                                         <div class="flex items-center gap-2 mb-1">
-                                            <span class="text-[10px] text-gray-300 font-bold">#<?php echo $i + 1; ?></span>
+                                            <span class="text-[10px] text-gray-300 font-bold">#<?php echo $offset + $i + 1; ?></span>
                                             <span class="text-[10px] font-bold uppercase tracking-wide px-2 py-0.5 <?php echo $cakupanBadge; ?>">
                                                 <?php echo $cakupanTag; ?>
                                             </span>
@@ -827,6 +881,41 @@ $rightActionHtml = '
                     </div>
                 <?php endif; ?>
             </div>
+
+            <!-- Pagination -->
+            <?php if ($totalPages > 1): ?>
+                <div class="px-4 md:px-5 py-4 border-t border-subtle flex flex-col sm:flex-row gap-3 sm:items-center sm:justify-between bg-gray-50">
+                    <span class="text-xs text-gray-400">
+                        Halaman <?php echo number_format($page); ?> dari <?php echo number_format($totalPages); ?> (<?php echo number_format($totalRows); ?> total)
+                    </span>
+                    <div class="flex flex-wrap gap-2">
+                        <?php
+                        $queryBase = [
+                            'q' => $q,
+                            'cakupan' => $filterCakupan,
+                            'status' => $filterStatus,
+                            'limit' => $limit,
+                        ];
+                        ?>
+                        <?php if ($page > 1): ?>
+                            <?php $queryBase['page'] = $page - 1; ?>
+                            <a href="?<?php echo h(http_build_query($queryBase)); ?>" class="px-3 py-1.5 text-xs font-bold border border-subtle hover:bg-white transition-all">&larr; Prev</a>
+                        <?php endif; ?>
+
+                        <?php for ($pg = max(1, $page - 2); $pg <= min($totalPages, $page + 2); $pg++): ?>
+                            <?php $queryBase['page'] = $pg; ?>
+                            <a href="?<?php echo h(http_build_query($queryBase)); ?>" class="px-3 py-1.5 text-xs font-bold transition-all <?php echo $pg === $page ? 'bg-black text-white' : 'border border-subtle hover:bg-white'; ?>">
+                                <?php echo number_format($pg); ?>
+                            </a>
+                        <?php endfor; ?>
+
+                        <?php if ($page < $totalPages): ?>
+                            <?php $queryBase['page'] = $page + 1; ?>
+                            <a href="?<?php echo h(http_build_query($queryBase)); ?>" class="px-3 py-1.5 text-xs font-bold border border-subtle hover:bg-white transition-all">Next &rarr;</a>
+                        <?php endif; ?>
+                    </div>
+                </div>
+            <?php endif; ?>
 
         </div>
 
@@ -972,12 +1061,15 @@ $rightActionHtml = '
         });
         document.getElementById('filter-cakupan').addEventListener('change', applyFilter);
         document.getElementById('filter-status').addEventListener('change', applyFilter);
+        document.getElementById('filter-limit').addEventListener('change', applyFilter);
 
         function applyFilter() {
             var url = new URL(window.location.href);
             url.searchParams.set('q', document.getElementById('search-input').value);
             url.searchParams.set('cakupan', document.getElementById('filter-cakupan').value);
             url.searchParams.set('status', document.getElementById('filter-status').value);
+            url.searchParams.set('limit', document.getElementById('filter-limit').value);
+            url.searchParams.set('page', '1');
             window.location.href = url.toString();
         }
 

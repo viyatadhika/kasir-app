@@ -298,8 +298,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_GET['action'])) {
 $search       = trim(isset($_GET['q'])      ? $_GET['q']      : '');
 $katFilter    = isset($_GET['kat'])          ? $_GET['kat']    : '';
 $statusFilter = isset($_GET['status'])       ? $_GET['status'] : 'aktif';
+$stokFilter   = isset($_GET['stok'])         ? $_GET['stok']   : '';
 $page         = max(1, (int)(isset($_GET['page']) ? $_GET['page'] : 1));
-$perPage      = 15;
+$allowedLimit = [10, 15, 25, 50, 100];
+$perPage      = (int)(isset($_GET['limit']) ? $_GET['limit'] : 15);
+if (!in_array($perPage, $allowedLimit, true)) {
+    $perPage = 15;
+}
 $offset       = ($page - 1) * $perPage;
 
 $where  = ['1=1'];
@@ -319,13 +324,36 @@ if ($statusFilter !== 'semua') {
     $where[]           = 'status = :status';
     $params[':status'] = $statusFilter;
 }
+if ($stokFilter === 'limit') {
+    $where[] = 'stok > 0 AND stok <= stok_minimum';
+} elseif ($stokFilter === 'habis') {
+    $where[] = 'stok <= 0';
+}
 
 $whereStr = implode(' AND ', $where);
 
 $stmtCount = $pdo->prepare("SELECT COUNT(*) FROM produk WHERE $whereStr");
 $stmtCount->execute($params);
 $totalRows  = (int)$stmtCount->fetchColumn();
-$totalPages = max(1, ceil($totalRows / $perPage));
+$totalPages = max(1, (int)ceil($totalRows / $perPage));
+if ($page > $totalPages) {
+    $page = $totalPages;
+}
+$offset = ($page - 1) * $perPage;
+
+if (!function_exists('produk_page_url')) {
+    function produk_page_url(int $targetPage, string $search, string $katFilter, string $statusFilter, string $stokFilter, int $perPage): string
+    {
+        return '?' . http_build_query([
+            'page' => max(1, $targetPage),
+            'q' => $search,
+            'kat' => $katFilter,
+            'status' => $statusFilter,
+            'stok' => $stokFilter,
+            'limit' => $perPage,
+        ]);
+    }
+}
 
 $stmtProd = $pdo->prepare("SELECT * FROM produk WHERE $whereStr ORDER BY kategori, nama LIMIT $perPage OFFSET $offset");
 $stmtProd->execute($params);
@@ -723,6 +751,16 @@ $rightActionHtml = '
                 <option value="nonaktif" <?php echo $statusFilter === 'nonaktif' ? 'selected' : ''; ?>>Nonaktif</option>
                 <option value="semua" <?php echo $statusFilter === 'semua'    ? 'selected' : ''; ?>>Semua Status</option>
             </select>
+            <select id="filter-stok" class="bg-gray-50 border border-gray-100 rounded-sm px-3 py-2.5 text-xs font-bold uppercase text-gray-500 focus:bg-white transition-all">
+                <option value="" <?php echo $stokFilter === '' ? 'selected' : ''; ?>>Semua Stok</option>
+                <option value="limit" <?php echo $stokFilter === 'limit' ? 'selected' : ''; ?>>Stok Limit</option>
+                <option value="habis" <?php echo $stokFilter === 'habis' ? 'selected' : ''; ?>>Stok Habis</option>
+            </select>
+            <select id="filter-limit" class="bg-gray-50 border border-gray-100 rounded-sm px-3 py-2.5 text-xs font-bold uppercase text-gray-500 focus:bg-white transition-all">
+                <?php foreach ([10, 15, 25, 50, 100] as $limitOption): ?>
+                    <option value="<?php echo $limitOption; ?>" <?php echo $perPage === $limitOption ? 'selected' : ''; ?>><?php echo $limitOption; ?> / Hal</option>
+                <?php endforeach; ?>
+            </select>
             <button type="button" onclick="openModal('tambah')" class="scanner-btn">
                 Scan / Tambah Produk
             </button>
@@ -949,21 +987,21 @@ $rightActionHtml = '
             <?php if ($totalPages > 1): ?>
                 <div class="px-4 md:px-5 py-4 border-t border-subtle flex flex-col sm:flex-row gap-3 sm:items-center sm:justify-between bg-gray-50">
                     <span class="text-xs text-gray-400">
-                        Halaman <?php echo $page; ?> dari <?php echo $totalPages; ?> (<?php echo number_format($totalRows); ?> total)
+                        Halaman <?php echo $page; ?> dari <?php echo $totalPages; ?> (<?php echo number_format($totalRows); ?> total · <?php echo $perPage; ?>/hal)
                     </span>
                     <div class="flex flex-wrap gap-2">
                         <?php if ($page > 1): ?>
-                            <a href="?page=<?php echo $page - 1; ?>&q=<?php echo urlencode($search); ?>&kat=<?php echo urlencode($katFilter); ?>&status=<?php echo urlencode($statusFilter); ?>"
+                            <a href="<?php echo e(produk_page_url($page - 1, $search, $katFilter, $statusFilter, $stokFilter, $perPage)); ?>"
                                 class="px-3 py-1.5 text-xs font-bold border border-subtle hover:bg-white transition-all">&larr; Prev</a>
                         <?php endif; ?>
                         <?php for ($pg = max(1, $page - 2); $pg <= min($totalPages, $page + 2); $pg++): ?>
-                            <a href="?page=<?php echo $pg; ?>&q=<?php echo urlencode($search); ?>&kat=<?php echo urlencode($katFilter); ?>&status=<?php echo urlencode($statusFilter); ?>"
+                            <a href="<?php echo e(produk_page_url($pg, $search, $katFilter, $statusFilter, $stokFilter, $perPage)); ?>"
                                 class="px-3 py-1.5 text-xs font-bold transition-all <?php echo $pg === $page ? 'bg-black text-white' : 'border border-subtle hover:bg-white'; ?>">
                                 <?php echo $pg; ?>
                             </a>
                         <?php endfor; ?>
                         <?php if ($page < $totalPages): ?>
-                            <a href="?page=<?php echo $page + 1; ?>&q=<?php echo urlencode($search); ?>&kat=<?php echo urlencode($katFilter); ?>&status=<?php echo urlencode($statusFilter); ?>"
+                            <a href="<?php echo e(produk_page_url($page + 1, $search, $katFilter, $statusFilter, $stokFilter, $perPage)); ?>"
                                 class="px-3 py-1.5 text-xs font-bold border border-subtle hover:bg-white transition-all">Next &rarr;</a>
                         <?php endif; ?>
                     </div>
@@ -1174,6 +1212,8 @@ $rightActionHtml = '
             }
         });
         document.getElementById('filter-status').addEventListener('change', applyFilter);
+        document.getElementById('filter-stok').addEventListener('change', applyFilter);
+        document.getElementById('filter-limit').addEventListener('change', applyFilter);
 
         document.addEventListener('DOMContentLoaded', function() {
             var kodeInput = document.getElementById('form-kode');
@@ -1204,6 +1244,8 @@ $rightActionHtml = '
             url.searchParams.set('q', document.getElementById('search-input').value);
             url.searchParams.set('kat', document.getElementById('filter-kat').value);
             url.searchParams.set('status', document.getElementById('filter-status').value);
+            url.searchParams.set('stok', document.getElementById('filter-stok').value);
+            url.searchParams.set('limit', document.getElementById('filter-limit').value);
             url.searchParams.set('page', '1');
             window.location.href = url.toString();
         }

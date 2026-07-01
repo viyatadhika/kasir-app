@@ -11,6 +11,98 @@ $pageTitle = 'Mesin Kasir';
 $backUrl = 'dashboard.php';
 
 
+// -----------------------------------------------------------------------------
+// WAJIB BUKA KAS UNTUK TRANSAKSI POS
+// Catatan: fitur ini hanya mengunci transaksi di halaman POS.
+// Admin/kasir tetap bisa akses menu lain seperti produk, laporan, stok, member, dll.
+// -----------------------------------------------------------------------------
+if (!function_exists('pos_current_user_id')) {
+    function pos_current_user_id(): int
+    {
+        foreach (['user_id', 'id_user', 'id', 'admin_id'] as $k) {
+            if (!empty($_SESSION[$k])) return (int)$_SESSION[$k];
+        }
+        if (!empty($_SESSION['user']['id'])) return (int)$_SESSION['user']['id'];
+        return 0;
+    }
+}
+
+if (!function_exists('pos_current_user_name')) {
+    function pos_current_user_name(): string
+    {
+        foreach (['nama', 'name', 'username', 'user_name'] as $k) {
+            if (!empty($_SESSION[$k])) return (string)$_SESSION[$k];
+        }
+        if (!empty($_SESSION['user']['nama'])) return (string)$_SESSION['user']['nama'];
+        if (!empty($_SESSION['user']['name'])) return (string)$_SESSION['user']['name'];
+        if (!empty($_SESSION['user']['username'])) return (string)$_SESSION['user']['username'];
+        return 'Operator';
+    }
+}
+
+if (!function_exists('pos_ensure_kas_harian_table')) {
+    function pos_ensure_kas_harian_table(PDO $pdo): void
+    {
+        static $done = false;
+        if ($done) return;
+        $done = true;
+        $pdo->exec("CREATE TABLE IF NOT EXISTS kas_harian (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            tanggal DATE NOT NULL,
+            user_id INT NULL,
+            operator VARCHAR(150) NULL,
+            kas_awal DECIMAL(15,2) NOT NULL DEFAULT 0,
+            kas_akhir_sistem DECIMAL(15,2) NOT NULL DEFAULT 0,
+            kas_aktual DECIMAL(15,2) NULL,
+            total_sales DECIMAL(15,2) NOT NULL DEFAULT 0,
+            total_tunai DECIMAL(15,2) NOT NULL DEFAULT 0,
+            total_nontunai DECIMAL(15,2) NOT NULL DEFAULT 0,
+            total_struk INT NOT NULL DEFAULT 0,
+            margin DECIMAL(15,2) NOT NULL DEFAULT 0,
+            fee_promosi DECIMAL(15,2) NOT NULL DEFAULT 0,
+            catatan TEXT NULL,
+            status ENUM('buka','tutup') NOT NULL DEFAULT 'buka',
+            opened_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            closed_at DATETIME NULL,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME NULL,
+            INDEX idx_tanggal (tanggal),
+            INDEX idx_user_tanggal (user_id, tanggal),
+            INDEX idx_status (status)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+    }
+}
+
+if (!function_exists('pos_get_kas_buka')) {
+    function pos_get_kas_buka(PDO $pdo, int $userId, ?string $tanggal = null): ?array
+    {
+        $tanggal = $tanggal ?: date('Y-m-d');
+        $stmt = $pdo->prepare("SELECT * FROM kas_harian WHERE tanggal=:tanggal AND user_id=:user_id AND status='buka' ORDER BY id DESC LIMIT 1");
+        $stmt->execute([':tanggal' => $tanggal, ':user_id' => $userId]);
+        $row = $stmt->fetch(PDO::FETCH_ASSOC);
+        return $row ?: null;
+    }
+}
+
+if (!function_exists('pos_get_kas_terakhir')) {
+    function pos_get_kas_terakhir(PDO $pdo, int $userId, ?string $tanggal = null): ?array
+    {
+        $tanggal = $tanggal ?: date('Y-m-d');
+        $stmt = $pdo->prepare("SELECT * FROM kas_harian WHERE tanggal=:tanggal AND user_id=:user_id ORDER BY id DESC LIMIT 1");
+        $stmt->execute([':tanggal' => $tanggal, ':user_id' => $userId]);
+        $row = $stmt->fetch(PDO::FETCH_ASSOC);
+        return $row ?: null;
+    }
+}
+
+pos_ensure_kas_harian_table($pdo);
+$posUserId = pos_current_user_id();
+$posOperatorName = pos_current_user_name();
+$posKasAktif = pos_get_kas_buka($pdo, $posUserId);
+$posKasTerakhir = $posKasAktif ?: pos_get_kas_terakhir($pdo, $posUserId);
+$posKasWajibBuka = !$posKasAktif;
+
+
 if (!function_exists('e')) {
     function e(mixed $v): string
     {
@@ -341,6 +433,43 @@ function transaksiDetailHasDiscountColumns(PDO $pdo): bool
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_GET['action'])) {
     header('Content-Type: application/json; charset=utf-8');
     switch ($_GET['action']) {
+        case 'kas_status':
+            $kas = pos_get_kas_buka($pdo, pos_current_user_id());
+            echo json_encode([
+                'success' => true,
+                'is_open' => (bool)$kas,
+                'data' => $kas,
+                'operator' => pos_current_user_name(),
+                'tanggal' => date('Y-m-d')
+            ], JSON_UNESCAPED_UNICODE);
+            exit;
+
+        case 'buka_kas_pos':
+            $input = json_decode(file_get_contents('php://input'), true) ?: [];
+            $kasAwal = (float)preg_replace('/[^0-9]/', '', (string)($input['kas_awal'] ?? 0));
+            if ($kasAwal < 0) {
+                echo json_encode(['success' => false, 'message' => 'Kas awal tidak valid.'], JSON_UNESCAPED_UNICODE);
+                exit;
+            }
+            $uid = pos_current_user_id();
+            if ($uid <= 0) {
+                echo json_encode(['success' => false, 'message' => 'Session user tidak ditemukan. Silakan login ulang.'], JSON_UNESCAPED_UNICODE);
+                exit;
+            }
+            $aktif = pos_get_kas_buka($pdo, $uid);
+            if ($aktif) {
+                echo json_encode(['success' => true, 'message' => 'Kas hari ini sudah terbuka.', 'data' => $aktif], JSON_UNESCAPED_UNICODE);
+                exit;
+            }
+            $stmt = $pdo->prepare("INSERT INTO kas_harian (tanggal,user_id,operator,kas_awal,status,opened_at) VALUES (CURDATE(),:user_id,:operator,:kas_awal,'buka',NOW())");
+            $stmt->execute([
+                ':user_id' => $uid,
+                ':operator' => pos_current_user_name(),
+                ':kas_awal' => $kasAwal,
+            ]);
+            echo json_encode(['success' => true, 'message' => 'Kas berhasil dibuka. Silakan mulai transaksi.', 'id' => $pdo->lastInsertId()], JSON_UNESCAPED_UNICODE);
+            exit;
+
         case 'get_products':
             $stmt = $pdo->query("SELECT id, kode, nama, kategori, harga_jual, stok, satuan, gambar FROM produk WHERE status = 'aktif' ORDER BY kategori, nama");
             echo json_encode(['success' => true, 'data' => $stmt->fetchAll(PDO::FETCH_ASSOC)], JSON_UNESCAPED_UNICODE);
@@ -407,6 +536,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_GET['action'])) {
                 exit;
             }
             $userId = $_SESSION['user_id'] ?? null;
+            $kasAktifTransaksi = pos_get_kas_buka($pdo, (int)($userId ?? pos_current_user_id()));
+            if (!$kasAktifTransaksi) {
+                echo json_encode(['success' => false, 'need_open_cash' => true, 'message' => 'Kas hari ini belum dibuka. Silakan buka kas terlebih dahulu sebelum transaksi.'], JSON_UNESCAPED_UNICODE);
+                exit;
+            }
             $invoice = generateInvoice();
             $items = $input['items'];
             $bayar = (int)($input['bayar'] ?? 0);
@@ -1010,6 +1144,60 @@ catat_view_once($pdo, 'Mesin Kasir', 'Membuka halaman Mesin Kasir');
                 padding-bottom: 150px !important;
             }
         }
+
+
+        /* ── Modal Wajib Buka Kas POS ───────────────────── */
+        #pos-kas-lock {
+            position: fixed;
+            inset: 0;
+            z-index: 300;
+            background: rgba(255, 255, 255, .96);
+            backdrop-filter: blur(8px);
+            -webkit-backdrop-filter: blur(8px);
+            display: none;
+            align-items: center;
+            justify-content: center;
+            padding: 18px;
+        }
+
+        #pos-kas-lock.show {
+            display: flex;
+        }
+
+        .pos-kas-card {
+            width: 100%;
+            max-width: 440px;
+            background: #fff;
+            border: 1px solid #e5e7eb;
+            box-shadow: 0 24px 80px rgba(0, 0, 0, .12);
+            border-radius: 0;
+            padding: 28px;
+        }
+
+        .pos-kas-status-pill {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            padding: 8px 12px;
+            border: 1px solid #fee2e2;
+            background: #fef2f2;
+            color: #dc2626;
+            font-size: 10px;
+            font-weight: 900;
+            text-transform: uppercase;
+            letter-spacing: .12em;
+        }
+
+        #pos-kas-alert {
+            display: none;
+            margin-top: 12px;
+            padding: 10px 12px;
+            border: 1px solid #fecaca;
+            background: #fef2f2;
+            color: #b91c1c;
+            font-size: 11px;
+            font-weight: 800;
+        }
     </style>
 </head>
 
@@ -1017,6 +1205,33 @@ catat_view_once($pdo, 'Mesin Kasir', 'Membuka halaman Mesin Kasir');
 
     <?php require_once 'sidebar.php'; ?>
     <?php require_once 'navbar.php'; ?>
+
+
+    <!-- Modal wajib buka kas sebelum transaksi POS -->
+    <div id="pos-kas-lock" class="<?= $posKasWajibBuka ? 'show' : '' ?>">
+        <div class="pos-kas-card">
+            <div class="mb-5">
+                <span class="pos-kas-status-pill">● Belum Buka Kas</span>
+                <h2 class="text-2xl font-black tracking-tight mt-4">Buka Kas Hari Ini</h2>
+                <p class="text-xs text-gray-500 mt-2 leading-relaxed">Untuk mencegah operator lupa, transaksi POS dikunci sampai kas hari ini dibuka.</p>
+            </div>
+            <div class="grid grid-cols-2 gap-3 mb-5">
+                <div class="bg-gray-50 border border-subtle p-3">
+                    <p class="text-[9px] font-black text-gray-400 uppercase tracking-widest">Operator</p>
+                    <p class="text-xs font-black mt-1 truncate"><?= e($posOperatorName) ?></p>
+                </div>
+                <div class="bg-gray-50 border border-subtle p-3">
+                    <p class="text-[9px] font-black text-gray-400 uppercase tracking-widest">Tanggal</p>
+                    <p class="text-xs font-black mt-1"><?= date('d/m/Y') ?></p>
+                </div>
+            </div>
+            <label class="block text-[10px] font-black uppercase tracking-widest text-gray-500 mb-2">Kas Awal</label>
+            <input type="text" id="pos-kas-awal" inputmode="numeric" placeholder="Contoh: 500000" class="w-full bg-gray-50 border border-gray-200 px-4 py-4 text-lg font-black focus:outline-none focus:ring-2 focus:ring-black/5">
+            <div id="pos-kas-alert"></div>
+            <button type="button" onclick="bukaKasPOS()" id="btn-buka-kas-pos" class="mt-4 w-full bg-black text-white py-4 text-xs font-black uppercase tracking-[0.25em] hover:bg-gray-800 transition-all">Buka Kas & Mulai POS</button>
+            <p class="text-[10px] text-gray-400 font-bold mt-4 leading-relaxed">Buka kas hanya wajib untuk transaksi POS. Menu produk, laporan, stok, dan member tidak ikut dikunci.</p>
+        </div>
+    </div>
 
 
     <!-- Mobile Menu Overlay -->
@@ -1391,6 +1606,75 @@ catat_view_once($pdo, 'Mesin Kasir', 'Membuka halaman Mesin Kasir');
     <script>
         'use strict';
 
+        // ── Wajib Buka Kas POS ───────────────────────────────────────────────────────
+        function posOnlyDigits(v) {
+            return String(v || '').replace(/[^0-9]/g, '');
+        }
+
+        function formatKasAwalInput(el) {
+            el.value = posOnlyDigits(el.value).replace(/\B(?=(\d{3})+(?!\d))/g, '.');
+        }
+
+        function showKasAlert(msg) {
+            const box = document.getElementById('pos-kas-alert');
+            if (!box) return;
+            box.innerText = msg || '';
+            box.style.display = msg ? 'block' : 'none';
+        }
+
+        function showKasLock() {
+            const lock = document.getElementById('pos-kas-lock');
+            if (lock) lock.classList.add('show');
+            setTimeout(() => document.getElementById('pos-kas-awal')?.focus(), 100);
+        }
+
+        function hideKasLock() {
+            const lock = document.getElementById('pos-kas-lock');
+            if (lock) lock.classList.remove('show');
+            setTimeout(() => document.getElementById('search-input')?.focus(), 100);
+        }
+
+        async function bukaKasPOS() {
+            const input = document.getElementById('pos-kas-awal');
+            const btn = document.getElementById('btn-buka-kas-pos');
+            const kasAwal = posOnlyDigits(input ? input.value : '');
+            if (kasAwal === '') {
+                showKasAlert('Kas awal wajib diisi. Jika tidak ada kas awal, isi 0.');
+                input?.focus();
+                return;
+            }
+            showKasAlert('');
+            if (btn) {
+                btn.disabled = true;
+                btn.innerText = 'Membuka Kas...';
+            }
+            try {
+                const res = await fetch(POS_ENDPOINT + '?action=buka_kas_pos', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        kas_awal: kasAwal
+                    })
+                });
+                const d = await res.json();
+                if (d.success) {
+                    POS_KAS_OPEN = true;
+                    hideKasLock();
+                } else {
+                    showKasAlert(d.message || 'Gagal membuka kas.');
+                }
+            } catch (e) {
+                showKasAlert('Koneksi gagal saat membuka kas.');
+            } finally {
+                if (btn) {
+                    btn.disabled = false;
+                    btn.innerText = 'Buka Kas & Mulai POS';
+                }
+            }
+        }
+
         // ── Mobile Menu ─────────────────────────────────────────────────────────────
         function toggleMobileMenu() {
             const o = document.getElementById('mobileMenuOverlay'),
@@ -1429,6 +1713,7 @@ catat_view_once($pdo, 'Mesin Kasir', 'Membuka halaman Mesin Kasir');
 
         // ── State ────────────────────────────────────────────────────────────────────
         const POS_ENDPOINT = <?= json_encode(basename($_SERVER['PHP_SELF'])) ?>;
+        let POS_KAS_OPEN = <?= $posKasAktif ? 'true' : 'false' ?>;
         const OPERATOR_NAME = '<?= $operatorName ?>';
         const POINT_VALUE = 1000;
 
@@ -1832,6 +2117,10 @@ catat_view_once($pdo, 'Mesin Kasir', 'Membuka halaman Mesin Kasir');
 
         // ── Cart ─────────────────────────────────────────────────────────────────────
         function addToCart(id) {
+            if (!POS_KAS_OPEN) {
+                showKasLock();
+                return;
+            }
             const pid = parseInt(id),
                 p = PRODUCTS.find(x => parseInt(x.id) === pid);
             if (!p || p.stok <= 0) return;
@@ -2266,6 +2555,10 @@ catat_view_once($pdo, 'Mesin Kasir', 'Membuka halaman Mesin Kasir');
 
         // ── Payment ──────────────────────────────────────────────────────────────────
         function openPayment() {
+            if (!POS_KAS_OPEN) {
+                showKasLock();
+                return;
+            }
             if (!cart.length) return;
             document.getElementById('payment-modal').style.display = 'flex';
             selectMethod('tunai');
@@ -2310,6 +2603,10 @@ catat_view_once($pdo, 'Mesin Kasir', 'Membuka halaman Mesin Kasir');
         }
 
         async function processPayment() {
+            if (!POS_KAS_OPEN) {
+                showKasLock();
+                return;
+            }
             if (!cart.length) return;
             await refreshDiskonPreview();
             const total = getGrandTotal();
@@ -2448,6 +2745,18 @@ catat_view_once($pdo, 'Mesin Kasir', 'Membuka halaman Mesin Kasir');
             if (o) o.addEventListener('click', e => {
                 if (e.target === o) toggleMobileMenu();
             });
+            const kasAwalInput = document.getElementById('pos-kas-awal');
+            if (kasAwalInput) {
+                kasAwalInput.addEventListener('input', function() {
+                    formatKasAwalInput(this);
+                });
+                kasAwalInput.addEventListener('keydown', function(e) {
+                    if (e.key === 'Enter') {
+                        e.preventDefault();
+                        bukaKasPOS();
+                    }
+                });
+            }
             const inp = document.getElementById('search-input');
             if (inp) {
                 inp.addEventListener('keydown', e => {
@@ -2471,7 +2780,8 @@ catat_view_once($pdo, 'Mesin Kasir', 'Membuka halaman Mesin Kasir');
 
         window.onload = () => {
             init();
-            setTimeout(() => document.getElementById('search-input')?.focus(), 300);
+            if (!POS_KAS_OPEN) showKasLock();
+            setTimeout(() => (POS_KAS_OPEN ? document.getElementById('search-input') : document.getElementById('pos-kas-awal'))?.focus(), 300);
             updateCustomerDisplay();
             setInterval(updateCustomerDisplay, 2000);
         };

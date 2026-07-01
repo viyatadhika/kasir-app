@@ -72,11 +72,55 @@ if (!function_exists('dashboard_pinjaman_status_class')) {
 }
 
 
+if (!function_exists('dashboard_current_user_id_safe')) {
+    function dashboard_current_user_id_safe(): int
+    {
+        foreach (['user_id', 'id_user', 'id', 'admin_id'] as $k) {
+            if (!empty($_SESSION[$k])) return (int)$_SESSION[$k];
+        }
+        if (!empty($_SESSION['user']['id'])) return (int)$_SESSION['user']['id'];
+        return 0;
+    }
+}
+
+if (!function_exists('dashboard_has_table')) {
+    function dashboard_has_table(PDO $pdo, string $table): bool
+    {
+        try {
+            $st = $pdo->prepare("SHOW TABLES LIKE :t");
+            $st->execute([':t' => $table]);
+            return (bool)$st->fetchColumn();
+        } catch (Throwable $e) {
+            return false;
+        }
+    }
+}
+
+
 $activeMenu  = 'dashboard';
 $pageTitle   = 'Dashboard';
 $backUrl     = '';
 $currentRole = getCurrentRole(); // 'admin' | 'kasir' | 'rental'
 $today       = date('Y-m-d');
+$userId      = dashboard_current_user_id_safe();
+
+// ── Monitoring Kas Harian ───────────────────────────────────────────────────
+$kasHariIni = [
+    'total_operator' => 0,
+    'sudah_buka'     => 0,
+    'belum_buka'     => 0,
+    'masih_buka'     => 0,
+    'sudah_tutup'    => 0,
+    'kas_awal'       => 0,
+    'total_sales'    => 0,
+    'total_tunai'    => 0,
+    'kas_akhir'      => 0,
+    'opened_at'      => null,
+    'closed_at'      => null,
+    'status'         => null,
+];
+$kasOperatorList = [];
+
 
 // ── Inisialisasi variabel (mencegah undefined variable warning) ───────────────
 $ringkasan          = ['total_sales' => 0, 'jumlah_struk' => 0];
@@ -221,6 +265,72 @@ if (isset($_GET['action']) && $_GET['action'] === 'reprint_data') {
         echo json_encode(['success' => false, 'message' => 'Gagal: ' . $e->getMessage()], JSON_UNESCAPED_UNICODE);
     }
     exit;
+}
+
+
+// ── Data: Monitoring Kas Harian ─────────────────────────────────────────────
+if (has_role('admin', 'kasir') && dashboard_has_table($pdo, 'kas_harian')) {
+    try {
+        if (has_role('admin')) {
+            $stmtKas = $pdo->prepare("
+                SELECT kh.*
+                FROM kas_harian kh
+                INNER JOIN (
+                    SELECT user_id, MAX(id) AS max_id
+                    FROM kas_harian
+                    WHERE tanggal = :today
+                    GROUP BY user_id
+                ) x ON x.max_id = kh.id
+                ORDER BY FIELD(kh.status, 'buka', 'tutup'), kh.opened_at DESC, kh.id DESC
+            ");
+            $stmtKas->execute([':today' => $today]);
+            $kasOperatorList = $stmtKas->fetchAll(PDO::FETCH_ASSOC);
+
+            $kasHariIni['total_operator'] = count($kasOperatorList);
+            foreach ($kasOperatorList as $k) {
+                $statusKas = strtolower((string)($k['status'] ?? ''));
+                $kasHariIni['kas_awal']    += (float)($k['kas_awal'] ?? 0);
+                $kasHariIni['total_sales'] += (float)($k['total_sales'] ?? 0);
+                $kasHariIni['total_tunai'] += (float)($k['total_tunai'] ?? 0);
+                $kasHariIni['kas_akhir']   += (float)($k['kas_akhir_sistem'] ?? 0);
+                if ($statusKas === 'buka') $kasHariIni['masih_buka']++;
+                if ($statusKas === 'tutup') $kasHariIni['sudah_tutup']++;
+            }
+            $kasHariIni['sudah_buka'] = $kasHariIni['total_operator'];
+        } else {
+            $stmtKas = $pdo->prepare("
+                SELECT *
+                FROM kas_harian
+                WHERE tanggal = :today
+                  AND user_id = :user_id
+                ORDER BY id DESC
+                LIMIT 1
+            ");
+            $stmtKas->execute([
+                ':today'   => $today,
+                ':user_id' => $userId,
+            ]);
+            $kasSaya = $stmtKas->fetch(PDO::FETCH_ASSOC);
+
+            if ($kasSaya) {
+                $kasHariIni['total_operator'] = 1;
+                $kasHariIni['sudah_buka']     = 1;
+                $kasHariIni['status']         = (string)($kasSaya['status'] ?? '');
+                $kasHariIni['kas_awal']       = (float)($kasSaya['kas_awal'] ?? 0);
+                $kasHariIni['total_sales']    = (float)($kasSaya['total_sales'] ?? 0);
+                $kasHariIni['total_tunai']    = (float)($kasSaya['total_tunai'] ?? 0);
+                $kasHariIni['kas_akhir']      = (float)($kasSaya['kas_akhir_sistem'] ?? 0);
+                $kasHariIni['opened_at']      = $kasSaya['opened_at'] ?? null;
+                $kasHariIni['closed_at']      = $kasSaya['closed_at'] ?? null;
+                if (strtolower((string)$kasSaya['status']) === 'buka') $kasHariIni['masih_buka'] = 1;
+                if (strtolower((string)$kasSaya['status']) === 'tutup') $kasHariIni['sudah_tutup'] = 1;
+            } else {
+                $kasHariIni['belum_buka'] = 1;
+            }
+        }
+    } catch (Throwable $e) {
+        $kasOperatorList = [];
+    }
 }
 
 // ── Data: Admin & Kasir ──────────────────────────────────────────────────────
@@ -517,6 +627,26 @@ $title = 'Dashboard - ' . ($_SESSION['nama'] ?? 'SEJAHUB');
             flex-shrink: 0;
         }
 
+
+        .kas-monitor-card {
+            background: #fff;
+            border: 1px solid #f0f0f0;
+            border-radius: 2px;
+        }
+
+        .kas-monitor-badge {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            padding: 4px 8px;
+            border: 1px solid transparent;
+            font-size: 9px;
+            font-weight: 900;
+            text-transform: uppercase;
+            letter-spacing: .08em;
+            white-space: nowrap;
+        }
+
         @media (max-width: 640px) {
             .dashboard-action-wrap {
                 display: grid;
@@ -597,6 +727,123 @@ $title = 'Dashboard - ' . ($_SESSION['nama'] ?? 'SEJAHUB');
             <!-- KONTEN ADMIN & KASIR                                                -->
             <!-- ════════════════════════════════════════════════════════════════════ -->
             <section class="dashboard-role-section">
+
+                <!-- Monitoring Kas Harian -->
+                <div class="kas-monitor-card p-5 md:p-6 mb-8 md:mb-10">
+                    <div class="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-5">
+                        <div>
+                            <p class="text-[10px] font-black uppercase tracking-widest text-gray-400 mb-1">
+                                <?php echo has_role('admin') ? 'Monitoring Kas Hari Ini' : 'Status Kas Saya Hari Ini'; ?>
+                            </p>
+                            <h2 class="text-lg md:text-xl font-black tracking-tight">
+                                <?php if (has_role('admin')): ?>
+                                    Buka & Tutup Kas Operator
+                                <?php else: ?>
+                                    <?php echo $kasHariIni['sudah_buka'] ? ($kasHariIni['masih_buka'] ? 'Kas Sedang Buka' : 'Kas Sudah Tutup') : 'Belum Buka Kas'; ?>
+                                <?php endif; ?>
+                            </h2>
+                            <p class="text-xs text-gray-400 mt-1">
+                                <?php if (has_role('admin')): ?>
+                                    Pantau operator yang sudah buka kas, masih buka, dan sudah tutup kas.
+                                <?php else: ?>
+                                    Buka kas wajib sebelum transaksi POS, dan tutup kas wajib sebelum logout.
+                                <?php endif; ?>
+                            </p>
+                        </div>
+
+                        <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 w-full lg:w-auto lg:min-w-[520px]">
+                            <?php if (has_role('admin')): ?>
+                                <div class="bg-gray-50 border border-gray-100 p-3">
+                                    <p class="text-[9px] font-black text-gray-400 uppercase tracking-widest">Sudah Buka</p>
+                                    <p class="text-2xl font-black text-blue-600 mt-1"><?php echo number_format((int)$kasHariIni['sudah_buka']); ?></p>
+                                </div>
+                                <div class="bg-yellow-50 border border-yellow-100 p-3">
+                                    <p class="text-[9px] font-black text-yellow-600 uppercase tracking-widest">Masih Buka</p>
+                                    <p class="text-2xl font-black text-yellow-700 mt-1"><?php echo number_format((int)$kasHariIni['masih_buka']); ?></p>
+                                </div>
+                                <div class="bg-green-50 border border-green-100 p-3">
+                                    <p class="text-[9px] font-black text-green-600 uppercase tracking-widest">Sudah Tutup</p>
+                                    <p class="text-2xl font-black text-green-700 mt-1"><?php echo number_format((int)$kasHariIni['sudah_tutup']); ?></p>
+                                </div>
+                                <div class="bg-gray-50 border border-gray-100 p-3">
+                                    <p class="text-[9px] font-black text-gray-400 uppercase tracking-widest">Total Tunai</p>
+                                    <p class="text-lg font-black text-gray-900 mt-1"><?php echo formatRp($kasHariIni['total_tunai']); ?></p>
+                                </div>
+                            <?php else: ?>
+                                <div class="bg-gray-50 border border-gray-100 p-3">
+                                    <p class="text-[9px] font-black text-gray-400 uppercase tracking-widest">Status</p>
+                                    <p class="mt-2">
+                                        <?php if ($kasHariIni['masih_buka']): ?>
+                                            <span class="kas-monitor-badge bg-green-50 text-green-700 border-green-200">Buka</span>
+                                        <?php elseif ($kasHariIni['sudah_tutup']): ?>
+                                            <span class="kas-monitor-badge bg-gray-100 text-gray-700 border-gray-200">Tutup</span>
+                                        <?php else: ?>
+                                            <span class="kas-monitor-badge bg-red-50 text-red-700 border-red-200">Belum Buka</span>
+                                        <?php endif; ?>
+                                    </p>
+                                </div>
+                                <div class="bg-gray-50 border border-gray-100 p-3">
+                                    <p class="text-[9px] font-black text-gray-400 uppercase tracking-widest">Kas Awal</p>
+                                    <p class="text-lg font-black text-gray-900 mt-1"><?php echo formatRp($kasHariIni['kas_awal']); ?></p>
+                                </div>
+                                <div class="bg-gray-50 border border-gray-100 p-3">
+                                    <p class="text-[9px] font-black text-gray-400 uppercase tracking-widest">Jam Buka</p>
+                                    <p class="text-lg font-black text-gray-900 mt-1"><?php echo !empty($kasHariIni['opened_at']) ? date('H:i', strtotime((string)$kasHariIni['opened_at'])) : '-'; ?></p>
+                                </div>
+                                <div class="bg-gray-50 border border-gray-100 p-3">
+                                    <p class="text-[9px] font-black text-gray-400 uppercase tracking-widest">Tunai</p>
+                                    <p class="text-lg font-black text-gray-900 mt-1"><?php echo formatRp($kasHariIni['total_tunai']); ?></p>
+                                </div>
+                            <?php endif; ?>
+                        </div>
+                    </div>
+
+                    <?php if (has_role('admin') && !empty($kasOperatorList)): ?>
+                        <div class="mt-5 border-t border-gray-100 pt-4 overflow-x-auto no-scrollbar">
+                            <table class="w-full text-left min-w-[760px]">
+                                <thead>
+                                    <tr class="border-b border-gray-100">
+                                        <th class="py-3 text-[10px] font-black uppercase tracking-widest text-gray-400">Operator</th>
+                                        <th class="py-3 text-[10px] font-black uppercase tracking-widest text-gray-400">Jam Buka</th>
+                                        <th class="py-3 text-[10px] font-black uppercase tracking-widest text-gray-400">Jam Tutup</th>
+                                        <th class="py-3 text-[10px] font-black uppercase tracking-widest text-gray-400 text-right">Kas Awal</th>
+                                        <th class="py-3 text-[10px] font-black uppercase tracking-widest text-gray-400 text-right">Tunai</th>
+                                        <th class="py-3 text-[10px] font-black uppercase tracking-widest text-gray-400 text-center">Status</th>
+                                    </tr>
+                                </thead>
+                                <tbody class="divide-y divide-gray-100">
+                                    <?php foreach (array_slice($kasOperatorList, 0, 6) as $kasOp): ?>
+                                        <tr>
+                                            <td class="py-3 text-xs font-bold"><?php echo htmlspecialchars((string)($kasOp['operator'] ?? 'Operator'), ENT_QUOTES, 'UTF-8'); ?></td>
+                                            <td class="py-3 text-xs text-gray-500"><?php echo !empty($kasOp['opened_at']) ? date('H:i', strtotime((string)$kasOp['opened_at'])) : '-'; ?></td>
+                                            <td class="py-3 text-xs text-gray-500"><?php echo !empty($kasOp['closed_at']) ? date('H:i', strtotime((string)$kasOp['closed_at'])) : '-'; ?></td>
+                                            <td class="py-3 text-xs text-right font-bold"><?php echo formatRp($kasOp['kas_awal'] ?? 0); ?></td>
+                                            <td class="py-3 text-xs text-right font-bold"><?php echo formatRp($kasOp['total_tunai'] ?? 0); ?></td>
+                                            <td class="py-3 text-center">
+                                                <?php if (($kasOp['status'] ?? '') === 'buka'): ?>
+                                                    <span class="kas-monitor-badge bg-yellow-50 text-yellow-700 border-yellow-200">Masih Buka</span>
+                                                <?php else: ?>
+                                                    <span class="kas-monitor-badge bg-green-50 text-green-700 border-green-200">Sudah Tutup</span>
+                                                <?php endif; ?>
+                                            </td>
+                                        </tr>
+                                    <?php endforeach; ?>
+                                </tbody>
+                            </table>
+                        </div>
+                    <?php endif; ?>
+
+                    <div class="mt-5 flex flex-col sm:flex-row gap-2">
+                        <a href="kas_harian.php" class="inline-flex items-center justify-center px-4 py-3 bg-black text-white text-[10px] font-black uppercase tracking-widest hover:bg-gray-800 transition-all rounded-sm">
+                            <?php echo has_role('admin') ? 'Lihat Semua Riwayat Kas' : ($kasHariIni['masih_buka'] ? 'Tutup Kas' : 'Buka / Riwayat Kas'); ?>
+                        </a>
+                        <?php if (!has_role('admin') && !$kasHariIni['sudah_buka']): ?>
+                            <a href="pos.php" class="inline-flex items-center justify-center px-4 py-3 border border-red-200 text-red-600 bg-red-50 text-[10px] font-black uppercase tracking-widest rounded-sm">
+                                POS Akan Terkunci Sampai Kas Dibuka
+                            </a>
+                        <?php endif; ?>
+                    </div>
+                </div>
 
                 <!-- KPI Cards -->
                 <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-6 md:gap-8 dashboard-kpi-block border-b border-subtle pb-10 md:pb-14">

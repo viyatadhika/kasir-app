@@ -26,7 +26,7 @@ if (!function_exists('rupiah')) {
      */
     function rupiah($n)
     {
-        return 'Rp' . number_format((float)($n ?? 0), 0, ',', '.');
+        return 'Rp ' . number_format((float)($n ?? 0), 0, ',', '.');
     }
 }
 if (!function_exists('tanggal_id')) {
@@ -62,6 +62,24 @@ if (!function_exists('current_user_name_safe')) {
         if (!empty($_SESSION['user']['name'])) return (string)$_SESSION['user']['name'];
         if (!empty($_SESSION['user']['username'])) return (string)$_SESSION['user']['username'];
         return 'Operator';
+    }
+}
+if (!function_exists('current_user_role_safe')) {
+    function current_user_role_safe()
+    {
+        foreach (['role', 'level', 'user_role', 'tipe_user'] as $k) {
+            if (!empty($_SESSION[$k])) return strtolower((string)$_SESSION[$k]);
+        }
+        if (!empty($_SESSION['user']['role'])) return strtolower((string)$_SESSION['user']['role']);
+        if (!empty($_SESSION['user']['level'])) return strtolower((string)$_SESSION['user']['level']);
+        return '';
+    }
+}
+if (!function_exists('is_admin_kas_safe')) {
+    function is_admin_kas_safe()
+    {
+        $role = current_user_role_safe();
+        return in_array($role, ['admin', 'administrator', 'superadmin', 'owner'], true);
     }
 }
 if (!function_exists('has_table')) {
@@ -147,6 +165,7 @@ ensure_kas_harian_table($pdo);
 $userId        = current_user_id_safe();
 $operatorName  = current_user_name_safe();
 $today         = date('Y-m-d');
+$isAdminKas   = is_admin_kas_safe();
 
 /**
  * @param PDO $pdo
@@ -319,8 +338,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_GET['action'])) {
         if ($_GET['action'] === 'detail') {
             $id = (int)($input['id'] ?? 0);
             if ($id <= 0) json_response(['success' => false, 'message' => 'ID tidak valid.']);
-            $st = $pdo->prepare("SELECT * FROM kas_harian WHERE id=:id LIMIT 1");
-            $st->execute([':id' => $id]);
+            if ($isAdminKas) {
+                $st = $pdo->prepare("SELECT * FROM kas_harian WHERE id=:id LIMIT 1");
+                $st->execute([':id' => $id]);
+            } else {
+                $st = $pdo->prepare("SELECT * FROM kas_harian WHERE id=:id AND user_id=:user_id LIMIT 1");
+                $st->execute([':id' => $id, ':user_id' => $userId]);
+            }
             $row = $st->fetch(PDO::FETCH_ASSOC);
             if (!$row) json_response(['success' => false, 'message' => 'Data tidak ditemukan.']);
             $sales = ($row['status'] === 'buka') ? hitung_penjualan_shift($pdo, $row['opened_at']) : [
@@ -358,13 +382,92 @@ $kasAkhirNow  = $shiftLast ? (($shiftLast['status'] === 'buka') ? ((float)$shift
 $kasAktualNow = $shiftLast && $shiftLast['kas_aktual'] !== null ? (float)$shiftLast['kas_aktual'] : $kasAkhirNow;
 $selisihNow   = $kasAktualNow - $kasAkhirNow;
 
+// ── Filter + pagination riwayat kas ─────────────────────────────────────────
+$filterStart   = trim((string)($_GET['start'] ?? ''));
+$filterEnd     = trim((string)($_GET['end'] ?? ''));
+$filterStatus  = trim((string)($_GET['status'] ?? ''));
+$filterUserId  = $isAdminKas ? (int)($_GET['operator'] ?? 0) : 0;
+$page          = max(1, (int)($_GET['page'] ?? 1));
+$perPage       = (int)($_GET['per_page'] ?? 10);
+$allowedPerPage = [10, 20, 50, 100];
+if (!in_array($perPage, $allowedPerPage, true)) $perPage = 10;
+$offset        = ($page - 1) * $perPage;
+
+if ($filterStart !== '' && !preg_match('/^\d{4}-\d{2}-\d{2}$/', $filterStart)) $filterStart = '';
+if ($filterEnd !== '' && !preg_match('/^\d{4}-\d{2}-\d{2}$/', $filterEnd)) $filterEnd = '';
+if (!in_array($filterStatus, ['buka', 'tutup'], true)) $filterStatus = '';
+
+$operatorFilterList = [];
+if ($isAdminKas) {
+    try {
+        $operatorFilterList = $pdo->query("SELECT user_id, COALESCE(NULLIF(operator,''), CONCAT('User #', user_id)) AS operator FROM kas_harian GROUP BY user_id, operator ORDER BY operator ASC")->fetchAll(PDO::FETCH_ASSOC);
+    } catch (Throwable $e) {
+        $operatorFilterList = [];
+    }
+}
+
 $history = [];
+$totalHistory = 0;
+$totalPages = 1;
 try {
-    $st = $pdo->prepare("SELECT * FROM kas_harian WHERE user_id=:user_id ORDER BY id DESC LIMIT 20");
-    $st->execute([':user_id' => $userId]);
+    $where = [];
+    $params = [];
+
+    if ($isAdminKas) {
+        // Admin melihat semua riwayat buka/tutup kas dari seluruh operator.
+        if ($filterUserId > 0) {
+            $where[] = "user_id = :filter_user_id";
+            $params[':filter_user_id'] = $filterUserId;
+        }
+    } else {
+        // Kasir/operator hanya melihat riwayat kas miliknya sendiri.
+        $where[] = "user_id = :user_id";
+        $params[':user_id'] = $userId;
+    }
+
+    if ($filterStart !== '') {
+        $where[] = "tanggal >= :start";
+        $params[':start'] = $filterStart;
+    }
+    if ($filterEnd !== '') {
+        $where[] = "tanggal <= :end";
+        $params[':end'] = $filterEnd;
+    }
+    if ($filterStatus !== '') {
+        $where[] = "status = :status";
+        $params[':status'] = $filterStatus;
+    }
+
+    $whereSql = $where ? ('WHERE ' . implode(' AND ', $where)) : '';
+
+    $stCount = $pdo->prepare("SELECT COUNT(*) FROM kas_harian $whereSql");
+    foreach ($params as $k => $v) $stCount->bindValue($k, $v);
+    $stCount->execute();
+    $totalHistory = (int)$stCount->fetchColumn();
+    $totalPages = max(1, (int)ceil($totalHistory / $perPage));
+    if ($page > $totalPages) {
+        $page = $totalPages;
+        $offset = ($page - 1) * $perPage;
+    }
+
+    $st = $pdo->prepare("SELECT * FROM kas_harian $whereSql ORDER BY tanggal DESC, id DESC LIMIT :limit OFFSET :offset");
+    foreach ($params as $k => $v) $st->bindValue($k, $v);
+    $st->bindValue(':limit', $perPage, PDO::PARAM_INT);
+    $st->bindValue(':offset', $offset, PDO::PARAM_INT);
+    $st->execute();
     $history = $st->fetchAll(PDO::FETCH_ASSOC);
 } catch (Throwable $e) {
+    $history = [];
+    $totalHistory = 0;
+    $totalPages = 1;
 }
+
+$paginationBaseParams = $_GET;
+unset($paginationBaseParams['page']);
+$paginationBaseUrl = 'kas_harian.php?' . http_build_query($paginationBaseParams);
+$paginationBaseUrl .= $paginationBaseParams ? '&' : '';
+$historyStartNo = $totalHistory > 0 ? ($offset + 1) : 0;
+$historyEndNo = min($offset + count($history), $totalHistory);
 
 // ── Data untuk cetak Bluetooth (format sama dengan struk.php) ──────────────
 $kasReceiptData = [
@@ -386,7 +489,7 @@ $kasReceiptData = [
 $rightActionHtml = '
 <div class="flex items-center gap-2">
     <button onclick="cetakBluetooth()" id="btnBluetoothKas" class="inline-flex items-center gap-2 px-4 py-2 text-[10px] font-black uppercase tracking-widest bg-black text-white hover:bg-gray-800 transition-all">
-        <span>&#128424; Print</span>
+        <span>Print</span>
     </button>
 </div>';
 ?>
@@ -578,6 +681,98 @@ $rightActionHtml = '
             text-align: right;
         }
 
+
+
+        /* ── Responsive Kas Harian ───────────────────────────── */
+        .kas-history-card {
+            background: #fff;
+            border: 1px solid #f0f0f0;
+            border-radius: 0;
+            padding: 14px;
+        }
+
+        .kas-history-card:active {
+            background: #fafafa;
+        }
+
+        .kas-history-row {
+            display: flex;
+            justify-content: space-between;
+            gap: 12px;
+            padding: 8px 0;
+            border-bottom: 1px solid #f5f5f5;
+            font-size: 12px;
+        }
+
+        .kas-history-row:last-child {
+            border-bottom: 0;
+        }
+
+        .kas-history-label {
+            color: #9ca3af;
+            font-size: 9px;
+            font-weight: 900;
+            text-transform: uppercase;
+            letter-spacing: .08em;
+            white-space: nowrap;
+        }
+
+        .kas-history-value {
+            color: #111827;
+            font-weight: 800;
+            text-align: right;
+            word-break: break-word;
+        }
+
+        .kas-history-actions {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 8px;
+            margin-top: 12px;
+        }
+
+        @media (max-width: 1279px) {
+            .receipt-wrap {
+                order: -1;
+            }
+
+            .receipt {
+                width: 100%;
+                max-width: 80mm;
+            }
+        }
+
+        @media (max-width: 640px) {
+            .kas-main {
+                padding-left: 14px !important;
+                padding-right: 14px !important;
+            }
+
+            .box {
+                border-left: 1px solid #f0f0f0;
+                border-right: 1px solid #f0f0f0;
+            }
+
+            .receipt-wrap {
+                padding: 12px !important;
+            }
+
+            .receipt {
+                font-size: 11px;
+                padding: 8px 10px;
+            }
+
+            #kasDetailModal {
+                max-width: 100%;
+                max-height: 88vh;
+            }
+
+            #kasDetailModal .modal-row {
+                align-items: flex-start;
+                gap: 12px;
+            }
+        }
+
         @media (min-width:1024px) {
 
             .kas-main,
@@ -594,6 +789,372 @@ $rightActionHtml = '
 
             .kas-main {
                 padding-bottom: 5.5rem !important
+            }
+        }
+
+
+        .kas-filter-grid {
+            display: grid;
+            grid-template-columns: repeat(5, minmax(0, 1fr));
+            gap: 10px;
+        }
+
+        .kas-filter-label {
+            display: block;
+            margin-bottom: 6px;
+            font-size: 9px;
+            font-weight: 900;
+            text-transform: uppercase;
+            letter-spacing: .08em;
+            color: #9ca3af;
+        }
+
+        .kas-filter-input {
+            width: 100%;
+            background: #fafafa;
+            border: 1px solid #eee;
+            padding: 10px 12px;
+            font-size: 12px;
+            font-weight: 700;
+            border-radius: 0;
+        }
+
+        .kas-pagination {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            padding: 14px 16px;
+            border-top: 1px solid #f0f0f0;
+            background: #fff;
+        }
+
+        .kas-page-link {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            min-width: 34px;
+            height: 34px;
+            padding: 0 10px;
+            border: 1px solid #eee;
+            background: #fff;
+            font-size: 10px;
+            font-weight: 900;
+            text-transform: uppercase;
+            letter-spacing: .05em;
+        }
+
+        .kas-page-link.active {
+            background: #000;
+            color: #fff;
+            border-color: #000;
+        }
+
+        .kas-page-link.disabled {
+            opacity: .35;
+            pointer-events: none;
+        }
+
+        @media (max-width:1023px) {
+            .kas-filter-grid {
+                grid-template-columns: 1fr 1fr;
+            }
+        }
+
+        @media (max-width:640px) {
+            .kas-filter-grid {
+                grid-template-columns: 1fr;
+            }
+
+            .kas-pagination {
+                align-items: stretch;
+                flex-direction: column;
+            }
+
+            .kas-page-link {
+                height: 38px;
+            }
+        }
+
+
+
+        /* ── Tema konsisten seperti Produk / Diskon / Stok Opname ───────────── */
+        .kas-main .summary-card,
+        .kas-main .filter-card,
+        .kas-main .table-card,
+        .kas-main .kas-action-card,
+        .kas-main .kas-history-card,
+        .kas-main .receipt-wrap {
+            background: #fff;
+            border: 1px solid #f0f0f0;
+            border-radius: 0 !important;
+            box-shadow: none !important;
+        }
+
+        .kas-main input,
+        .kas-main select,
+        .kas-main textarea,
+        .kas-main button,
+        .kas-main a {
+            border-radius: 0 !important;
+        }
+
+        .kas-main .filter-card {
+            padding: 1rem;
+        }
+
+        .kas-main .table-card {
+            overflow: hidden;
+        }
+
+        .kas-summary-grid {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: .75rem;
+        }
+
+        @media (min-width: 768px) {
+            .kas-summary-grid {
+                grid-template-columns: repeat(4, minmax(0, 1fr));
+                gap: 1rem;
+            }
+        }
+
+        .kas-mobile-list {
+            display: grid;
+            grid-template-columns: 1fr;
+            gap: .75rem;
+            padding: .75rem;
+        }
+
+        @media (min-width: 768px) and (max-width: 1023px) {
+            .kas-mobile-list {
+                grid-template-columns: repeat(2, minmax(0, 1fr));
+                padding: 1rem;
+            }
+        }
+
+        .kas-history-card {
+            transition: border-color .15s ease, background .15s ease;
+        }
+
+        .kas-history-card:hover {
+            border-color: #e5e7eb;
+            background: #fff;
+        }
+
+        .kas-filter-grid {
+            display: grid;
+            grid-template-columns: 1fr;
+            gap: .75rem;
+        }
+
+        @media (min-width: 640px) {
+            .kas-filter-grid {
+                grid-template-columns: repeat(2, minmax(0, 1fr));
+            }
+        }
+
+        @media (min-width: 1024px) {
+            .kas-filter-grid {
+                grid-template-columns: repeat(5, minmax(0, 1fr));
+            }
+        }
+
+        .kas-action-btn {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            min-height: 42px;
+            padding: 0 14px;
+            font-size: 10px;
+            font-weight: 900;
+            text-transform: uppercase;
+            letter-spacing: .10em;
+        }
+
+        @media (max-width: 640px) {
+            .kas-main {
+                padding: .75rem !important;
+                padding-bottom: 6rem !important;
+            }
+
+            .kas-action-btn {
+                width: 100%;
+            }
+
+            .kas-main .summary-card {
+                padding: .9rem !important;
+            }
+
+            .kas-main .summary-card p:nth-child(2) {
+                font-size: 1rem !important;
+                line-height: 1.35;
+                word-break: break-word;
+            }
+        }
+
+
+
+        /* === Product-page exact spacing/theme for Kas Harian === */
+        .kas-main {
+            background-color: #fcfcfc;
+        }
+
+        .kas-main .summary-card {
+            min-height: 112px;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+        }
+
+        .kas-main .summary-card p:first-child {
+            margin-bottom: 4px;
+        }
+
+        .kas-action-card {
+            padding: 16px !important;
+            margin-bottom: 16px;
+        }
+
+        .kas-action-card h2 {
+            font-size: 10px !important;
+            color: #9ca3af;
+            margin-bottom: 14px !important;
+        }
+
+        .kas-action-card input,
+        .kas-action-card textarea {
+            background: #f9fafb !important;
+            border: 1px solid #f3f4f6 !important;
+            font-size: 14px !important;
+            padding: 10px 12px !important;
+        }
+
+        .kas-action-card button,
+        .kas-action-btn {
+            height: 40px;
+            padding: 0 14px !important;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 10px !important;
+            font-weight: 900 !important;
+            text-transform: uppercase;
+            letter-spacing: .08em;
+        }
+
+        .kas-main .filter-card {
+            margin-bottom: 16px;
+            padding: 16px !important;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+
+        @media (min-width: 768px) {
+            .kas-main .filter-card {
+                flex-direction: row;
+                flex-wrap: wrap;
+                align-items: center;
+            }
+        }
+
+        .kas-filter-grid {
+            flex: 1 1 auto;
+            display: grid !important;
+            grid-template-columns: minmax(180px, 1.2fr) minmax(180px, 1.2fr) minmax(140px, .85fr) minmax(150px, .9fr) minmax(130px, .75fr);
+            gap: 12px;
+            align-items: end;
+        }
+
+        .kas-filter-label {
+            display: none !important;
+        }
+
+        .kas-filter-input {
+            height: 40px;
+            width: 100%;
+            background: #f9fafb !important;
+            border: 1px solid #f3f4f6 !important;
+            padding: 0 12px !important;
+            font-size: 12px !important;
+            font-weight: 800 !important;
+            color: #64748b;
+            text-transform: uppercase;
+        }
+
+        .kas-filter-actions {
+            display: flex;
+            gap: 12px;
+            align-items: center;
+            margin-top: 0 !important;
+        }
+
+        .kas-result-count {
+            font-size: 12px;
+            color: #9ca3af;
+            font-weight: 500;
+            white-space: nowrap;
+            margin-left: auto;
+        }
+
+        .kas-main .table-card {
+            margin-top: 0;
+        }
+
+        .kas-table-titlebar {
+            display: none !important;
+        }
+
+        .kas-main table thead th {
+            padding: 18px 20px !important;
+            font-size: 10px !important;
+            color: #9ca3af !important;
+            letter-spacing: .08em;
+        }
+
+        .kas-main table tbody td {
+            padding: 18px 20px !important;
+        }
+
+        .kas-main table {
+            min-width: 900px !important;
+        }
+
+        .kas-pagination {
+            background: #fff !important;
+            padding: 16px !important;
+        }
+
+        @media (max-width: 1023px) {
+            .kas-filter-grid {
+                grid-template-columns: 1fr 1fr !important;
+            }
+
+            .kas-filter-actions {
+                width: 100%;
+                display: grid;
+                grid-template-columns: 1fr 1fr;
+            }
+
+            .kas-result-count {
+                width: 100%;
+                margin-left: 0;
+            }
+        }
+
+        @media (max-width: 640px) {
+            .kas-filter-grid {
+                grid-template-columns: 1fr !important;
+            }
+
+            .kas-filter-actions {
+                grid-template-columns: 1fr;
+            }
+
+            .kas-main .summary-card {
+                min-height: 104px;
             }
         }
 
@@ -656,16 +1217,13 @@ $rightActionHtml = '
     <div id="kasStatusBar" class="no-print"></div>
 
     <main class="kas-main p-4 sm:p-5 md:p-8 lg:p-10">
-        <div class="no-print mb-6 flex flex-col md:flex-row md:items-end md:justify-between gap-4">
-            <div>
-                <p class="text-[10px] font-black uppercase tracking-widest text-gray-400">Operasional Kas</p>
-                <h1 class="text-2xl md:text-3xl font-black tracking-tight">Buka & Tutup Kas</h1>
-                <p class="text-xs text-gray-500 mt-1">Kelola kas awal, kas akhir, dan print laporan shift thermal 80mm.</p>
+        <?php if (!empty($_SESSION['kas_warning'])): ?>
+            <div class="no-print mb-4 bg-red-50 border border-red-200 text-red-700 px-4 py-3 text-xs font-bold uppercase tracking-widest">
+                <?php echo e($_SESSION['kas_warning']); ?>
             </div>
-            <div class="flex gap-2">
-                <button onclick="cetakBluetooth()" id="btnBluetoothKas2" class="btn px-4 py-3 bg-black text-white text-xs font-black uppercase tracking-widest hover:bg-gray-800 transition-all">&#128424; Print</button>
-            </div>
-        </div>
+            <?php unset($_SESSION['kas_warning']); ?>
+        <?php endif; ?>
+
 
         <div id="kasHttpsNotice" class="no-print">
             <strong>&#9888; Web Bluetooth butuh HTTPS / localhost</strong>
@@ -674,116 +1232,240 @@ $rightActionHtml = '
             Isi: <code>http://<?php echo e($_SERVER['HTTP_HOST'] ?? '192.168.x.x'); ?></code> &#8594; Enable &#8594; Relaunch
         </div>
 
-        <div class="no-print grid grid-cols-2 md:grid-cols-4 gap-3 md:gap-4 mb-6 mt-6">
-            <div class="box p-4">
+        <div class="no-print grid grid-cols-2 md:grid-cols-4 gap-3 md:gap-4 mb-6 md:mb-8">
+            <div class="summary-card p-4 md:p-5">
                 <p class="text-[10px] font-bold text-gray-400 uppercase tracking-widest">Status</p>
-                <p class="text-xl font-black mt-1 <?php echo $shiftAktif ? 'text-green-600' : 'text-gray-900'; ?>"><?php echo $shiftAktif ? 'Kas Buka' : 'Kas Tutup'; ?></p>
+                <p class="text-2xl font-bold <?php echo $shiftAktif ? 'text-green-600' : 'text-gray-900'; ?>"><?php echo $shiftAktif ? 'Kas Buka' : 'Kas Tutup'; ?></p>
             </div>
-            <div class="box p-4">
+            <div class="summary-card p-4 md:p-5">
                 <p class="text-[10px] font-bold text-gray-400 uppercase tracking-widest">Kas Awal</p>
-                <p class="text-xl font-black mt-1"><?php echo rupiah($shiftLast['kas_awal'] ?? 0); ?></p>
+                <p class="text-2xl font-bold"><?php echo rupiah($shiftLast['kas_awal'] ?? 0); ?></p>
             </div>
-            <div class="box p-4">
+            <div class="summary-card p-4 md:p-5">
                 <p class="text-[10px] font-bold text-gray-400 uppercase tracking-widest">Total Sales</p>
-                <p class="text-xl font-black mt-1 text-blue-600"><?php echo rupiah($salesNow['total_sales']); ?></p>
+                <p class="text-2xl font-bold text-blue-600"><?php echo rupiah($salesNow['total_sales']); ?></p>
             </div>
-            <div class="box p-4">
+            <div class="summary-card p-4 md:p-5">
                 <p class="text-[10px] font-bold text-gray-400 uppercase tracking-widest">Kas Akhir</p>
-                <p class="text-xl font-black mt-1"><?php echo rupiah($kasAkhirNow); ?></p>
+                <p class="text-2xl font-bold"><?php echo rupiah($kasAkhirNow); ?></p>
             </div>
         </div>
 
-        <div class="grid grid-cols-1 xl:grid-cols-[1fr_380px] gap-6">
-            <div class="no-print space-y-6">
-                <?php if (!$shiftAktif): ?>
-                    <div class="box p-5 md:p-7">
-                        <h2 class="text-sm font-black uppercase tracking-widest mb-5">Buka Kas Hari Ini</h2>
-                        <label class="block text-[10px] font-bold uppercase tracking-widest text-gray-500 mb-1.5">Kas Awal</label>
-                        <input type="text" id="kas-awal" placeholder="Contoh: 431000" inputmode="numeric" class="w-full bg-gray-50 border border-gray-200 px-4 py-3 text-lg font-black">
-                        <button onclick="bukaKas()" class="btn mt-4 w-full py-3 bg-black text-white text-xs font-black uppercase tracking-widest">Buka Kas</button>
+        <div class="no-print space-y-6">
+            <?php if (!$shiftAktif): ?>
+                <div class="kas-action-card p-5 md:p-7">
+                    <h2 class="text-sm font-black uppercase tracking-widest mb-5">Buka Kas Hari Ini</h2>
+                    <label class="block text-[10px] font-bold uppercase tracking-widest text-gray-500 mb-1.5">Kas Awal</label>
+                    <input type="text" id="kas-awal" placeholder="Contoh: 431000" inputmode="numeric" class="w-full bg-gray-50 border border-gray-200 px-4 py-3 text-lg font-black">
+                    <button onclick="bukaKas()" class="btn mt-4 w-full py-3 bg-black text-white text-xs font-black uppercase tracking-widest">Buka Kas</button>
+                </div>
+            <?php else: ?>
+                <div class="kas-action-card p-5 md:p-7">
+                    <h2 class="text-sm font-black uppercase tracking-widest mb-5">Tutup Kas Hari Ini</h2>
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+                        <div class="bg-gray-50 border border-subtle p-4">
+                            <p class="text-[10px] font-bold uppercase tracking-widest text-gray-400">Kas Akhir Sistem</p>
+                            <p class="text-2xl font-black mt-1"><?php echo rupiah($kasAkhirNow); ?></p>
+                        </div>
+                        <div class="bg-gray-50 border border-subtle p-4">
+                            <p class="text-[10px] font-bold uppercase tracking-widest text-gray-400">Tunai</p>
+                            <p class="text-2xl font-black mt-1"><?php echo rupiah($salesNow['total_tunai']); ?></p>
+                        </div>
                     </div>
-                <?php else: ?>
-                    <div class="box p-5 md:p-7">
-                        <h2 class="text-sm font-black uppercase tracking-widest mb-5">Tutup Kas Hari Ini</h2>
-                        <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
-                            <div class="bg-gray-50 border border-subtle p-4">
-                                <p class="text-[10px] font-bold uppercase tracking-widest text-gray-400">Kas Akhir Sistem</p>
-                                <p class="text-2xl font-black mt-1"><?php echo rupiah($kasAkhirNow); ?></p>
+                    <label class="block text-[10px] font-bold uppercase tracking-widest text-gray-500 mb-1.5">Kas Aktual di Laci</label>
+                    <input type="text" id="kas-aktual" value="<?php echo number_format($kasAkhirNow, 0, ',', '.'); ?>" inputmode="numeric" class="w-full bg-gray-50 border border-gray-200 px-4 py-3 text-lg font-black">
+                    <label class="block text-[10px] font-bold uppercase tracking-widest text-gray-500 mb-1.5 mt-4">Catatan</label>
+                    <textarea id="catatan" rows="3" class="w-full bg-gray-50 border border-gray-200 px-4 py-3 text-sm" placeholder="Opsional"></textarea>
+                    <button onclick="tutupKas()" class="btn mt-4 w-full py-3 bg-black text-white text-xs font-black uppercase tracking-widest">Tutup Kas & Print</button>
+                </div>
+            <?php endif; ?>
+
+            <div class="table-card overflow-hidden">
+                <div class="kas-table-titlebar p-4 sm:p-5 border-b border-subtle flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+                    <div>
+                        <h2 class="text-sm font-black uppercase tracking-widest"><?php echo $isAdminKas ? 'Riwayat Kas Semua User' : 'Riwayat Kas'; ?></h2>
+                        <p class="text-[10px] text-gray-400 font-bold uppercase tracking-widest mt-1">
+                            <?php echo $totalHistory > 0 ? 'Menampilkan ' . number_format($historyStartNo) . '-' . number_format($historyEndNo) . ' dari ' . number_format($totalHistory) . ' data' : 'Belum ada data sesuai filter'; ?>
+                        </p>
+                    </div>
+                    <span class="text-[10px] text-gray-400 font-bold uppercase tracking-widest">Klik data untuk detail / print</span>
+                </div>
+
+                <form method="get" class="filter-card p-4 sm:p-5 border-b border-subtle bg-white no-print">
+                    <div class="kas-filter-grid">
+                        <div>
+                            <label class="kas-filter-label">Tanggal Awal</label>
+                            <input type="date" name="start" value="<?php echo e($filterStart); ?>" class="kas-filter-input">
+                        </div>
+                        <div>
+                            <label class="kas-filter-label">Tanggal Akhir</label>
+                            <input type="date" name="end" value="<?php echo e($filterEnd); ?>" class="kas-filter-input">
+                        </div>
+                        <div>
+                            <label class="kas-filter-label">Status</label>
+                            <select name="status" class="kas-filter-input">
+                                <option value="">Semua Status</option>
+                                <option value="buka" <?php echo $filterStatus === 'buka' ? 'selected' : ''; ?>>Buka</option>
+                                <option value="tutup" <?php echo $filterStatus === 'tutup' ? 'selected' : ''; ?>>Tutup</option>
+                            </select>
+                        </div>
+                        <?php if ($isAdminKas): ?>
+                            <div>
+                                <label class="kas-filter-label">Operator</label>
+                                <select name="operator" class="kas-filter-input">
+                                    <option value="0">Semua Operator</option>
+                                    <?php foreach ($operatorFilterList as $op): ?>
+                                        <?php $opUserId = (int)($op['user_id'] ?? 0); ?>
+                                        <option value="<?php echo $opUserId; ?>" <?php echo $filterUserId === $opUserId ? 'selected' : ''; ?>><?php echo e($op['operator'] ?? ('User #' . $opUserId)); ?></option>
+                                    <?php endforeach; ?>
+                                </select>
                             </div>
-                            <div class="bg-gray-50 border border-subtle p-4">
-                                <p class="text-[10px] font-bold uppercase tracking-widest text-gray-400">Tunai</p>
-                                <p class="text-2xl font-black mt-1"><?php echo rupiah($salesNow['total_tunai']); ?></p>
+                        <?php endif; ?>
+                        <div>
+                            <label class="kas-filter-label">Per Halaman</label>
+                            <select name="per_page" class="kas-filter-input">
+                                <?php foreach ([10, 20, 50, 100] as $pp): ?>
+                                    <option value="<?php echo $pp; ?>" <?php echo $perPage === $pp ? 'selected' : ''; ?>><?php echo $pp; ?> Data</option>
+                                <?php endforeach; ?>
+                            </select>
+                        </div>
+                    </div>
+                    <div class="kas-filter-actions">
+                        <button type="submit" class="kas-action-btn bg-black text-white hover:bg-gray-800 transition-all">Terapkan</button>
+                        <a href="kas_harian.php" class="kas-action-btn border border-subtle bg-white text-gray-600 hover:bg-gray-50 transition-all">Reset</a>
+                        <span class="kas-result-count hidden sm:block"><?php echo number_format($totalHistory); ?> data ditemukan</span>
+                    </div>
+                </form>
+
+                <!-- Desktop: tabel lengkap -->
+                <div class="hidden lg:block overflow-x-auto">
+                    <table class="w-full text-left min-w-[760px]">
+                        <thead class="bg-gray-50 border-b border-subtle">
+                            <tr>
+                                <th class="px-4 py-3 text-[10px] font-black uppercase tracking-widest text-gray-400">Tanggal</th>
+                                <th class="px-4 py-3 text-[10px] font-black uppercase tracking-widest text-gray-400">Operator</th>
+                                <th class="px-4 py-3 text-[10px] font-black uppercase tracking-widest text-gray-400 text-right">Kas Awal</th>
+                                <th class="px-4 py-3 text-[10px] font-black uppercase tracking-widest text-gray-400 text-right">Sales</th>
+                                <th class="px-4 py-3 text-[10px] font-black uppercase tracking-widest text-gray-400 text-right">Kas Akhir</th>
+                                <th class="px-4 py-3 text-[10px] font-black uppercase tracking-widest text-gray-400 text-center">Status</th>
+                                <th class="px-4 py-3 text-[10px] font-black uppercase tracking-widest text-gray-400 text-center">Aksi</th>
+                            </tr>
+                        </thead>
+                        <tbody class="divide-y divide-[#f5f5f5]">
+                            <?php foreach ($history as $h): ?>
+                                <tr class="row-clickable" onclick="bukaDetailKas(<?php echo (int)$h['id']; ?>)">
+                                    <td class="px-4 py-3 text-xs font-bold"><?php echo e(date('d/m/Y', strtotime($h['tanggal']))); ?></td>
+                                    <td class="px-4 py-3 text-xs"><?php echo e($h['operator']); ?></td>
+                                    <td class="px-4 py-3 text-xs text-right"><?php echo rupiah($h['kas_awal']); ?></td>
+                                    <td class="px-4 py-3 text-xs text-right"><?php echo rupiah($h['total_sales']); ?></td>
+                                    <td class="px-4 py-3 text-xs text-right"><?php echo rupiah($h['kas_akhir_sistem']); ?></td>
+                                    <td class="px-4 py-3 text-center"><span class="text-[9px] font-black uppercase px-2 py-1 <?php echo $h['status'] === 'buka' ? 'bg-green-50 text-green-700' : 'bg-gray-100 text-gray-700'; ?>"><?php echo e($h['status']); ?></span></td>
+                                    <td class="px-4 py-3 text-center">
+                                        <button type="button" onclick="event.stopPropagation(); printKasRiwayat(<?php echo (int)$h['id']; ?>)" class="btn px-3 py-2 bg-black text-white text-[9px] font-black uppercase tracking-widest hover:bg-gray-800 transition-all">
+                                            <?php echo $h['status'] === 'buka' ? 'Print Sementara' : 'Print'; ?>
+                                        </button>
+                                    </td>
+                                </tr>
+                            <?php endforeach;
+                            if (empty($history)): ?>
+                                <tr>
+                                    <td colspan="7" class="px-4 py-10 text-center text-xs text-gray-400 font-bold uppercase tracking-widest">Belum ada riwayat</td>
+                                </tr>
+                            <?php endif; ?>
+                        </tbody>
+                    </table>
+                </div>
+
+                <!-- Tablet & Mobile: card list agar tidak melebar -->
+                <div class="lg:hidden kas-mobile-list">
+                    <?php foreach ($history as $h): ?>
+                        <div class="kas-history-card" onclick="bukaDetailKas(<?php echo (int)$h['id']; ?>)">
+                            <div class="flex items-start justify-between gap-3 mb-2">
+                                <div class="min-w-0">
+                                    <p class="text-sm font-black text-gray-900"><?php echo e(date('d/m/Y', strtotime($h['tanggal']))); ?></p>
+                                    <p class="text-[10px] font-bold text-gray-400 uppercase tracking-widest mt-0.5 truncate"><?php echo e($h['operator']); ?></p>
+                                </div>
+                                <span class="shrink-0 text-[9px] font-black uppercase px-2 py-1 <?php echo $h['status'] === 'buka' ? 'bg-green-50 text-green-700' : 'bg-gray-100 text-gray-700'; ?>"><?php echo e($h['status']); ?></span>
+                            </div>
+
+                            <div class="kas-history-row">
+                                <span class="kas-history-label">Kas Awal</span>
+                                <span class="kas-history-value"><?php echo rupiah($h['kas_awal']); ?></span>
+                            </div>
+                            <div class="kas-history-row">
+                                <span class="kas-history-label">Sales</span>
+                                <span class="kas-history-value text-blue-600"><?php echo rupiah($h['total_sales']); ?></span>
+                            </div>
+                            <div class="kas-history-row">
+                                <span class="kas-history-label">Kas Akhir</span>
+                                <span class="kas-history-value"><?php echo rupiah($h['kas_akhir_sistem']); ?></span>
+                            </div>
+
+                            <div class="kas-history-actions">
+                                <button type="button" onclick="event.stopPropagation(); bukaDetailKas(<?php echo (int)$h['id']; ?>)" class="btn py-2 border border-subtle bg-white text-gray-700 text-[9px] font-black uppercase tracking-widest">
+                                    Detail
+                                </button>
+                                <button type="button" onclick="event.stopPropagation(); printKasRiwayat(<?php echo (int)$h['id']; ?>)" class="btn py-2 bg-black text-white text-[9px] font-black uppercase tracking-widest">
+                                    <?php echo $h['status'] === 'buka' ? 'Print Sementara' : 'Print'; ?>
+                                </button>
                             </div>
                         </div>
-                        <label class="block text-[10px] font-bold uppercase tracking-widest text-gray-500 mb-1.5">Kas Aktual di Laci</label>
-                        <input type="text" id="kas-aktual" value="<?php echo number_format($kasAkhirNow, 0, ',', '.'); ?>" inputmode="numeric" class="w-full bg-gray-50 border border-gray-200 px-4 py-3 text-lg font-black">
-                        <label class="block text-[10px] font-bold uppercase tracking-widest text-gray-500 mb-1.5 mt-4">Catatan</label>
-                        <textarea id="catatan" rows="3" class="w-full bg-gray-50 border border-gray-200 px-4 py-3 text-sm" placeholder="Opsional"></textarea>
-                        <button onclick="tutupKas()" class="btn mt-4 w-full py-3 bg-black text-white text-xs font-black uppercase tracking-widest">Tutup Kas & Print</button>
+                    <?php endforeach;
+                    if (empty($history)): ?>
+                        <div class="px-4 py-10 text-center text-xs text-gray-400 font-bold uppercase tracking-widest">Belum ada riwayat</div>
+                    <?php endif; ?>
+                </div>
+
+                <?php if ($totalPages > 1): ?>
+                    <div class="kas-pagination no-print">
+                        <div class="text-[10px] font-bold uppercase tracking-widest text-gray-400">
+                            Halaman <?php echo number_format($page); ?> dari <?php echo number_format($totalPages); ?>
+                        </div>
+                        <div class="flex flex-wrap gap-1">
+                            <a class="kas-page-link <?php echo $page <= 1 ? 'disabled' : ''; ?>" href="<?php echo e($paginationBaseUrl . 'page=' . max(1, $page - 1)); ?>">Prev</a>
+                            <?php
+                            $startPage = max(1, $page - 2);
+                            $endPage = min($totalPages, $page + 2);
+                            if ($startPage > 1): ?>
+                                <a class="kas-page-link" href="<?php echo e($paginationBaseUrl . 'page=1'); ?>">1</a>
+                                <?php if ($startPage > 2): ?><span class="kas-page-link disabled">...</span><?php endif; ?>
+                            <?php endif; ?>
+                            <?php for ($i = $startPage; $i <= $endPage; $i++): ?>
+                                <a class="kas-page-link <?php echo $i === $page ? 'active' : ''; ?>" href="<?php echo e($paginationBaseUrl . 'page=' . $i); ?>"><?php echo $i; ?></a>
+                            <?php endfor; ?>
+                            <?php if ($endPage < $totalPages): ?>
+                                <?php if ($endPage < $totalPages - 1): ?><span class="kas-page-link disabled">...</span><?php endif; ?>
+                                <a class="kas-page-link" href="<?php echo e($paginationBaseUrl . 'page=' . $totalPages); ?>"><?php echo $totalPages; ?></a>
+                            <?php endif; ?>
+                            <a class="kas-page-link <?php echo $page >= $totalPages ? 'disabled' : ''; ?>" href="<?php echo e($paginationBaseUrl . 'page=' . min($totalPages, $page + 1)); ?>">Next</a>
+                        </div>
                     </div>
                 <?php endif; ?>
-
-                <div class="box overflow-hidden">
-                    <div class="p-5 border-b border-subtle flex items-center justify-between">
-                        <h2 class="text-sm font-black uppercase tracking-widest">Riwayat Kas</h2>
-                        <span class="text-[10px] text-gray-400 font-bold uppercase tracking-widest">Klik baris untuk detail</span>
-                    </div>
-                    <div class="overflow-x-auto">
-                        <table class="w-full text-left min-w-[760px]">
-                            <thead class="bg-gray-50 border-b border-subtle">
-                                <tr>
-                                    <th class="px-4 py-3 text-[10px] font-black uppercase tracking-widest text-gray-400">Tanggal</th>
-                                    <th class="px-4 py-3 text-[10px] font-black uppercase tracking-widest text-gray-400">Operator</th>
-                                    <th class="px-4 py-3 text-[10px] font-black uppercase tracking-widest text-gray-400 text-right">Kas Awal</th>
-                                    <th class="px-4 py-3 text-[10px] font-black uppercase tracking-widest text-gray-400 text-right">Sales</th>
-                                    <th class="px-4 py-3 text-[10px] font-black uppercase tracking-widest text-gray-400 text-right">Kas Akhir</th>
-                                    <th class="px-4 py-3 text-[10px] font-black uppercase tracking-widest text-gray-400 text-center">Status</th>
-                                </tr>
-                            </thead>
-                            <tbody class="divide-y divide-[#f5f5f5]">
-                                <?php foreach ($history as $h): ?>
-                                    <tr class="row-clickable" onclick="bukaDetailKas(<?php echo (int)$h['id']; ?>)">
-                                        <td class="px-4 py-3 text-xs font-bold"><?php echo e(date('d/m/Y', strtotime($h['tanggal']))); ?></td>
-                                        <td class="px-4 py-3 text-xs"><?php echo e($h['operator']); ?></td>
-                                        <td class="px-4 py-3 text-xs text-right"><?php echo rupiah($h['kas_awal']); ?></td>
-                                        <td class="px-4 py-3 text-xs text-right"><?php echo rupiah($h['total_sales']); ?></td>
-                                        <td class="px-4 py-3 text-xs text-right"><?php echo rupiah($h['kas_akhir_sistem']); ?></td>
-                                        <td class="px-4 py-3 text-center"><span class="text-[9px] font-black uppercase px-2 py-1 <?php echo $h['status'] === 'buka' ? 'bg-green-50 text-green-700' : 'bg-gray-100 text-gray-700'; ?>"><?php echo e($h['status']); ?></span></td>
-                                    </tr>
-                                <?php endforeach;
-                                if (empty($history)): ?>
-                                    <tr>
-                                        <td colspan="6" class="px-4 py-10 text-center text-xs text-gray-400 font-bold uppercase tracking-widest">Belum ada riwayat</td>
-                                    </tr>
-                                <?php endif; ?>
-                            </tbody>
-                        </table>
-                    </div>
-                </div>
             </div>
+        </div>
 
-            <div class="receipt-wrap box p-4 print-area">
-                <div class="receipt mx-auto" id="receipt">
-                    <div class="center receipt-title">[COPY]</div>
-                    <div>Laporan Shift</div>
-                    <div>Tanggal</div>
-                    <div><?php echo tanggal_id(($shiftLast['closed_at'] ?? '') ?: date('Y-m-d H:i:s')); ?></div>
-                    <br>
-                    <div class="row"><span class="label">Operator</span><span class="value">: <?php echo e(strtoupper($shiftLast['operator'] ?? $operatorName)); ?></span></div>
-                    <div class="row"><span class="label">Kas Awal</span><span class="value">: <?php echo rupiah($shiftLast['kas_awal'] ?? 0); ?></span></div>
-                    <div class="row"><span class="label">Total Sales</span><span class="value">: <?php echo rupiah($salesNow['total_sales']); ?></span></div>
-                    <div class="row"><span class="label">Kas Akhir</span><span class="value">: <?php echo rupiah($kasAkhirNow); ?></span></div>
-                    <div class="row"><span class="label">Kas Aktual</span><span class="value">: <?php echo rupiah($kasAktualNow); ?></span></div>
-                    <div class="row"><span class="label">TUNAI</span><span class="value">: <?php echo rupiah($salesNow['total_tunai']); ?></span></div>
-                    <div class="row"><span class="label">NON-TUNAI</span><span class="value">: <?php echo rupiah($salesNow['total_nontunai']); ?></span></div>
-                    <div class="row"><span class="label">Selisih</span><span class="value">: <?php echo ($selisihNow >= 0 ? '+' : '-') . rupiah(abs($selisihNow)); ?></span></div>
-                    <div class="row"><span class="label">Margin</span><span class="value">: <?php echo rupiah($salesNow['margin']); ?></span></div>
-                    <div class="row"><span class="label">Fee Promosi</span><span class="value">: <?php echo rupiah($salesNow['fee_promosi']); ?></span></div>
-                    <div class="row"><span class="label">Total Struk</span><span class="value">: <?php echo number_format((int)$salesNow['total_struk'], 0, ',', '.'); ?></span></div>
-                    <br><br>
-                    <div><?php echo e(strtoupper('TMI KOPERASI KONSUMEN PRIMER BSDK SEJAHTERA')); ?></div>
-                </div>
+        <div class="receipt-wrap hidden print-area">
+            <div class="receipt mx-auto" id="receipt">
+                <div class="center receipt-title">[COPY]</div>
+                <div>Laporan Shift</div>
+                <div>Tanggal</div>
+                <div><?php echo tanggal_id(($shiftLast['closed_at'] ?? '') ?: date('Y-m-d H:i:s')); ?></div>
+                <br>
+                <div class="row"><span class="label">Operator</span><span class="value">: <?php echo e(strtoupper($shiftLast['operator'] ?? $operatorName)); ?></span></div>
+                <div class="row"><span class="label">Kas Awal</span><span class="value">: <?php echo rupiah($shiftLast['kas_awal'] ?? 0); ?></span></div>
+                <div class="row"><span class="label">Total Sales</span><span class="value">: <?php echo rupiah($salesNow['total_sales']); ?></span></div>
+                <div class="row"><span class="label">Kas Akhir</span><span class="value">: <?php echo rupiah($kasAkhirNow); ?></span></div>
+                <div class="row"><span class="label">Kas Aktual</span><span class="value">: <?php echo rupiah($kasAktualNow); ?></span></div>
+                <div class="row"><span class="label">TUNAI</span><span class="value">: <?php echo rupiah($salesNow['total_tunai']); ?></span></div>
+                <div class="row"><span class="label">NON-TUNAI</span><span class="value">: <?php echo rupiah($salesNow['total_nontunai']); ?></span></div>
+                <div class="row"><span class="label">Selisih</span><span class="value">: <?php echo ($selisihNow >= 0 ? '+' : '-') . rupiah(abs($selisihNow)); ?></span></div>
+                <div class="row"><span class="label">Margin</span><span class="value">: <?php echo rupiah($salesNow['margin']); ?></span></div>
+                <div class="row"><span class="label">Fee Promosi</span><span class="value">: <?php echo rupiah($salesNow['fee_promosi']); ?></span></div>
+                <div class="row"><span class="label">Total Struk</span><span class="value">: <?php echo number_format((int)$salesNow['total_struk'], 0, ',', '.'); ?></span></div>
+                <br><br>
+                <div><?php echo e(strtoupper('TMI KOPERASI KONSUMEN PRIMER BSDK SEJAHTERA')); ?></div>
             </div>
+        </div>
         </div>
     </main>
 
@@ -866,25 +1548,7 @@ $rightActionHtml = '
                 return postAction('detail', {
                     id: d.id
                 }).then(function(detail) {
-                    if (detail && detail.success && detail.data) {
-                        var r = detail.data,
-                            s = detail.sales;
-                        KAS_RECEIPT = {
-                            operator: String(r.operator || '').toUpperCase(),
-                            tanggal: tglIdJs(r.closed_at || r.opened_at),
-                            status: String(r.status || '').toUpperCase(),
-                            kas_awal: Math.round(Number(r.kas_awal || 0)),
-                            total_sales: Math.round(Number(s.total_sales || 0)),
-                            kas_akhir: Math.round(Number(r.kas_akhir_sistem || 0)),
-                            kas_aktual: Math.round(Number(r.kas_aktual_display || 0)),
-                            total_tunai: Math.round(Number(s.total_tunai || 0)),
-                            total_nontunai: Math.round(Number(s.total_nontunai || 0)),
-                            selisih: Math.round(Number(r.selisih || 0)),
-                            margin: Math.round(Number(s.margin || 0)),
-                            fee_promosi: Math.round(Number(s.fee_promosi || 0)),
-                            total_struk: Math.round(Number(s.total_struk || 0))
-                        };
-                    }
+                    setKasReceiptFromDetail(detail);
                     // Print dulu via Bluetooth, baru reload setelah proses cetak selesai/gagal.
                     return cetakBluetooth().finally(function() {
                         location.reload();
@@ -914,6 +1578,42 @@ $rightActionHtml = '
             }) + ' ' + d.toLocaleTimeString('id-ID', {
                 hour: '2-digit',
                 minute: '2-digit'
+            });
+        }
+
+        function setKasReceiptFromDetail(detail) {
+            if (!detail || !detail.success || !detail.data) return false;
+            var r = detail.data,
+                s = detail.sales || {};
+            KAS_RECEIPT = {
+                operator: String(r.operator || '').toUpperCase(),
+                tanggal: tglIdJs(r.closed_at || r.opened_at),
+                status: String(r.status || '').toUpperCase(),
+                kas_awal: Math.round(Number(r.kas_awal || 0)),
+                total_sales: Math.round(Number(s.total_sales || 0)),
+                kas_akhir: Math.round(Number(r.kas_akhir_sistem || 0)),
+                kas_aktual: Math.round(Number(r.kas_aktual_display || 0)),
+                total_tunai: Math.round(Number(s.total_tunai || 0)),
+                total_nontunai: Math.round(Number(s.total_nontunai || 0)),
+                selisih: Math.round(Number(r.selisih || 0)),
+                margin: Math.round(Number(s.margin || 0)),
+                fee_promosi: Math.round(Number(s.fee_promosi || 0)),
+                total_struk: Math.round(Number(s.total_struk || 0))
+            };
+            return true;
+        }
+
+        function printKasRiwayat(id) {
+            postAction('detail', {
+                id: id
+            }).then(function(detail) {
+                if (!setKasReceiptFromDetail(detail)) {
+                    alert((detail && detail.message) || 'Data kas tidak ditemukan.');
+                    return;
+                }
+                return cetakBluetooth();
+            }).catch(function() {
+                alert('Gagal memuat data kas untuk print.');
             });
         }
 
