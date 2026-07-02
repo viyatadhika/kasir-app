@@ -2716,8 +2716,20 @@ catat_view_once($pdo, 'Mesin Kasir', 'Membuka halaman Mesin Kasir');
                     inp.focus();
                 }
             } else {
+                const inp = document.getElementById('search-input');
+                if (inp) {
+                    inp.value = '';
+                    filterProducts();
+                }
                 alert(`Produk "${code}" tidak ditemukan.`);
-                document.getElementById('search-input')?.focus();
+                setTimeout(() => {
+                    const scanInput = document.getElementById('search-input');
+                    if (scanInput) {
+                        scanInput.value = '';
+                        filterProducts();
+                        scanInput.focus();
+                    }
+                }, 50);
             }
         }
 
