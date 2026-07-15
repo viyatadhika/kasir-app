@@ -17,37 +17,42 @@ if (!$userId && !empty($_SESSION['user']['id'])) {
     $userId = (int)$_SESSION['user']['id'];
 }
 
-$today = date('Y-m-d');
-
 /*
- * Cek apakah user ini masih punya kas terbuka hari ini.
- * Kalau masih buka, logout dibatalkan.
+ * Audit safe:
+ * Cek seluruh sesi kas yang masih terbuka milik user tanpa membatasi tanggal.
+ * Jadi kas kemarin atau beberapa hari lalu tetap wajib ditutup sebelum logout.
  */
 if ($userId > 0) {
     try {
         $stmt = $pdo->prepare("
-            SELECT id 
+            SELECT id, tanggal, opened_at
             FROM kas_harian
-            WHERE tanggal = :tanggal
-              AND user_id = :user_id
+            WHERE user_id = :user_id
               AND status = 'buka'
-            ORDER BY id DESC
+            ORDER BY opened_at ASC, id ASC
             LIMIT 1
         ");
         $stmt->execute([
-            ':tanggal' => $today,
             ':user_id' => $userId
         ]);
 
         $kasTerbuka = $stmt->fetch(PDO::FETCH_ASSOC);
 
         if ($kasTerbuka) {
-            $_SESSION['kas_warning'] = 'Kas hari ini masih terbuka. Silakan tutup kas terlebih dahulu sebelum logout.';
+            $tanggalKas = !empty($kasTerbuka['tanggal'])
+                ? date('d/m/Y', strtotime($kasTerbuka['tanggal']))
+                : '-';
+
+            $_SESSION['kas_warning'] =
+                'Masih ada sesi kas terbuka sejak ' . $tanggalKas .
+                '. Silakan tutup kas terlebih dahulu sebelum logout.';
+
             header('Location: kas_harian.php');
             exit;
         }
     } catch (Throwable $e) {
-        $_SESSION['kas_warning'] = 'Tidak bisa validasi status kas. Silakan coba lagi.';
+        error_log('VALIDASI LOGOUT KAS ERROR: ' . $e->getMessage());
+        $_SESSION['kas_warning'] = 'Tidak bisa memvalidasi status kas. Silakan coba lagi.';
         header('Location: kas_harian.php');
         exit;
     }

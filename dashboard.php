@@ -111,6 +111,7 @@ $kasHariIni = [
     'belum_buka'     => 0,
     'masih_buka'     => 0,
     'sudah_tutup'    => 0,
+    'terlambat_tutup' => 0,
     'kas_awal'       => 0,
     'total_sales'    => 0,
     'total_tunai'    => 0,
@@ -126,6 +127,13 @@ $kasOperatorList = [];
 $ringkasan          = ['total_sales' => 0, 'jumlah_struk' => 0];
 $avgStruk           = 0;
 $produkStokLimit    = [];
+$produkExpiredSummary = [
+    'expired' => 0,
+    'h7'      => 0,
+    'h30'     => 0,
+];
+$produkExpiredList  = [];
+$produkExpiredError = '';
 $strukTerakhir      = [];
 $fastMoving         = [];
 $chartLabels        = [];
@@ -268,68 +276,155 @@ if (isset($_GET['action']) && $_GET['action'] === 'reprint_data') {
 }
 
 
-// ── Data: Monitoring Kas Harian ─────────────────────────────────────────────
-if (has_role('admin', 'kasir') && dashboard_has_table($pdo, 'kas_harian')) {
+// ── Data: Monitoring Kas Harian (sinkron dengan kas_harian.php) ─────────────
+if (has_role('admin', 'kasir')) {
     try {
+        /*
+         * Dibaca dengan query sederhana agar kompatibel dengan MariaDB/XAMPP.
+         * Seluruh pengelompokan dilakukan di PHP sehingga satu query bermasalah
+         * tidak membuat semua KPI monitoring menjadi nol.
+         */
+        $stmtSemuaKas = $pdo->query("SELECT * FROM kas_harian ORDER BY id DESC");
+        $semuaKas = $stmtSemuaKas->fetchAll(PDO::FETCH_ASSOC);
+
         if (has_role('admin')) {
-            $stmtKas = $pdo->prepare("
-                SELECT kh.*
-                FROM kas_harian kh
-                INNER JOIN (
-                    SELECT user_id, MAX(id) AS max_id
-                    FROM kas_harian
-                    WHERE tanggal = :today
-                    GROUP BY user_id
-                ) x ON x.max_id = kh.id
-                ORDER BY FIELD(kh.status, 'buka', 'tutup'), kh.opened_at DESC, kh.id DESC
-            ");
-            $stmtKas->execute([':today' => $today]);
-            $kasOperatorList = $stmtKas->fetchAll(PDO::FETCH_ASSOC);
+            $aktifPerOperator = [];
+            $tutupHariIniPerOperator = [];
+
+            foreach ($semuaKas as $rowKas) {
+                $statusKas = strtolower(trim((string)($rowKas['status'] ?? '')));
+                $uidKas = (int)($rowKas['user_id'] ?? 0);
+                $operatorKas = trim((string)($rowKas['operator'] ?? ''));
+                $operatorKey = $uidKas > 0 ? ('u-' . $uidKas) : ('n-' . strtolower($operatorKas));
+
+                $openedRaw = (string)($rowKas['opened_at'] ?? '');
+                $openedTs = $openedRaw !== '' ? strtotime($openedRaw) : false;
+                $tanggalSesi = trim((string)($rowKas['tanggal'] ?? ''));
+                if ($tanggalSesi === '' && $openedTs !== false) {
+                    $tanggalSesi = date('Y-m-d', $openedTs);
+                }
+
+                $rowKas['durasi_detik'] = $openedTs !== false ? max(0, time() - $openedTs) : 0;
+                $rowKas['terlambat_tutup'] = (
+                    $statusKas === 'buka'
+                    && $tanggalSesi !== ''
+                    && $tanggalSesi < $today
+                );
+
+                if ($statusKas === 'buka') {
+                    // Karena data diurutkan id DESC, ambil sesi aktif terbaru per operator.
+                    if (!isset($aktifPerOperator[$operatorKey])) {
+                        $aktifPerOperator[$operatorKey] = $rowKas;
+                    }
+                    continue;
+                }
+
+                if ($statusKas === 'tutup') {
+                    $closedRaw = (string)($rowKas['closed_at'] ?? '');
+                    $closedTs = $closedRaw !== '' ? strtotime($closedRaw) : false;
+                    $tanggalTutup = $closedTs !== false
+                        ? date('Y-m-d', $closedTs)
+                        : $tanggalSesi;
+
+                    if ($tanggalTutup === $today && !isset($tutupHariIniPerOperator[$operatorKey])) {
+                        $tutupHariIniPerOperator[$operatorKey] = $rowKas;
+                    }
+                }
+            }
+
+            // Sesi aktif selalu diprioritaskan. Riwayat tutup hari ini hanya ditambahkan
+            // jika operator tersebut tidak memiliki sesi aktif.
+            $kasOperatorList = array_values($aktifPerOperator);
+            foreach ($tutupHariIniPerOperator as $operatorKey => $rowTutup) {
+                if (!isset($aktifPerOperator[$operatorKey])) {
+                    $kasOperatorList[] = $rowTutup;
+                }
+            }
+
+            usort($kasOperatorList, function ($a, $b) {
+                $aOpen = strtolower((string)($a['status'] ?? '')) === 'buka';
+                $bOpen = strtolower((string)($b['status'] ?? '')) === 'buka';
+                if ($aOpen !== $bOpen) return $aOpen ? -1 : 1;
+                return strcmp((string)($b['opened_at'] ?? ''), (string)($a['opened_at'] ?? ''));
+            });
 
             $kasHariIni['total_operator'] = count($kasOperatorList);
             foreach ($kasOperatorList as $k) {
-                $statusKas = strtolower((string)($k['status'] ?? ''));
-                $kasHariIni['kas_awal']    += (float)($k['kas_awal'] ?? 0);
+                $statusKas = strtolower(trim((string)($k['status'] ?? '')));
+                $kasHariIni['kas_awal'] += (float)($k['kas_awal'] ?? 0);
                 $kasHariIni['total_sales'] += (float)($k['total_sales'] ?? 0);
                 $kasHariIni['total_tunai'] += (float)($k['total_tunai'] ?? 0);
-                $kasHariIni['kas_akhir']   += (float)($k['kas_akhir_sistem'] ?? 0);
-                if ($statusKas === 'buka') $kasHariIni['masih_buka']++;
-                if ($statusKas === 'tutup') $kasHariIni['sudah_tutup']++;
+                $kasHariIni['kas_akhir'] += (float)($k['kas_akhir_sistem'] ?? 0);
+
+                if ($statusKas === 'buka') {
+                    $kasHariIni['sudah_buka']++;
+                    $kasHariIni['masih_buka']++;
+                    if (!empty($k['terlambat_tutup'])) {
+                        $kasHariIni['terlambat_tutup']++;
+                    }
+                } elseif ($statusKas === 'tutup') {
+                    $kasHariIni['sudah_buka']++;
+                    $kasHariIni['sudah_tutup']++;
+                }
             }
-            $kasHariIni['sudah_buka'] = $kasHariIni['total_operator'];
         } else {
-            $stmtKas = $pdo->prepare("
-                SELECT *
-                FROM kas_harian
-                WHERE tanggal = :today
-                  AND user_id = :user_id
-                ORDER BY id DESC
-                LIMIT 1
-            ");
-            $stmtKas->execute([
-                ':today'   => $today,
-                ':user_id' => $userId,
-            ]);
-            $kasSaya = $stmtKas->fetch(PDO::FETCH_ASSOC);
+            $kasSaya = null;
+            $kasHariIniTerakhir = null;
+
+            foreach ($semuaKas as $rowKas) {
+                if ((int)($rowKas['user_id'] ?? 0) !== $userId) continue;
+
+                $statusKas = strtolower(trim((string)($rowKas['status'] ?? '')));
+                if ($statusKas === 'buka' && $kasSaya === null) {
+                    $kasSaya = $rowKas;
+                    break;
+                }
+
+                $tanggalRow = trim((string)($rowKas['tanggal'] ?? ''));
+                if ($kasHariIniTerakhir === null && $tanggalRow === $today) {
+                    $kasHariIniTerakhir = $rowKas;
+                }
+            }
+
+            if (!$kasSaya) $kasSaya = $kasHariIniTerakhir;
 
             if ($kasSaya) {
+                $statusKas = strtolower(trim((string)($kasSaya['status'] ?? '')));
+                $openedRaw = (string)($kasSaya['opened_at'] ?? '');
+                $openedTs = $openedRaw !== '' ? strtotime($openedRaw) : false;
+                $tanggalSesi = trim((string)($kasSaya['tanggal'] ?? ''));
+                if ($tanggalSesi === '' && $openedTs !== false) {
+                    $tanggalSesi = date('Y-m-d', $openedTs);
+                }
+
                 $kasHariIni['total_operator'] = 1;
-                $kasHariIni['sudah_buka']     = 1;
-                $kasHariIni['status']         = (string)($kasSaya['status'] ?? '');
-                $kasHariIni['kas_awal']       = (float)($kasSaya['kas_awal'] ?? 0);
-                $kasHariIni['total_sales']    = (float)($kasSaya['total_sales'] ?? 0);
-                $kasHariIni['total_tunai']    = (float)($kasSaya['total_tunai'] ?? 0);
-                $kasHariIni['kas_akhir']      = (float)($kasSaya['kas_akhir_sistem'] ?? 0);
-                $kasHariIni['opened_at']      = $kasSaya['opened_at'] ?? null;
-                $kasHariIni['closed_at']      = $kasSaya['closed_at'] ?? null;
-                if (strtolower((string)$kasSaya['status']) === 'buka') $kasHariIni['masih_buka'] = 1;
-                if (strtolower((string)$kasSaya['status']) === 'tutup') $kasHariIni['sudah_tutup'] = 1;
+                $kasHariIni['sudah_buka'] = 1;
+                $kasHariIni['status'] = (string)($kasSaya['status'] ?? '');
+                $kasHariIni['kas_awal'] = (float)($kasSaya['kas_awal'] ?? 0);
+                $kasHariIni['total_sales'] = (float)($kasSaya['total_sales'] ?? 0);
+                $kasHariIni['total_tunai'] = (float)($kasSaya['total_tunai'] ?? 0);
+                $kasHariIni['kas_akhir'] = (float)($kasSaya['kas_akhir_sistem'] ?? 0);
+                $kasHariIni['opened_at'] = $kasSaya['opened_at'] ?? null;
+                $kasHariIni['closed_at'] = $kasSaya['closed_at'] ?? null;
+
+                if ($statusKas === 'buka') {
+                    $kasHariIni['masih_buka'] = 1;
+                    $kasHariIni['durasi_detik'] = $openedTs !== false ? max(0, time() - $openedTs) : 0;
+                    $kasHariIni['terlambat_tutup'] = (
+                        $tanggalSesi !== ''
+                        && $tanggalSesi < $today
+                    ) ? 1 : 0;
+                } elseif ($statusKas === 'tutup') {
+                    $kasHariIni['sudah_tutup'] = 1;
+                }
             } else {
                 $kasHariIni['belum_buka'] = 1;
             }
         }
     } catch (Throwable $e) {
         $kasOperatorList = [];
+        $kasHariIni['monitor_error'] = $e->getMessage();
+        error_log('DASHBOARD MONITOR KAS ERROR: ' . $e->getMessage());
     }
 }
 
@@ -354,6 +449,53 @@ if (has_role('admin', 'kasir')) {
         ORDER BY (stok / stok_minimum) ASC
     ");
     $produkStokLimit = $stmtStok->fetchAll();
+
+    // Monitoring tanggal kedaluwarsa produk.
+    // Dibungkus try/catch agar dashboard tetap aman apabila kolom belum tersedia.
+    try {
+        $stmtExpiredSummary = $pdo->query("
+            SELECT
+                SUM(CASE
+                    WHEN expired_date IS NOT NULL
+                     AND expired_date < CURDATE()
+                    THEN 1 ELSE 0 END) AS expired,
+                SUM(CASE
+                    WHEN expired_date IS NOT NULL
+                     AND expired_date >= CURDATE()
+                     AND expired_date <= DATE_ADD(CURDATE(), INTERVAL 7 DAY)
+                    THEN 1 ELSE 0 END) AS h7,
+                SUM(CASE
+                    WHEN expired_date IS NOT NULL
+                     AND expired_date > DATE_ADD(CURDATE(), INTERVAL 7 DAY)
+                     AND expired_date <= DATE_ADD(CURDATE(), INTERVAL 30 DAY)
+                    THEN 1 ELSE 0 END) AS h30
+            FROM produk
+            WHERE status = 'aktif'
+        ");
+        $expiredRow = $stmtExpiredSummary->fetch(PDO::FETCH_ASSOC) ?: [];
+        $produkExpiredSummary['expired'] = (int)($expiredRow['expired'] ?? 0);
+        $produkExpiredSummary['h7']      = (int)($expiredRow['h7'] ?? 0);
+        $produkExpiredSummary['h30']     = (int)($expiredRow['h30'] ?? 0);
+
+        $stmtExpiredList = $pdo->query("
+            SELECT id, kode, nama, kategori, stok, satuan, expired_date
+            FROM produk
+            WHERE status = 'aktif'
+              AND expired_date IS NOT NULL
+              AND expired_date <= DATE_ADD(CURDATE(), INTERVAL 30 DAY)
+            ORDER BY
+                CASE WHEN expired_date < CURDATE() THEN 0 ELSE 1 END ASC,
+                expired_date ASC,
+                nama ASC
+            LIMIT 8
+        ");
+        $produkExpiredList = $stmtExpiredList->fetchAll(PDO::FETCH_ASSOC);
+    } catch (Throwable $e) {
+        $produkExpiredSummary = ['expired' => 0, 'h7' => 0, 'h30' => 0];
+        $produkExpiredList = [];
+        $produkExpiredError = $e->getMessage();
+        error_log('DASHBOARD EXPIRED PRODUCT ERROR: ' . $e->getMessage());
+    }
 
     $stmtStruk = $pdo->query("
         SELECT t.id, t.invoice, t.total, t.bayar, t.kembalian, t.created_at,
@@ -665,6 +807,154 @@ $title = 'Dashboard - ' . ($_SESSION['nama'] ?? 'SEJAHUB');
                 letter-spacing: .04em;
             }
         }
+
+        @media (max-width: 1023px) {
+            body {
+                background: #f8fafc;
+            }
+
+            main.content {
+                padding: 18px !important;
+                overflow-x: hidden;
+            }
+
+            .dashboard-header-main {
+                margin-bottom: 22px !important;
+                gap: 16px !important;
+                align-items: stretch !important;
+            }
+
+            .dashboard-header-main>div:first-child {
+                min-width: 0;
+            }
+
+            .dashboard-action-wrap {
+                display: grid;
+                grid-template-columns: repeat(3, minmax(0, 1fr));
+                gap: 8px;
+                width: 100%;
+                overflow: visible;
+            }
+
+            .dashboard-action-btn {
+                width: 100%;
+                min-width: 0;
+                height: 48px;
+                padding: 0 10px;
+                font-size: 9px !important;
+                line-height: 1.2;
+            }
+
+            .kas-monitor-card {
+                padding: 16px !important;
+                overflow: hidden;
+            }
+
+            .kas-monitor-layout {
+                gap: 16px !important;
+            }
+
+            .kas-monitor-kpis {
+                grid-template-columns: repeat(5, minmax(0, 1fr)) !important;
+                gap: 8px !important;
+                min-width: 0 !important;
+            }
+
+            .kas-monitor-kpis>div,
+            .kas-monitor-kpis>a {
+                min-width: 0;
+                padding: 10px !important;
+            }
+
+            .kas-monitor-kpis p:first-child {
+                font-size: 8px !important;
+                line-height: 1.2;
+                word-break: break-word;
+            }
+
+            .kas-monitor-kpis p:nth-child(2) {
+                font-size: 20px !important;
+            }
+
+            .kas-table-desktop {
+                display: none !important;
+            }
+
+            .kas-mobile-list {
+                display: grid !important;
+                grid-template-columns: repeat(2, minmax(0, 1fr));
+                gap: 10px;
+                margin-top: 16px;
+                padding-top: 16px;
+                border-top: 1px solid #f0f0f0;
+            }
+
+            .kas-mobile-card {
+                border: 1px solid #e5e7eb;
+                background: #fff;
+                padding: 13px;
+                min-width: 0;
+            }
+
+            .kas-mobile-card .kas-monitor-badge {
+                max-width: 100%;
+                white-space: normal;
+                text-align: center;
+                line-height: 1.2;
+            }
+        }
+
+        @media (max-width: 640px) {
+            main.content {
+                padding: 12px !important;
+            }
+
+            .dashboard-header-main h1 {
+                font-size: 20px !important;
+                line-height: 1.25;
+            }
+
+            .dashboard-action-wrap {
+                grid-template-columns: 1fr;
+                gap: 7px;
+            }
+
+            .dashboard-action-btn {
+                height: 44px;
+                font-size: 9px !important;
+            }
+
+            .kas-monitor-card {
+                padding: 14px !important;
+            }
+
+            .kas-monitor-kpis {
+                grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+            }
+
+            .kas-monitor-kpis> :last-child:nth-child(odd) {
+                grid-column: 1 / -1;
+            }
+
+            .kas-monitor-kpis p:nth-child(2) {
+                font-size: 19px !important;
+            }
+
+            .kas-mobile-list {
+                grid-template-columns: 1fr;
+                gap: 8px;
+            }
+
+            .kas-monitor-action {
+                width: 100%;
+            }
+        }
+
+        @media (min-width: 1024px) {
+            .kas-mobile-list {
+                display: none !important;
+            }
+        }
     </style>
 </head>
 
@@ -676,7 +966,7 @@ $title = 'Dashboard - ' . ($_SESSION['nama'] ?? 'SEJAHUB');
     <main class="content p-5 md:p-8 lg:p-12">
 
         <!-- ── Header ──────────────────────────────────────────────────────────── -->
-        <header class="flex flex-col md:flex-row justify-between items-start md:items-end mb-8 md:mb-12 gap-4">
+        <header class="dashboard-header-main flex flex-col md:flex-row justify-between items-start md:items-end mb-8 md:mb-12 gap-4">
             <div>
                 <?php if (has_role('admin', 'kasir')): ?>
                     <h1 class="text-xl md:text-2xl font-light tracking-tight">
@@ -729,29 +1019,34 @@ $title = 'Dashboard - ' . ($_SESSION['nama'] ?? 'SEJAHUB');
             <section class="dashboard-role-section">
 
                 <!-- Monitoring Kas Harian -->
+                <?php if (!empty($kasHariIni['monitor_error'])): ?>
+                    <div class="mb-4 border border-red-200 bg-red-50 px-4 py-3 text-xs font-bold text-red-700">
+                        Monitoring kas gagal membaca database: <?php echo htmlspecialchars((string)$kasHariIni['monitor_error'], ENT_QUOTES, 'UTF-8'); ?>
+                    </div>
+                <?php endif; ?>
                 <div class="kas-monitor-card p-5 md:p-6 mb-8 md:mb-10">
-                    <div class="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-5">
+                    <div class="kas-monitor-layout flex flex-col lg:flex-row lg:items-start lg:justify-between gap-5">
                         <div>
                             <p class="text-[10px] font-black uppercase tracking-widest text-gray-400 mb-1">
-                                <?php echo has_role('admin') ? 'Monitoring Kas Hari Ini' : 'Status Kas Saya Hari Ini'; ?>
+                                <?php echo has_role('admin') ? 'Monitoring Kas Operator' : 'Status Kas Saya'; ?>
                             </p>
                             <h2 class="text-lg md:text-xl font-black tracking-tight">
                                 <?php if (has_role('admin')): ?>
                                     Buka & Tutup Kas Operator
                                 <?php else: ?>
-                                    <?php echo $kasHariIni['sudah_buka'] ? ($kasHariIni['masih_buka'] ? 'Kas Sedang Buka' : 'Kas Sudah Tutup') : 'Belum Buka Kas'; ?>
+                                    <?php echo $kasHariIni['sudah_buka'] ? ($kasHariIni['masih_buka'] ? (!empty($kasHariIni['terlambat_tutup']) ? 'Kas Lama Belum Ditutup' : 'Kas Sedang Buka') : 'Kas Sudah Tutup') : 'Belum Buka Kas'; ?>
                                 <?php endif; ?>
                             </h2>
                             <p class="text-xs text-gray-400 mt-1">
                                 <?php if (has_role('admin')): ?>
-                                    Pantau operator yang sudah buka kas, masih buka, dan sudah tutup kas.
+                                    Pantau semua sesi kas aktif lintas hari dan sesi yang sudah ditutup hari ini.
                                 <?php else: ?>
                                     Buka kas wajib sebelum transaksi POS, dan tutup kas wajib sebelum logout.
                                 <?php endif; ?>
                             </p>
                         </div>
 
-                        <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 w-full lg:w-auto lg:min-w-[520px]">
+                        <div class="kas-monitor-kpis grid grid-cols-2 sm:grid-cols-5 gap-3 w-full lg:w-auto lg:min-w-[650px]">
                             <?php if (has_role('admin')): ?>
                                 <div class="bg-gray-50 border border-gray-100 p-3">
                                     <p class="text-[9px] font-black text-gray-400 uppercase tracking-widest">Sudah Buka</p>
@@ -760,6 +1055,10 @@ $title = 'Dashboard - ' . ($_SESSION['nama'] ?? 'SEJAHUB');
                                 <div class="bg-yellow-50 border border-yellow-100 p-3">
                                     <p class="text-[9px] font-black text-yellow-600 uppercase tracking-widest">Masih Buka</p>
                                     <p class="text-2xl font-black text-yellow-700 mt-1"><?php echo number_format((int)$kasHariIni['masih_buka']); ?></p>
+                                </div>
+                                <div class="bg-red-50 border border-red-200 p-3">
+                                    <p class="text-[9px] font-black text-red-600 uppercase tracking-widest">Terlambat Tutup</p>
+                                    <p class="text-2xl font-black text-red-700 mt-1"><?php echo number_format((int)$kasHariIni['terlambat_tutup']); ?></p>
                                 </div>
                                 <div class="bg-green-50 border border-green-100 p-3">
                                     <p class="text-[9px] font-black text-green-600 uppercase tracking-widest">Sudah Tutup</p>
@@ -773,7 +1072,9 @@ $title = 'Dashboard - ' . ($_SESSION['nama'] ?? 'SEJAHUB');
                                 <div class="bg-gray-50 border border-gray-100 p-3">
                                     <p class="text-[9px] font-black text-gray-400 uppercase tracking-widest">Status</p>
                                     <p class="mt-2">
-                                        <?php if ($kasHariIni['masih_buka']): ?>
+                                        <?php if (!empty($kasHariIni['terlambat_tutup'])): ?>
+                                            <span class="kas-monitor-badge bg-red-50 text-red-700 border-red-200">Terlambat Tutup</span>
+                                        <?php elseif ($kasHariIni['masih_buka']): ?>
                                             <span class="kas-monitor-badge bg-green-50 text-green-700 border-green-200">Buka</span>
                                         <?php elseif ($kasHariIni['sudah_tutup']): ?>
                                             <span class="kas-monitor-badge bg-gray-100 text-gray-700 border-gray-200">Tutup</span>
@@ -788,7 +1089,7 @@ $title = 'Dashboard - ' . ($_SESSION['nama'] ?? 'SEJAHUB');
                                 </div>
                                 <div class="bg-gray-50 border border-gray-100 p-3">
                                     <p class="text-[9px] font-black text-gray-400 uppercase tracking-widest">Jam Buka</p>
-                                    <p class="text-lg font-black text-gray-900 mt-1"><?php echo !empty($kasHariIni['opened_at']) ? date('H:i', strtotime((string)$kasHariIni['opened_at'])) : '-'; ?></p>
+                                    <p class="text-lg font-black text-gray-900 mt-1"><?php echo !empty($kasHariIni['opened_at']) ? date('d/m H:i', strtotime((string)$kasHariIni['opened_at'])) : '-'; ?></p>
                                 </div>
                                 <div class="bg-gray-50 border border-gray-100 p-3">
                                     <p class="text-[9px] font-black text-gray-400 uppercase tracking-widest">Tunai</p>
@@ -799,13 +1100,13 @@ $title = 'Dashboard - ' . ($_SESSION['nama'] ?? 'SEJAHUB');
                     </div>
 
                     <?php if (has_role('admin') && !empty($kasOperatorList)): ?>
-                        <div class="mt-5 border-t border-gray-100 pt-4 overflow-x-auto no-scrollbar">
+                        <div class="kas-table-desktop mt-5 border-t border-gray-100 pt-4 overflow-x-auto no-scrollbar">
                             <table class="w-full text-left min-w-[760px]">
                                 <thead>
                                     <tr class="border-b border-gray-100">
                                         <th class="py-3 text-[10px] font-black uppercase tracking-widest text-gray-400">Operator</th>
-                                        <th class="py-3 text-[10px] font-black uppercase tracking-widest text-gray-400">Jam Buka</th>
-                                        <th class="py-3 text-[10px] font-black uppercase tracking-widest text-gray-400">Jam Tutup</th>
+                                        <th class="py-3 text-[10px] font-black uppercase tracking-widest text-gray-400">Dibuka</th>
+                                        <th class="py-3 text-[10px] font-black uppercase tracking-widest text-gray-400">Ditutup</th>
                                         <th class="py-3 text-[10px] font-black uppercase tracking-widest text-gray-400 text-right">Kas Awal</th>
                                         <th class="py-3 text-[10px] font-black uppercase tracking-widest text-gray-400 text-right">Tunai</th>
                                         <th class="py-3 text-[10px] font-black uppercase tracking-widest text-gray-400 text-center">Status</th>
@@ -815,12 +1116,14 @@ $title = 'Dashboard - ' . ($_SESSION['nama'] ?? 'SEJAHUB');
                                     <?php foreach (array_slice($kasOperatorList, 0, 6) as $kasOp): ?>
                                         <tr>
                                             <td class="py-3 text-xs font-bold"><?php echo htmlspecialchars((string)($kasOp['operator'] ?? 'Operator'), ENT_QUOTES, 'UTF-8'); ?></td>
-                                            <td class="py-3 text-xs text-gray-500"><?php echo !empty($kasOp['opened_at']) ? date('H:i', strtotime((string)$kasOp['opened_at'])) : '-'; ?></td>
-                                            <td class="py-3 text-xs text-gray-500"><?php echo !empty($kasOp['closed_at']) ? date('H:i', strtotime((string)$kasOp['closed_at'])) : '-'; ?></td>
+                                            <td class="py-3 text-xs text-gray-500"><?php echo !empty($kasOp['opened_at']) ? date('d/m/Y H:i', strtotime((string)$kasOp['opened_at'])) : '-'; ?></td>
+                                            <td class="py-3 text-xs text-gray-500"><?php echo !empty($kasOp['closed_at']) ? date('d/m/Y H:i', strtotime((string)$kasOp['closed_at'])) : '-'; ?></td>
                                             <td class="py-3 text-xs text-right font-bold"><?php echo formatRp($kasOp['kas_awal'] ?? 0); ?></td>
                                             <td class="py-3 text-xs text-right font-bold"><?php echo formatRp($kasOp['total_tunai'] ?? 0); ?></td>
                                             <td class="py-3 text-center">
-                                                <?php if (($kasOp['status'] ?? '') === 'buka'): ?>
+                                                <?php if (($kasOp['status'] ?? '') === 'buka' && !empty($kasOp['terlambat_tutup'])): ?>
+                                                    <span class="kas-monitor-badge bg-red-50 text-red-700 border-red-200">Terlambat Tutup</span>
+                                                <?php elseif (($kasOp['status'] ?? '') === 'buka'): ?>
                                                     <span class="kas-monitor-badge bg-yellow-50 text-yellow-700 border-yellow-200">Masih Buka</span>
                                                 <?php else: ?>
                                                     <span class="kas-monitor-badge bg-green-50 text-green-700 border-green-200">Sudah Tutup</span>
@@ -831,10 +1134,51 @@ $title = 'Dashboard - ' . ($_SESSION['nama'] ?? 'SEJAHUB');
                                 </tbody>
                             </table>
                         </div>
+
+                        <div class="kas-mobile-list">
+                            <?php foreach (array_slice($kasOperatorList, 0, 6) as $kasOp): ?>
+                                <div class="kas-mobile-card">
+                                    <div class="flex items-start justify-between gap-3">
+                                        <div class="min-w-0">
+                                            <p class="text-sm font-black truncate"><?php echo htmlspecialchars((string)($kasOp['operator'] ?? 'Operator'), ENT_QUOTES, 'UTF-8'); ?></p>
+                                            <p class="text-[10px] text-gray-400 mt-1"><?php echo !empty($kasOp['opened_at']) ? date('d/m/Y H:i', strtotime((string)$kasOp['opened_at'])) : '-'; ?></p>
+                                        </div>
+                                        <?php if (($kasOp['status'] ?? '') === 'buka' && !empty($kasOp['terlambat_tutup'])): ?>
+                                            <span class="kas-monitor-badge bg-red-50 text-red-700 border-red-200">Terlambat Tutup</span>
+                                        <?php elseif (($kasOp['status'] ?? '') === 'buka'): ?>
+                                            <span class="kas-monitor-badge bg-yellow-50 text-yellow-700 border-yellow-200">Masih Buka</span>
+                                        <?php else: ?>
+                                            <span class="kas-monitor-badge bg-green-50 text-green-700 border-green-200">Sudah Tutup</span>
+                                        <?php endif; ?>
+                                    </div>
+                                    <div class="grid grid-cols-3 gap-2 mt-3 pt-3 border-t border-gray-100">
+                                        <div>
+                                            <p class="text-[8px] font-black uppercase tracking-widest text-gray-400">Kas Awal</p>
+                                            <p class="text-[11px] font-bold mt-1"><?php echo formatRp($kasOp['kas_awal'] ?? 0); ?></p>
+                                        </div>
+                                        <div>
+                                            <p class="text-[8px] font-black uppercase tracking-widest text-gray-400">Tunai</p>
+                                            <p class="text-[11px] font-bold mt-1"><?php echo formatRp($kasOp['total_tunai'] ?? 0); ?></p>
+                                        </div>
+                                        <div>
+                                            <p class="text-[8px] font-black uppercase tracking-widest text-gray-400">Ditutup</p>
+                                            <p class="text-[11px] font-bold mt-1"><?php echo !empty($kasOp['closed_at']) ? date('d/m H:i', strtotime((string)$kasOp['closed_at'])) : '-'; ?></p>
+                                        </div>
+                                    </div>
+                                </div>
+                            <?php endforeach; ?>
+                        </div>
+                    <?php endif; ?>
+
+                    <?php if (!has_role('admin') && !empty($kasHariIni['terlambat_tutup'])): ?>
+                        <div class="mt-5 bg-red-50 border border-red-200 px-4 py-3">
+                            <p class="text-[10px] font-black uppercase tracking-widest text-red-700">Kas melewati pergantian hari</p>
+                            <p class="text-xs text-red-600 mt-1">Sesi kas dari hari sebelumnya wajib ditutup sebelum membuka sesi baru, transaksi, atau logout.</p>
+                        </div>
                     <?php endif; ?>
 
                     <div class="mt-5 flex flex-col sm:flex-row gap-2">
-                        <a href="kas_harian.php" class="inline-flex items-center justify-center px-4 py-3 bg-black text-white text-[10px] font-black uppercase tracking-widest hover:bg-gray-800 transition-all rounded-sm">
+                        <a href="kas_harian.php" class="kas-monitor-action inline-flex items-center justify-center px-4 py-3 bg-black text-white text-[10px] font-black uppercase tracking-widest hover:bg-gray-800 transition-all rounded-sm">
                             <?php echo has_role('admin') ? 'Lihat Semua Riwayat Kas' : ($kasHariIni['masih_buka'] ? 'Tutup Kas' : 'Buka / Riwayat Kas'); ?>
                         </a>
                         <?php if (!has_role('admin') && !$kasHariIni['sudah_buka']): ?>
@@ -843,6 +1187,117 @@ $title = 'Dashboard - ' . ($_SESSION['nama'] ?? 'SEJAHUB');
                             </a>
                         <?php endif; ?>
                     </div>
+                </div>
+
+                <!-- Monitoring Produk Kedaluwarsa -->
+                <?php
+                $totalPerluPerhatian = (int)$produkExpiredSummary['expired']
+                    + (int)$produkExpiredSummary['h7']
+                    + (int)$produkExpiredSummary['h30'];
+                ?>
+
+                <?php if ((int)$produkExpiredSummary['expired'] > 0): ?>
+                    <div class="mb-5 border border-red-200 bg-red-50 px-4 py-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+                        <div>
+                            <p class="text-[10px] font-black uppercase tracking-widest text-red-700">Peringatan Produk Kedaluwarsa</p>
+                            <p class="text-xs text-red-600 mt-1">
+                                Ada <strong><?php echo number_format((int)$produkExpiredSummary['expired']); ?> produk</strong> yang sudah melewati tanggal kedaluwarsa dan tidak boleh dijual.
+                            </p>
+                        </div>
+                        <a href="produk.php?expired=expired&status=aktif"
+                            class="inline-flex items-center justify-center px-4 py-3 bg-red-600 text-white text-[10px] font-black uppercase tracking-widest hover:bg-red-700 transition-all whitespace-nowrap">
+                            Lihat Produk
+                        </a>
+                    </div>
+                <?php endif; ?>
+
+                <div class="kas-monitor-card p-5 md:p-6 mb-8 md:mb-10">
+                    <div class="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-5">
+                        <div>
+                            <p class="text-[10px] font-black uppercase tracking-widest text-gray-400 mb-1">Monitoring Produk</p>
+                            <h2 class="text-lg md:text-xl font-black tracking-tight">Tanggal Kedaluwarsa</h2>
+                            <p class="text-xs text-gray-400 mt-1">Pantau produk kedaluwarsa dan produk yang akan kedaluwarsa dalam 30 hari.</p>
+                        </div>
+
+                        <div class="grid grid-cols-1 sm:grid-cols-3 gap-3 w-full lg:w-auto lg:min-w-[520px]">
+                            <a href="produk.php?expired=expired&status=aktif" class="bg-red-50 border border-red-200 p-3 hover:border-red-300 transition-all">
+                                <p class="text-[9px] font-black text-red-600 uppercase tracking-widest">Sudah Kedaluwarsa</p>
+                                <p class="text-2xl font-black text-red-700 mt-1"><?php echo number_format((int)$produkExpiredSummary['expired']); ?></p>
+                                <p class="text-[9px] text-red-500 mt-1">Tidak boleh dijual</p>
+                            </a>
+                            <a href="produk.php?expired=30_hari&status=aktif" class="bg-orange-50 border border-orange-200 p-3 hover:border-orange-300 transition-all">
+                                <p class="text-[9px] font-black text-orange-600 uppercase tracking-widest">H-7 Kedaluwarsa</p>
+                                <p class="text-2xl font-black text-orange-700 mt-1"><?php echo number_format((int)$produkExpiredSummary['h7']); ?></p>
+                                <p class="text-[9px] text-orange-500 mt-1">Perlu diprioritaskan</p>
+                            </a>
+                            <a href="produk.php?expired=30_hari&status=aktif" class="bg-yellow-50 border border-yellow-200 p-3 hover:border-yellow-300 transition-all">
+                                <p class="text-[9px] font-black text-yellow-600 uppercase tracking-widest">H-8 s.d. H-30</p>
+                                <p class="text-2xl font-black text-yellow-700 mt-1"><?php echo number_format((int)$produkExpiredSummary['h30']); ?></p>
+                                <p class="text-[9px] text-yellow-600 mt-1">Segera dipantau</p>
+                            </a>
+                        </div>
+                    </div>
+
+                    <?php if ($produkExpiredError !== ''): ?>
+                        <div class="mt-5 border border-yellow-200 bg-yellow-50 px-4 py-3">
+                            <p class="text-[10px] font-black uppercase tracking-widest text-yellow-700">Monitoring kedaluwarsa belum tersedia</p>
+                            <p class="text-xs text-yellow-700 mt-1">Pastikan kolom <code>expired_date</code> sudah tersedia pada tabel produk.</p>
+                        </div>
+                    <?php elseif (!empty($produkExpiredList)): ?>
+                        <div class="mt-5 border-t border-gray-100 pt-4">
+                            <div class="flex items-center justify-between gap-3 mb-3">
+                                <div>
+                                    <p class="text-[10px] font-black uppercase tracking-widest text-gray-400">Produk Perlu Perhatian</p>
+                                    <p class="text-xs text-gray-400 mt-0.5"><?php echo number_format($totalPerluPerhatian); ?> produk dalam pemantauan</p>
+                                </div>
+                                <a href="produk.php?expired=30_hari&status=aktif" class="text-[10px] font-black uppercase tracking-widest underline">Lihat Semua</a>
+                            </div>
+
+                            <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+                                <?php foreach ($produkExpiredList as $expProduk): ?>
+                                    <?php
+                                    $expDate = (string)($expProduk['expired_date'] ?? '');
+                                    $expTs = $expDate !== '' ? strtotime($expDate) : false;
+                                    $todayTs = strtotime($today);
+                                    $daysLeft = ($expTs !== false && $todayTs !== false)
+                                        ? (int)floor(($expTs - $todayTs) / 86400)
+                                        : 0;
+                                    $isExpiredProduct = $expDate !== '' && $expDate < $today;
+
+                                    if ($isExpiredProduct) {
+                                        $expBadgeClass = 'bg-red-50 text-red-700 border-red-200';
+                                        $expBadgeLabel = 'Kedaluwarsa';
+                                    } elseif ($daysLeft <= 7) {
+                                        $expBadgeClass = 'bg-orange-50 text-orange-700 border-orange-200';
+                                        $expBadgeLabel = 'H-' . max(0, $daysLeft);
+                                    } else {
+                                        $expBadgeClass = 'bg-yellow-50 text-yellow-700 border-yellow-200';
+                                        $expBadgeLabel = 'H-' . max(0, $daysLeft);
+                                    }
+                                    ?>
+                                    <a href="produk.php?q=<?php echo urlencode((string)($expProduk['kode'] ?? '')); ?>&status=aktif"
+                                        class="border border-gray-100 p-3 flex items-center justify-between gap-3 hover:border-gray-300 transition-all">
+                                        <div class="min-w-0">
+                                            <p class="text-sm font-bold truncate"><?php echo htmlspecialchars((string)($expProduk['nama'] ?? '-'), ENT_QUOTES, 'UTF-8'); ?></p>
+                                            <p class="text-[10px] text-gray-400 mt-0.5 truncate">
+                                                <?php echo htmlspecialchars((string)($expProduk['kode'] ?? '-'), ENT_QUOTES, 'UTF-8'); ?>
+                                                &bull; <?php echo htmlspecialchars((string)($expProduk['kategori'] ?? '-'), ENT_QUOTES, 'UTF-8'); ?>
+                                                &bull; Stok <?php echo number_format((int)($expProduk['stok'] ?? 0)); ?>
+                                            </p>
+                                        </div>
+                                        <div class="text-right shrink-0">
+                                            <span class="kas-monitor-badge <?php echo $expBadgeClass; ?>"><?php echo htmlspecialchars($expBadgeLabel, ENT_QUOTES, 'UTF-8'); ?></span>
+                                            <p class="text-[10px] font-bold text-gray-500 mt-1"><?php echo $expTs !== false ? date('d/m/Y', $expTs) : '-'; ?></p>
+                                        </div>
+                                    </a>
+                                <?php endforeach; ?>
+                            </div>
+                        </div>
+                    <?php else: ?>
+                        <div class="mt-5 border border-green-100 bg-green-50 px-4 py-4 text-center">
+                            <p class="text-xs font-bold text-green-700">Tidak ada produk yang kedaluwarsa atau akan kedaluwarsa dalam 30 hari.</p>
+                        </div>
+                    <?php endif; ?>
                 </div>
 
                 <!-- KPI Cards -->

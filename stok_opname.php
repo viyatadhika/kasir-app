@@ -70,6 +70,54 @@ if (!function_exists('waktu')) {
     }
 }
 
+if (!function_exists('stok_tgl_expired')) {
+    /** @param mixed $v */
+    function stok_tgl_expired($v): string
+    {
+        $raw = trim((string)($v ?? ''));
+        if ($raw === '' || $raw === '0000-00-00') {
+            return '-';
+        }
+        $ts = strtotime($raw);
+        return $ts !== false ? date('d/m/Y', $ts) : '-';
+    }
+}
+
+if (!function_exists('stok_expired_info')) {
+    /**
+     * @param mixed $expiredDate
+     * @return array{key:string,label:string,class:string,days:?int}
+     */
+    function stok_expired_info($expiredDate): array
+    {
+        $raw = trim((string)($expiredDate ?? ''));
+        if ($raw === '' || $raw === '0000-00-00') {
+            return ['key' => 'none', 'label' => 'Tanpa Tanggal', 'class' => 'badge-exp-none', 'days' => null];
+        }
+
+        $todayTs = strtotime(date('Y-m-d'));
+        $expTs = strtotime($raw);
+        if ($expTs === false) {
+            return ['key' => 'none', 'label' => 'Tanggal Tidak Valid', 'class' => 'badge-exp-none', 'days' => null];
+        }
+
+        $days = (int)floor(($expTs - $todayTs) / 86400);
+        if ($days < 0) {
+            return ['key' => 'expired', 'label' => 'Kedaluwarsa', 'class' => 'badge-expired', 'days' => $days];
+        }
+        if ($days === 0) {
+            return ['key' => 'today', 'label' => 'Kedaluwarsa Hari Ini', 'class' => 'badge-expired', 'days' => 0];
+        }
+        if ($days <= 7) {
+            return ['key' => 'h7', 'label' => 'H-' . $days, 'class' => 'badge-exp-h7', 'days' => $days];
+        }
+        if ($days <= 30) {
+            return ['key' => 'h30', 'label' => 'H-' . $days, 'class' => 'badge-exp-h30', 'days' => $days];
+        }
+        return ['key' => 'safe', 'label' => 'Aman', 'class' => 'badge-exp-safe', 'days' => $days];
+    }
+}
+
 
 if (!function_exists('stok_build_url')) {
     /** @param array<string,mixed> $override */
@@ -202,12 +250,22 @@ function ensure_stok_opname_tables(PDO $pdo): void
             stok_fisik INT(11) NOT NULL DEFAULT 0,
             selisih INT(11) NOT NULL DEFAULT 0,
             catatan VARCHAR(255) DEFAULT NULL,
+            expired_date DATE DEFAULT NULL,
             created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
             PRIMARY KEY (id),
             KEY stok_opname_id (stok_opname_id),
             KEY produk_id (produk_id)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci
     ");
+
+    try {
+        $detailCols = $pdo->query("SHOW COLUMNS FROM stok_opname_detail")->fetchAll(PDO::FETCH_COLUMN);
+        if (!in_array('expired_date', $detailCols, true)) {
+            $pdo->exec("ALTER TABLE stok_opname_detail ADD COLUMN expired_date DATE NULL AFTER catatan");
+        }
+    } catch (Throwable $e) {
+        // Migrasi kolom audit expired tidak boleh menghentikan halaman.
+    }
 }
 
 ensure_stok_opname_tables($pdo);
@@ -218,6 +276,8 @@ $success = '';
 $q = trim($_GET['q'] ?? '');
 $kategoriFilter = trim($_GET['kategori'] ?? '');
 $statusFilter = $_GET['status'] ?? 'aktif';
+$expiredFilter = trim((string)($_GET['expired'] ?? ''));
+$produkHasExpiredDate = false;
 
 // Pagination server-side
 $produkPage  = stok_page_safe($_GET['produk_page'] ?? 1);
@@ -264,7 +324,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $opnameId = (int)$pdo->lastInsertId();
 
             $stmtProduk = $pdo->prepare("
-                SELECT id, kode, nama, kategori, harga_beli, harga_jual, stok, stok_minimum, satuan, status
+                SELECT id, kode, nama, kategori, harga_beli, harga_jual, stok, stok_minimum, satuan, status, expired_date
                 FROM produk
                 WHERE id = :id
                 LIMIT 1
@@ -272,9 +332,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
             $stmtDetail = $pdo->prepare("
                 INSERT INTO stok_opname_detail
-                    (stok_opname_id, produk_id, kode_produk, nama_produk, kategori, satuan, harga_beli, harga_jual, stok_sistem, stok_fisik, selisih, catatan, created_at)
+                    (stok_opname_id, produk_id, kode_produk, nama_produk, kategori, satuan, harga_beli, harga_jual, stok_sistem, stok_fisik, selisih, catatan, expired_date, created_at)
                 VALUES
-                    (:stok_opname_id, :produk_id, :kode_produk, :nama_produk, :kategori, :satuan, :harga_beli, :harga_jual, :stok_sistem, :stok_fisik, :selisih, :catatan, NOW())
+                    (:stok_opname_id, :produk_id, :kode_produk, :nama_produk, :kategori, :satuan, :harga_beli, :harga_jual, :stok_sistem, :stok_fisik, :selisih, :catatan, :expired_date, NOW())
             ");
 
             $stmtUpdateProduk = $pdo->prepare("
@@ -328,6 +388,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     ':stok_fisik' => $stokFisikFinal,
                     ':selisih' => $selisih,
                     ':catatan' => $note !== '' ? $note : null,
+                    ':expired_date' => (!empty($p['expired_date']) && $p['expired_date'] !== '0000-00-00') ? $p['expired_date'] : null,
                 ]);
 
                 $stmtUpdateProduk->execute([
@@ -384,6 +445,10 @@ $summary = [
     'stok_kosong' => 0,
     'nilai_persediaan' => 0,
     'total_opname' => 0,
+    'expired' => 0,
+    'expired_h7' => 0,
+    'expired_h30' => 0,
+    'tanpa_expired' => 0,
 ];
 
 $produk = [];
@@ -391,6 +456,19 @@ $kategoriList = [];
 $riwayat = [];
 
 try {
+    $produkCols = $pdo->query("SHOW COLUMNS FROM produk")->fetchAll(PDO::FETCH_COLUMN);
+    $produkHasExpiredDate = in_array('expired_date', $produkCols, true);
+
+    $expiredSummarySql = $produkHasExpiredDate
+        ? ", COALESCE(SUM(CASE WHEN expired_date IS NOT NULL AND YEAR(expired_date) > 0 AND expired_date < CURDATE() THEN 1 ELSE 0 END), 0) AS expired
+"
+        . ", COALESCE(SUM(CASE WHEN expired_date BETWEEN CURDATE() AND DATE_ADD(CURDATE(), INTERVAL 7 DAY) THEN 1 ELSE 0 END), 0) AS expired_h7
+"
+        . ", COALESCE(SUM(CASE WHEN expired_date > DATE_ADD(CURDATE(), INTERVAL 7 DAY) AND expired_date <= DATE_ADD(CURDATE(), INTERVAL 30 DAY) THEN 1 ELSE 0 END), 0) AS expired_h30
+"
+        . ", COALESCE(SUM(CASE WHEN expired_date IS NULL OR YEAR(expired_date) = 0 THEN 1 ELSE 0 END), 0) AS tanpa_expired"
+        : ", 0 AS expired, 0 AS expired_h7, 0 AS expired_h30, COUNT(*) AS tanpa_expired";
+
     $stmtSummary = $pdo->query("
         SELECT
             COUNT(*) AS total_produk,
@@ -399,6 +477,7 @@ try {
             COALESCE(SUM(CASE WHEN stok <= stok_minimum THEN 1 ELSE 0 END), 0) AS stok_minimum,
             COALESCE(SUM(CASE WHEN stok <= 0 THEN 1 ELSE 0 END), 0) AS stok_kosong,
             COALESCE(SUM(stok * harga_beli), 0) AS nilai_persediaan
+            $expiredSummarySql
         FROM produk
     ");
 
@@ -439,6 +518,20 @@ try {
         $params[':status'] = $statusFilter;
     }
 
+    if ($produkHasExpiredDate && $expiredFilter !== '') {
+        if ($expiredFilter === 'expired') {
+            $where[] = "expired_date IS NOT NULL AND YEAR(expired_date) > 0 AND expired_date < CURDATE()";
+        } elseif ($expiredFilter === 'h7') {
+            $where[] = "expired_date BETWEEN CURDATE() AND DATE_ADD(CURDATE(), INTERVAL 7 DAY)";
+        } elseif ($expiredFilter === 'h30') {
+            $where[] = "expired_date > DATE_ADD(CURDATE(), INTERVAL 7 DAY) AND expired_date <= DATE_ADD(CURDATE(), INTERVAL 30 DAY)";
+        } elseif ($expiredFilter === 'safe') {
+            $where[] = "expired_date > DATE_ADD(CURDATE(), INTERVAL 30 DAY)";
+        } elseif ($expiredFilter === 'none') {
+            $where[] = "expired_date IS NULL OR YEAR(expired_date) = 0";
+        }
+    }
+
     $whereSql = $where ? 'WHERE ' . implode(' AND ', $where) : '';
 
     $stmtProdukCount = $pdo->prepare("
@@ -455,7 +548,7 @@ try {
     }
 
     $stmtProduk = $pdo->prepare("
-        SELECT id, kode, nama, kategori, harga_beli, harga_jual, stok, stok_minimum, satuan, status
+        SELECT id, kode, nama, kategori, harga_beli, harga_jual, stok, stok_minimum, satuan, status" . ($produkHasExpiredDate ? ", expired_date" : ", NULL AS expired_date") . "
         FROM produk
         $whereSql
         ORDER BY
@@ -597,6 +690,36 @@ catat_view_once($pdo, 'Stok Opname', 'Membuka halaman Stok Opname');
             border: 1px solid #fecaca;
         }
 
+        .badge-expired {
+            background: #fef2f2;
+            color: #b91c1c;
+            border: 1px solid #fecaca;
+        }
+
+        .badge-exp-h7 {
+            background: #fff7ed;
+            color: #c2410c;
+            border: 1px solid #fed7aa;
+        }
+
+        .badge-exp-h30 {
+            background: #fefce8;
+            color: #a16207;
+            border: 1px solid #fde68a;
+        }
+
+        .badge-exp-safe {
+            background: #f0fdf4;
+            color: #15803d;
+            border: 1px solid #bbf7d0;
+        }
+
+        .badge-exp-none {
+            background: #f5f5f5;
+            color: #737373;
+            border: 1px solid #e5e5e5;
+        }
+
         @media (min-width: 1024px) {
             .sidebar {
                 width: 220px;
@@ -707,7 +830,7 @@ catat_view_once($pdo, 'Stok Opname', 'Membuka halaman Stok Opname');
 
         .stok-filter-form {
             display: grid;
-            grid-template-columns: minmax(220px, 2fr) minmax(160px, 1fr) minmax(140px, 1fr) minmax(140px, 1fr) auto auto;
+            grid-template-columns: minmax(220px, 2fr) minmax(150px, 1fr) minmax(130px, 1fr) minmax(150px, 1fr) minmax(130px, 1fr) auto auto;
             gap: .75rem;
             align-items: end;
         }
@@ -1006,6 +1129,326 @@ catat_view_once($pdo, 'Stok Opname', 'Membuka halaman Stok Opname');
                 margin-left: 220px;
             }
         }
+
+        /* ── MacBook / Desktop polish (1024px–1728px) ───────────────── */
+        @media (min-width: 1024px) {
+            .stok-main-wrap {
+                min-width: 0;
+            }
+
+            .stok-main {
+                width: 100%;
+                max-width: 1720px;
+                margin: 0 auto;
+                padding: 24px 28px 40px !important;
+                gap: 20px !important;
+            }
+
+            .stok-main>.grid:first-of-type {
+                grid-template-columns: repeat(3, minmax(0, 1fr)) !important;
+                gap: 12px !important;
+            }
+
+            .stok-main>.grid:first-of-type>div {
+                min-width: 0;
+                min-height: 108px;
+                padding: 16px 18px !important;
+                display: flex;
+                flex-direction: column;
+                justify-content: space-between;
+            }
+
+            .stok-main>.grid:first-of-type p:nth-child(2) {
+                font-size: 22px !important;
+                line-height: 1.15;
+                overflow-wrap: anywhere;
+            }
+
+            .stok-filter-form {
+                grid-template-columns: minmax(260px, 2fr) repeat(4, minmax(135px, 1fr)) auto auto !important;
+                gap: 10px !important;
+            }
+
+            .stok-filter-form input,
+            .stok-filter-form select,
+            .stok-filter-form button,
+            .stok-filter-form a {
+                min-height: 42px;
+            }
+
+            #form-opname,
+            .stok-main>section {
+                min-width: 0;
+            }
+
+            .tbl-desktop {
+                overflow-x: auto !important;
+                scrollbar-width: thin;
+            }
+
+            .tbl-desktop table {
+                width: 100%;
+                min-width: 1040px !important;
+                table-layout: fixed;
+            }
+
+            .tbl-desktop th,
+            .tbl-desktop td {
+                padding-left: 12px !important;
+                padding-right: 12px !important;
+                vertical-align: middle;
+            }
+
+            #form-opname .tbl-desktop th:nth-child(1),
+            #form-opname .tbl-desktop td:nth-child(1) {
+                width: 18%;
+            }
+
+            #form-opname .tbl-desktop th:nth-child(2),
+            #form-opname .tbl-desktop td:nth-child(2) {
+                width: 10%;
+            }
+
+            #form-opname .tbl-desktop th:nth-child(3),
+            #form-opname .tbl-desktop td:nth-child(3) {
+                width: 12%;
+            }
+
+            #form-opname .tbl-desktop th:nth-child(4),
+            #form-opname .tbl-desktop td:nth-child(4) {
+                width: 11%;
+            }
+
+            #form-opname .tbl-desktop th:nth-child(5),
+            #form-opname .tbl-desktop td:nth-child(5) {
+                width: 10%;
+            }
+
+            #form-opname .tbl-desktop th:nth-child(6),
+            #form-opname .tbl-desktop td:nth-child(6) {
+                width: 6%;
+            }
+
+            #form-opname .tbl-desktop th:nth-child(7),
+            #form-opname .tbl-desktop td:nth-child(7) {
+                width: 10%;
+            }
+
+            #form-opname .tbl-desktop th:nth-child(8),
+            #form-opname .tbl-desktop td:nth-child(8) {
+                width: 15%;
+            }
+
+            #form-opname .tbl-desktop th:nth-child(9),
+            #form-opname .tbl-desktop td:nth-child(9) {
+                width: 8%;
+            }
+
+            #form-opname .tbl-desktop input {
+                min-width: 0;
+                height: 40px;
+            }
+
+            .stok-form-header {
+                padding: 16px 18px !important;
+            }
+
+            .stok-form-header p {
+                max-width: 760px;
+                line-height: 1.5;
+            }
+
+            .pagination-wrap {
+                padding: 12px 16px !important;
+            }
+        }
+
+        @media (min-width: 1280px) {
+            .stok-main {
+                padding: 28px 34px 44px !important;
+            }
+
+            .stok-main>.grid:first-of-type {
+                grid-template-columns: repeat(5, minmax(0, 1fr)) !important;
+            }
+
+            .stok-main>.grid:first-of-type>div {
+                min-height: 112px;
+            }
+        }
+
+        @media (min-width: 1440px) {
+            .stok-main {
+                padding-left: 40px !important;
+                padding-right: 40px !important;
+            }
+
+            .stok-main>.grid:first-of-type {
+                grid-template-columns: repeat(9, minmax(0, 1fr)) !important;
+            }
+
+            .stok-main>.grid:first-of-type>div {
+                min-height: 118px;
+                padding: 17px 16px !important;
+            }
+
+            .stok-main>.grid:first-of-type p:nth-child(2) {
+                font-size: 21px !important;
+            }
+
+            .stok-filter-form {
+                grid-template-columns: minmax(290px, 2fr) repeat(4, minmax(145px, 1fr)) auto auto !important;
+            }
+
+            .tbl-desktop table {
+                min-width: 100% !important;
+            }
+        }
+
+        @media (min-width: 1728px) {
+            .stok-main {
+                max-width: 1780px;
+            }
+        }
+
+
+        /* ── FIX MacBook kecil / iPad landscape ─────────────────────── */
+        @media (min-width: 1024px) and (max-width: 1365px) {
+            .stok-main {
+                width: auto !important;
+                max-width: none !important;
+                padding: 20px 22px 40px !important;
+                overflow-x: hidden;
+            }
+
+            /* Ringkasan dibuat 3 kolom agar nilai tidak berhimpitan */
+            .stok-main>.grid:first-of-type {
+                grid-template-columns: repeat(3, minmax(0, 1fr)) !important;
+                gap: 12px !important;
+            }
+
+            .stok-main>.grid:first-of-type>div {
+                min-height: 104px !important;
+                padding: 15px 16px !important;
+            }
+
+            .stok-main>.grid:first-of-type p:nth-child(2) {
+                font-size: 21px !important;
+                line-height: 1.15 !important;
+            }
+
+            /* Filter tidak boleh melebar keluar layar */
+            .stok-filter-form {
+                grid-template-columns: repeat(3, minmax(0, 1fr)) !important;
+                gap: 10px !important;
+            }
+
+            .stok-filter-form>div:first-child {
+                grid-column: span 2;
+            }
+
+            .stok-filter-form .stok-filter-actions {
+                grid-column: auto !important;
+            }
+
+            .stok-filter-form button,
+            .stok-filter-form a {
+                width: 100%;
+                min-height: 42px;
+                display: inline-flex;
+                align-items: center;
+                justify-content: center;
+            }
+
+            /* Pada lebar ini gunakan card, jangan paksa tabel 1100px */
+            .tbl-desktop {
+                display: none !important;
+            }
+
+            .card-list {
+                display: grid !important;
+                grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+                gap: 12px !important;
+                padding: 12px !important;
+                background: #f8fafc !important;
+            }
+
+            .card-item {
+                min-width: 0;
+                padding: 15px !important;
+                border-color: #e5e7eb !important;
+                box-shadow: none !important;
+            }
+
+            .card-item:hover {
+                transform: none !important;
+                box-shadow: none !important;
+            }
+
+            .card-item input,
+            .card-item textarea {
+                min-height: 42px;
+            }
+
+            .stok-form-header {
+                padding: 15px 16px !important;
+            }
+
+            .stok-form-header>div {
+                min-width: 0;
+            }
+
+            .stok-form-header p {
+                max-width: 650px;
+                line-height: 1.45;
+            }
+
+            .stok-riwayat-limit-form {
+                width: auto !important;
+                display: flex !important;
+                grid-template-columns: none !important;
+            }
+
+            .pagination-wrap {
+                padding: 12px !important;
+            }
+        }
+
+        /* Tabel penuh hanya untuk desktop yang benar-benar lebar */
+        @media (min-width: 1366px) {
+            .tbl-desktop {
+                display: block !important;
+            }
+
+            .card-list {
+                display: none !important;
+            }
+
+            .stok-main {
+                max-width: 1720px;
+                margin: 0 auto;
+            }
+        }
+
+        /* Tambahan untuk layar sangat sempit tetapi masih memakai sidebar desktop */
+        @media (min-width: 1024px) and (max-width: 1120px) {
+            .stok-main {
+                padding-left: 16px !important;
+                padding-right: 16px !important;
+            }
+
+            .stok-filter-form {
+                grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+            }
+
+            .stok-filter-form>div:first-child {
+                grid-column: 1 / -1;
+            }
+
+            .card-list {
+                grid-template-columns: 1fr !important;
+            }
+        }
     </style>
 </head>
 
@@ -1029,7 +1472,13 @@ catat_view_once($pdo, 'Stok Opname', 'Membuka halaman Stok Opname');
                 </div>
             <?php endif; ?>
 
-            <div class="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-3 md:gap-4">
+            <?php if (!$produkHasExpiredDate): ?>
+                <div class="bg-yellow-50 border border-yellow-200 text-yellow-800 px-4 py-3 text-xs font-bold">
+                    Kolom tanggal kedaluwarsa belum tersedia pada tabel produk. Fitur kedaluwarsa di stok opname dinonaktifkan sementara.
+                </div>
+            <?php endif; ?>
+
+            <div class="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-9 gap-3 md:gap-4">
                 <div class="bg-white border border-subtle p-4 md:p-5">
                     <p class="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1">Total Produk</p>
                     <p class="text-2xl font-bold text-blue-600"><?= angka($summary['total_produk']) ?></p>
@@ -1065,6 +1514,24 @@ catat_view_once($pdo, 'Stok Opname', 'Membuka halaman Stok Opname');
                     <p class="text-2xl font-bold text-green-600"><?= angka($summary['total_opname']) ?></p>
                     <p class="text-[10px] text-gray-400 mt-1">Riwayat tersimpan</p>
                 </div>
+
+                <div class="bg-white border <?= $summary['expired'] > 0 ? 'border-red-200' : 'border-subtle' ?> p-4 md:p-5">
+                    <p class="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1">Kedaluwarsa</p>
+                    <p class="text-2xl font-bold <?= $summary['expired'] > 0 ? 'text-red-600' : '' ?>"><?= angka($summary['expired']) ?></p>
+                    <p class="text-[10px] text-gray-400 mt-1">Sudah lewat tanggal</p>
+                </div>
+
+                <div class="bg-white border <?= $summary['expired_h7'] > 0 ? 'border-orange-200' : 'border-subtle' ?> p-4 md:p-5">
+                    <p class="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1">Kedaluwarsa H-7</p>
+                    <p class="text-2xl font-bold <?= $summary['expired_h7'] > 0 ? 'text-orange-600' : '' ?>"><?= angka($summary['expired_h7']) ?></p>
+                    <p class="text-[10px] text-gray-400 mt-1">Perlu diprioritaskan</p>
+                </div>
+
+                <div class="bg-white border <?= $summary['expired_h30'] > 0 ? 'border-yellow-200' : 'border-subtle' ?> p-4 md:p-5">
+                    <p class="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1">Kedaluwarsa H-30</p>
+                    <p class="text-2xl font-bold <?= $summary['expired_h30'] > 0 ? 'text-yellow-600' : '' ?>"><?= angka($summary['expired_h30']) ?></p>
+                    <p class="text-[10px] text-gray-400 mt-1"><?= angka($summary['tanpa_expired']) ?> tanpa tanggal</p>
+                </div>
             </div>
 
             <section class="bg-white border border-subtle p-4">
@@ -1092,6 +1559,18 @@ catat_view_once($pdo, 'Stok Opname', 'Membuka halaman Stok Opname');
                             <option value="">Semua Status</option>
                             <option value="aktif" <?= $statusFilter === 'aktif' ? 'selected' : '' ?>>Aktif</option>
                             <option value="nonaktif" <?= $statusFilter === 'nonaktif' ? 'selected' : '' ?>>Nonaktif</option>
+                        </select>
+                    </div>
+
+                    <div>
+                        <label class="block text-[10px] font-bold uppercase tracking-widest text-gray-400 mb-1.5">Kedaluwarsa</label>
+                        <select name="expired" class="w-full bg-gray-50 border border-gray-100 px-3 py-2.5 text-sm transition-all" <?= !$produkHasExpiredDate ? 'disabled' : '' ?>>
+                            <option value="">Semua Kedaluwarsa</option>
+                            <option value="expired" <?= $expiredFilter === 'expired' ? 'selected' : '' ?>>Sudah Kedaluwarsa</option>
+                            <option value="h7" <?= $expiredFilter === 'h7' ? 'selected' : '' ?>>H-7</option>
+                            <option value="h30" <?= $expiredFilter === 'h30' ? 'selected' : '' ?>>H-8 s.d. H-30</option>
+                            <option value="safe" <?= $expiredFilter === 'safe' ? 'selected' : '' ?>>Aman (&gt;30 Hari)</option>
+                            <option value="none" <?= $expiredFilter === 'none' ? 'selected' : '' ?>>Tanpa Tanggal</option>
                         </select>
                     </div>
 
@@ -1131,11 +1610,12 @@ catat_view_once($pdo, 'Stok Opname', 'Membuka halaman Stok Opname');
                 </div>
 
                 <div class="tbl-desktop overflow-x-auto no-scrollbar">
-                    <table class="w-full text-left" style="min-width:980px">
+                    <table class="w-full text-left" style="min-width:1100px">
                         <thead class="border-b border-subtle bg-gray-50">
                             <tr>
                                 <th class="px-5 py-4 text-[10px] font-bold uppercase tracking-widest text-gray-400">Produk</th>
                                 <th class="px-5 py-4 text-[10px] font-bold uppercase tracking-widest text-gray-400">Kategori</th>
+                                <th class="px-5 py-4 text-[10px] font-bold uppercase tracking-widest text-gray-400">Kedaluwarsa</th>
                                 <th class="px-5 py-4 text-[10px] font-bold uppercase tracking-widest text-gray-400 text-right">Harga Beli</th>
                                 <th class="px-5 py-4 text-[10px] font-bold uppercase tracking-widest text-gray-400 text-right">Stok Sistem</th>
                                 <th class="px-5 py-4 text-[10px] font-bold uppercase tracking-widest text-gray-400 text-right">Min</th>
@@ -1148,7 +1628,7 @@ catat_view_once($pdo, 'Stok Opname', 'Membuka halaman Stok Opname');
                         <tbody class="divide-y divide-[#f5f5f5]">
                             <?php if (!$produk): ?>
                                 <tr>
-                                    <td colspan="8" class="py-20 text-center text-[10px] font-bold uppercase tracking-widest text-gray-300">
+                                    <td colspan="9" class="py-20 text-center text-[10px] font-bold uppercase tracking-widest text-gray-300">
                                         Produk tidak ditemukan
                                     </td>
                                 </tr>
@@ -1158,6 +1638,7 @@ catat_view_once($pdo, 'Stok Opname', 'Membuka halaman Stok Opname');
                                 $stok = (int)$p['stok'];
                                 $min = (int)$p['stok_minimum'];
                                 $stokClass = $stok <= 0 ? 'badge-empty' : ($stok <= $min ? 'badge-low' : 'badge-aktif');
+                                $expiredInfo = stok_expired_info($p['expired_date'] ?? null);
                             ?>
                                 <tr>
                                     <td class="px-5 py-4">
@@ -1167,6 +1648,10 @@ catat_view_once($pdo, 'Stok Opname', 'Membuka halaman Stok Opname');
                                     </td>
 
                                     <td class="px-5 py-4 text-sm"><?= h($p['kategori']) ?></td>
+                                    <td class="px-5 py-4">
+                                        <div class="text-xs font-bold"><?= h(stok_tgl_expired($p['expired_date'] ?? null)) ?></div>
+                                        <span class="<?= h($expiredInfo['class']) ?> text-[9px] font-bold uppercase px-2 py-1 inline-flex mt-1"><?= h($expiredInfo['label']) ?></span>
+                                    </td>
                                     <td class="px-5 py-4 text-right text-sm font-bold"><?= rupiah($p['harga_beli']) ?></td>
 
                                     <td class="px-5 py-4 text-right">
@@ -1216,6 +1701,7 @@ catat_view_once($pdo, 'Stok Opname', 'Membuka halaman Stok Opname');
                     <?php foreach ($produk as $p):
                         $stok = (int)$p['stok'];
                         $min = (int)$p['stok_minimum'];
+                        $expiredInfo = stok_expired_info($p['expired_date'] ?? null);
                     ?>
                         <div class="card-item bg-white border border-subtle p-4 flex flex-col gap-3">
                             <input type="hidden" name="produk_id[]" value="<?= h($p['id']) ?>">
@@ -1233,6 +1719,14 @@ catat_view_once($pdo, 'Stok Opname', 'Membuka halaman Stok Opname');
                                         <?= angka($stok) ?>
                                     </p>
                                 </div>
+                            </div>
+
+                            <div class="flex items-center justify-between gap-2 pt-2 border-t border-subtle">
+                                <div>
+                                    <p class="text-[9px] text-gray-400 font-bold uppercase tracking-widest">Kedaluwarsa</p>
+                                    <p class="text-xs font-bold mt-0.5"><?= h(stok_tgl_expired($p['expired_date'] ?? null)) ?></p>
+                                </div>
+                                <span class="<?= h($expiredInfo['class']) ?> text-[9px] font-bold uppercase px-2 py-1 inline-flex"><?= h($expiredInfo['label']) ?></span>
                             </div>
 
                             <div class="grid grid-cols-2 gap-2 pt-2 border-t border-subtle text-xs">
@@ -1293,6 +1787,7 @@ catat_view_once($pdo, 'Stok Opname', 'Membuka halaman Stok Opname');
                         <input type="hidden" name="q" value="<?= h($q) ?>">
                         <input type="hidden" name="kategori" value="<?= h($kategoriFilter) ?>">
                         <input type="hidden" name="status" value="<?= h($statusFilter) ?>">
+                        <input type="hidden" name="expired" value="<?= h($expiredFilter) ?>">
                         <input type="hidden" name="produk_page" value="<?= (int)$produkPage ?>">
                         <input type="hidden" name="produk_limit" value="<?= (int)$produkLimit ?>">
                         <input type="hidden" name="riwayat_page" value="1">

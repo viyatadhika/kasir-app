@@ -141,7 +141,25 @@ if (!function_exists('produk_hapus_file_gambar')) {
     }
 }
 
+if (!function_exists('produk_ensure_expired_column')) {
+    function produk_ensure_expired_column(PDO $pdo): void
+    {
+        static $done = false;
+        if ($done) return;
+        $done = true;
+        try {
+            $cols = $pdo->query("SHOW COLUMNS FROM produk")->fetchAll(PDO::FETCH_COLUMN);
+            if (!in_array('expired_date', $cols, true)) {
+                $pdo->exec("ALTER TABLE produk ADD COLUMN expired_date DATE NULL AFTER stok_minimum");
+            }
+        } catch (Throwable $e) {
+            error_log('Gagal memastikan kolom expired_date: ' . $e->getMessage());
+        }
+    }
+}
+
 produk_ensure_gambar_column($pdo);
+produk_ensure_expired_column($pdo);
 
 // ── API Handler (AJAX) ────────────────────────────────────────────────────────
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_GET['action'])) {
@@ -177,8 +195,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_GET['action'])) {
             $gambar = produk_upload_gambar('gambar_produk');
 
             $stmt = $pdo->prepare("
-                INSERT INTO produk (kode, nama, kategori, harga_beli, harga_jual, stok, stok_minimum, satuan, gambar, status)
-                VALUES (:kode, :nama, :kategori, :harga_beli, :harga_jual, :stok, :stok_minimum, :satuan, :gambar, :status)
+                INSERT INTO produk (kode, nama, kategori, harga_beli, harga_jual, stok, stok_minimum, expired_date, satuan, gambar, status)
+                VALUES (:kode, :nama, :kategori, :harga_beli, :harga_jual, :stok, :stok_minimum, :expired_date, :satuan, :gambar, :status)
             ");
             $stmt->execute([
                 ':kode'         => trim($input['kode']),
@@ -188,6 +206,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_GET['action'])) {
                 ':harga_jual'   => (int)$input['harga_jual'],
                 ':stok'         => (int)(isset($input['stok']) ? $input['stok'] : 0),
                 ':stok_minimum' => (int)(isset($input['stok_minimum']) ? $input['stok_minimum'] : 5),
+                ':expired_date' => !empty($input['expired_date']) ? $input['expired_date'] : null,
                 ':satuan'       => trim(isset($input['satuan']) ? $input['satuan'] : 'pcs'),
                 ':gambar'       => $gambar,
                 ':status'       => in_array(isset($input['status']) ? $input['status'] : 'aktif', ['aktif', 'nonaktif']) ? $input['status'] : 'aktif',
@@ -225,7 +244,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_GET['action'])) {
                     kode = :kode, nama = :nama, kategori = :kategori,
                     harga_beli = :harga_beli, harga_jual = :harga_jual,
                     stok = :stok, stok_minimum = :stok_minimum,
-                    satuan = :satuan, gambar = :gambar, status = :status, updated_at = NOW()
+                    expired_date = :expired_date, satuan = :satuan, gambar = :gambar, status = :status, updated_at = NOW()
                 WHERE id = :id
             ");
             $stmt->execute([
@@ -237,6 +256,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_GET['action'])) {
                 ':harga_jual'   => (int)$input['harga_jual'],
                 ':stok'         => (int)(isset($input['stok']) ? $input['stok'] : 0),
                 ':stok_minimum' => (int)(isset($input['stok_minimum']) ? $input['stok_minimum'] : 5),
+                ':expired_date' => !empty($input['expired_date']) ? $input['expired_date'] : null,
                 ':satuan'       => trim(isset($input['satuan']) ? $input['satuan'] : 'pcs'),
                 ':gambar'       => $gambar,
                 ':status'       => in_array(isset($input['status']) ? $input['status'] : 'aktif', ['aktif', 'nonaktif']) ? $input['status'] : 'aktif',
@@ -299,6 +319,7 @@ $search       = trim(isset($_GET['q'])      ? $_GET['q']      : '');
 $katFilter    = isset($_GET['kat'])          ? $_GET['kat']    : '';
 $statusFilter = isset($_GET['status'])       ? $_GET['status'] : 'aktif';
 $stokFilter   = isset($_GET['stok'])         ? $_GET['stok']   : '';
+$expiredFilter = isset($_GET['expired'])      ? $_GET['expired'] : '';
 $page         = max(1, (int)(isset($_GET['page']) ? $_GET['page'] : 1));
 $allowedLimit = [10, 15, 25, 50, 100];
 $perPage      = (int)(isset($_GET['limit']) ? $_GET['limit'] : 15);
@@ -330,6 +351,16 @@ if ($stokFilter === 'limit') {
     $where[] = 'stok <= 0';
 }
 
+if ($expiredFilter === 'expired') {
+    $where[] = "expired_date IS NOT NULL AND expired_date < CURDATE()";
+} elseif ($expiredFilter === '30_hari') {
+    $where[] = "expired_date IS NOT NULL AND expired_date >= CURDATE() AND expired_date <= DATE_ADD(CURDATE(), INTERVAL 30 DAY)";
+} elseif ($expiredFilter === '90_hari') {
+    $where[] = "expired_date IS NOT NULL AND expired_date >= CURDATE() AND expired_date <= DATE_ADD(CURDATE(), INTERVAL 90 DAY)";
+} elseif ($expiredFilter === 'tanpa_tanggal') {
+    $where[] = "expired_date IS NULL";
+}
+
 $whereStr = implode(' AND ', $where);
 
 $stmtCount = $pdo->prepare("SELECT COUNT(*) FROM produk WHERE $whereStr");
@@ -342,7 +373,7 @@ if ($page > $totalPages) {
 $offset = ($page - 1) * $perPage;
 
 if (!function_exists('produk_page_url')) {
-    function produk_page_url(int $targetPage, string $search, string $katFilter, string $statusFilter, string $stokFilter, int $perPage): string
+    function produk_page_url(int $targetPage, string $search, string $katFilter, string $statusFilter, string $stokFilter, string $expiredFilter, int $perPage): string
     {
         return '?' . http_build_query([
             'page' => max(1, $targetPage),
@@ -350,6 +381,7 @@ if (!function_exists('produk_page_url')) {
             'kat' => $katFilter,
             'status' => $statusFilter,
             'stok' => $stokFilter,
+            'expired' => $expiredFilter,
             'limit' => $perPage,
         ]);
     }
@@ -377,6 +409,8 @@ $stmtSummary = $pdo->prepare("
         SUM(CASE WHEN status = 'aktif' THEN 1 ELSE 0 END) AS aktif,
         SUM(CASE WHEN stok <= stok_minimum THEN 1 ELSE 0 END) AS low_stock,
         SUM(CASE WHEN stok = 0 THEN 1 ELSE 0 END) AS habis,
+        SUM(CASE WHEN expired_date IS NOT NULL AND expired_date < CURDATE() THEN 1 ELSE 0 END) AS expired,
+        SUM(CASE WHEN expired_date IS NOT NULL AND expired_date >= CURDATE() AND expired_date <= DATE_ADD(CURDATE(), INTERVAL 30 DAY) THEN 1 ELSE 0 END) AS expired_soon,
         SUM(harga_jual * stok) AS nilai_stok
     FROM produk
     WHERE $summaryWhere
@@ -651,29 +685,6 @@ $rightActionHtml = '
             background: #f3f4f6
         }
 
-        .scanner-hint {
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            background: #f8fafc;
-            border: 1px solid #e5e7eb;
-            padding: 10px 12px;
-            font-size: 10px;
-            font-weight: 800;
-            color: #64748b;
-            text-transform: uppercase;
-            letter-spacing: .08em;
-        }
-
-        .scanner-hint-dot {
-            width: 8px;
-            height: 8px;
-            background: #22c55e;
-            border-radius: 9999px;
-            box-shadow: 0 0 0 4px rgba(34, 197, 94, .12);
-            flex-shrink: 0;
-        }
-
         .scanner-btn {
             display: inline-flex;
             align-items: center;
@@ -692,6 +703,340 @@ $rightActionHtml = '
         .scanner-btn:hover {
             background: #000;
         }
+
+
+        /* ============================================================
+           RESPONSIVE POLISH - TABLET & MOBILE
+           Tampilan dibuat lebih rapat, seimbang, dan mudah disentuh.
+           ============================================================ */
+        @media (max-width: 1023px) {
+            .produk-main {
+                padding: 1rem !important;
+                padding-bottom: 6.25rem !important;
+            }
+
+            .produk-main>.grid:first-child {
+                grid-template-columns: repeat(3, minmax(0, 1fr)) !important;
+                gap: .75rem !important;
+                margin-bottom: 1rem !important;
+            }
+
+            .summary-card {
+                min-height: 104px;
+                padding: .9rem !important;
+                display: flex;
+                flex-direction: column;
+                justify-content: space-between;
+                overflow: hidden;
+            }
+
+            .summary-card p:first-child {
+                font-size: 9px !important;
+                line-height: 1.25;
+            }
+
+            .summary-card p:nth-child(2) {
+                font-size: 1.25rem !important;
+                line-height: 1.2;
+                word-break: break-word;
+            }
+
+            .summary-card p:last-child {
+                font-size: 9px !important;
+                line-height: 1.3;
+            }
+
+            .filter-card {
+                display: grid !important;
+                grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+                gap: .75rem !important;
+                padding: .875rem !important;
+                margin-bottom: .875rem !important;
+            }
+
+            .filter-card>.relative:first-child {
+                grid-column: 1 / -1;
+                min-width: 0 !important;
+            }
+
+            .filter-card select,
+            .filter-card button,
+            .filter-card input {
+                width: 100% !important;
+                min-width: 0 !important;
+                min-height: 44px;
+                font-size: 12px !important;
+            }
+
+            .filter-card .scanner-btn {
+                grid-column: 1 / -1;
+            }
+
+            .table-card {
+                border-color: #e5e7eb !important;
+                background: transparent !important;
+            }
+
+            .table-card>.lg\\:hidden {
+                background: transparent;
+            }
+
+            .table-card .grid.grid-cols-1.md\\:grid-cols-2 {
+                grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+                gap: .875rem !important;
+                padding: .875rem !important;
+            }
+
+            .produk-mobile-card {
+                min-width: 0;
+                padding: 1rem !important;
+                border-color: #e5e7eb !important;
+                background: #fff !important;
+            }
+
+            .produk-mobile-card .produk-thumb,
+            .produk-mobile-card .produk-thumb-empty {
+                width: 56px;
+                height: 56px;
+            }
+
+            .produk-mobile-card h3 {
+                white-space: normal !important;
+                display: -webkit-box;
+                -webkit-line-clamp: 2;
+                line-clamp: 2;
+                -webkit-box-orient: vertical;
+                overflow: hidden;
+                min-height: 2.4em;
+            }
+
+            .produk-mobile-card .grid.grid-cols-2 {
+                gap: .625rem !important;
+            }
+
+            .produk-mobile-card .grid.grid-cols-2>div {
+                padding: .75rem !important;
+                min-width: 0;
+            }
+
+            .produk-mobile-card .grid.grid-cols-2 p:last-child {
+                font-size: 12px !important;
+                word-break: break-word;
+            }
+
+            .produk-mobile-card .flex.items-center.gap-2.pt-3 {
+                display: grid !important;
+                grid-template-columns: repeat(3, minmax(0, 1fr));
+                gap: .5rem !important;
+            }
+
+            .produk-mobile-card .flex.items-center.gap-2.pt-3 button {
+                width: 100%;
+                min-width: 0;
+                min-height: 40px;
+                padding-left: .4rem !important;
+                padding-right: .4rem !important;
+            }
+
+            .table-card>.px-4.md\\:px-5.py-4 {
+                padding: .875rem !important;
+                align-items: stretch !important;
+            }
+
+            .table-card>.px-4.md\\:px-5.py-4>.flex {
+                overflow-x: auto;
+                flex-wrap: nowrap !important;
+                padding-bottom: .2rem;
+                -webkit-overflow-scrolling: touch;
+            }
+
+            .table-card>.px-4.md\\:px-5.py-4 a {
+                flex: 0 0 auto;
+                min-height: 38px;
+                display: inline-flex;
+                align-items: center;
+                justify-content: center;
+            }
+
+            #modal-produk,
+            #modal-stok {
+                padding: .75rem !important;
+                align-items: flex-end !important;
+            }
+
+            #modal-produk>div,
+            #modal-stok>div {
+                width: 100% !important;
+                max-width: 100% !important;
+                max-height: 94vh;
+            }
+
+            #modal-produk>div>div:nth-child(2) {
+                max-height: calc(94vh - 142px) !important;
+                padding: 1rem !important;
+            }
+
+            #modal-produk>div>div:first-child,
+            #modal-produk>div>div:last-child,
+            #modal-stok>div>div:first-child,
+            #modal-stok>div>div:last-child {
+                padding-left: 1rem !important;
+                padding-right: 1rem !important;
+            }
+
+            #modal-produk input,
+            #modal-produk select,
+            #modal-produk button,
+            #modal-stok input,
+            #modal-stok button {
+                min-height: 44px;
+                font-size: 16px;
+            }
+
+            .gambar-preview-box {
+                width: 110px;
+                height: 110px;
+            }
+        }
+
+        @media (min-width: 641px) and (max-width: 1023px) {
+            .produk-main {
+                padding: 1rem !important;
+            }
+
+            .produk-main>.grid:first-child {
+                grid-template-columns: repeat(3, minmax(0, 1fr)) !important;
+            }
+
+            .filter-card {
+                grid-template-columns: repeat(3, minmax(0, 1fr)) !important;
+            }
+
+            .filter-card>.relative:first-child,
+            .filter-card .scanner-btn {
+                grid-column: 1 / -1;
+            }
+        }
+
+        @media (max-width: 640px) {
+            body {
+                background: #f8fafc !important;
+            }
+
+            .produk-main {
+                padding: .625rem !important;
+                padding-bottom: 6.5rem !important;
+            }
+
+            .produk-main>.grid:first-child {
+                grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+                gap: .5rem !important;
+            }
+
+            .summary-card {
+                min-height: 92px;
+                padding: .7rem !important;
+            }
+
+            .summary-card p:nth-child(2) {
+                font-size: 1.05rem !important;
+            }
+
+            .filter-card {
+                grid-template-columns: 1fr !important;
+                gap: .625rem !important;
+                padding: .75rem !important;
+            }
+
+            .filter-card>* {
+                grid-column: auto !important;
+            }
+
+            .filter-card .scanner-btn {
+                min-height: 46px;
+            }
+
+            .table-card .grid.grid-cols-1.md\\:grid-cols-2 {
+                grid-template-columns: 1fr !important;
+                padding: .625rem !important;
+                gap: .625rem !important;
+            }
+
+            .produk-mobile-card {
+                padding: .875rem !important;
+            }
+
+            .produk-mobile-card .flex.items-start.justify-between {
+                gap: .625rem !important;
+            }
+
+            .produk-mobile-card .produk-thumb,
+            .produk-mobile-card .produk-thumb-empty {
+                width: 52px;
+                height: 52px;
+            }
+
+            .produk-mobile-card .grid.grid-cols-2 {
+                grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+            }
+
+            .produk-mobile-card .mb-4.border.border-subtle.bg-gray-50.p-3 .flex {
+                align-items: flex-start !important;
+                flex-direction: column;
+                gap: .35rem !important;
+            }
+
+            .produk-mobile-card .mb-4.border.border-subtle.bg-gray-50.p-3 span {
+                text-align: left;
+            }
+
+            .table-card>.px-4.md\\:px-5.py-4 {
+                flex-direction: column !important;
+            }
+
+            .table-card>.px-4.md\\:px-5.py-4>span {
+                text-align: center;
+                width: 100%;
+            }
+
+            #modal-produk,
+            #modal-stok {
+                padding: 0 !important;
+            }
+
+            #modal-produk>div,
+            #modal-stok>div {
+                max-height: 100vh;
+                height: 100vh;
+            }
+
+            #modal-produk>div>div:nth-child(2) {
+                max-height: calc(100vh - 142px) !important;
+            }
+
+            #modal-produk .grid.sm\\:grid-cols-2 {
+                grid-template-columns: 1fr !important;
+            }
+
+            #modal-produk>div>div:last-child,
+            #modal-stok>div>div:last-child {
+                position: sticky;
+                bottom: 0;
+                z-index: 5;
+            }
+
+            .gambar-preview-box {
+                width: 100%;
+                height: 180px;
+            }
+
+            #toast {
+                left: .75rem !important;
+                right: .75rem !important;
+                bottom: 5.25rem !important;
+                max-width: none !important;
+            }
+        }
     </style>
 </head>
 
@@ -703,7 +1048,7 @@ $rightActionHtml = '
     <main class="produk-main p-4 sm:p-5 md:p-8 lg:p-10">
 
         <!-- Summary Cards -->
-        <div class="grid grid-cols-2 md:grid-cols-4 gap-3 md:gap-4 mb-6 md:mb-8">
+        <div class="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-3 md:gap-4 mb-6 md:mb-8">
             <div class="summary-card p-4 md:p-5">
                 <p class="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1">Total SKU</p>
                 <p class="text-2xl font-bold"><?php echo number_format($summary['total']); ?></p>
@@ -727,6 +1072,20 @@ $rightActionHtml = '
                     <?php echo number_format($summary['habis']); ?>
                 </p>
                 <p class="text-[10px] text-gray-400 mt-1">perlu restock</p>
+            </div>
+            <div class="summary-card p-4 md:p-5 border <?php echo ($summary['expired_soon'] ?? 0) > 0 ? 'border-yellow-200' : ''; ?>">
+                <p class="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1">Akan Kedaluwarsa</p>
+                <p class="text-2xl font-bold <?php echo ($summary['expired_soon'] ?? 0) > 0 ? 'text-yellow-600' : 'text-gray-800'; ?>">
+                    <?php echo number_format((int)($summary['expired_soon'] ?? 0)); ?>
+                </p>
+                <p class="text-[10px] text-gray-400 mt-1">30 hari ke depan</p>
+            </div>
+            <div class="summary-card p-4 md:p-5 border <?php echo ($summary['expired'] ?? 0) > 0 ? 'border-red-200' : ''; ?>">
+                <p class="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1">Kedaluwarsa</p>
+                <p class="text-2xl font-bold <?php echo ($summary['expired'] ?? 0) > 0 ? 'text-red-600' : 'text-gray-800'; ?>">
+                    <?php echo number_format((int)($summary['expired'] ?? 0)); ?>
+                </p>
+                <p class="text-[10px] text-gray-400 mt-1">tidak boleh dijual</p>
             </div>
         </div>
 
@@ -756,6 +1115,13 @@ $rightActionHtml = '
                 <option value="limit" <?php echo $stokFilter === 'limit' ? 'selected' : ''; ?>>Stok Limit</option>
                 <option value="habis" <?php echo $stokFilter === 'habis' ? 'selected' : ''; ?>>Stok Habis</option>
             </select>
+            <select id="filter-expired" class="bg-gray-50 border border-gray-100 rounded-sm px-3 py-2.5 text-xs font-bold uppercase text-gray-500 focus:bg-white transition-all">
+                <option value="" <?php echo $expiredFilter === '' ? 'selected' : ''; ?>>Semua Kedaluwarsa</option>
+                <option value="expired" <?php echo $expiredFilter === 'expired' ? 'selected' : ''; ?>>Sudah Kedaluwarsa</option>
+                <option value="30_hari" <?php echo $expiredFilter === '30_hari' ? 'selected' : ''; ?>>30 Hari Lagi</option>
+                <option value="90_hari" <?php echo $expiredFilter === '90_hari' ? 'selected' : ''; ?>>90 Hari Lagi</option>
+                <option value="tanpa_tanggal" <?php echo $expiredFilter === 'tanpa_tanggal' ? 'selected' : ''; ?>>Tanpa Tanggal</option>
+            </select>
             <select id="filter-limit" class="bg-gray-50 border border-gray-100 rounded-sm px-3 py-2.5 text-xs font-bold uppercase text-gray-500 focus:bg-white transition-all">
                 <?php foreach ([10, 15, 25, 50, 100] as $limitOption): ?>
                     <option value="<?php echo $limitOption; ?>" <?php echo $perPage === $limitOption ? 'selected' : ''; ?>><?php echo $limitOption; ?> / Hal</option>
@@ -783,6 +1149,7 @@ $rightActionHtml = '
                             <th class="px-5 py-4 text-[10px] font-bold uppercase tracking-widest text-gray-400 text-right">Harga Beli</th>
                             <th class="px-5 py-4 text-[10px] font-bold uppercase tracking-widest text-gray-400 text-right">Harga Jual</th>
                             <th class="px-5 py-4 text-[10px] font-bold uppercase tracking-widest text-gray-400 text-center">Stok</th>
+                            <th class="px-5 py-4 text-[10px] font-bold uppercase tracking-widest text-gray-400 text-center">Kedaluwarsa</th>
                             <th class="px-5 py-4 text-[10px] font-bold uppercase tracking-widest text-gray-400 text-center">Status</th>
                             <th class="px-5 py-4 text-[10px] font-bold uppercase tracking-widest text-gray-400 text-right">Aksi</th>
                         </tr>
@@ -790,7 +1157,7 @@ $rightActionHtml = '
                     <tbody class="divide-y divide-[#f5f5f5]">
                         <?php if (empty($produkList)): ?>
                             <tr>
-                                <td colspan="8" class="py-20 text-center">
+                                <td colspan="9" class="py-20 text-center">
                                     <div class="inline-flex flex-col items-center gap-3 opacity-30">
                                         <svg class="w-12 h-12" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1" d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4" />
@@ -806,6 +1173,9 @@ $rightActionHtml = '
                                 $stokPct   = $p['stok_minimum'] > 0 ? min(100, round($p['stok'] / max($p['stok_minimum'] * 2, 1) * 100)) : 100;
                                 $stokColor = $isHabis ? 'bg-red-400' : ($isLow ? 'bg-yellow-400' : 'bg-green-400');
                                 $margin    = $p['harga_beli'] > 0 ? round(($p['harga_jual'] - $p['harga_beli']) / $p['harga_jual'] * 100) : 0;
+                                $expiredDate = !empty($p['expired_date']) ? (string)$p['expired_date'] : '';
+                                $isExpired = $expiredDate !== '' && $expiredDate < date('Y-m-d');
+                                $isExpiredSoon = $expiredDate !== '' && !$isExpired && $expiredDate <= date('Y-m-d', strtotime('+30 days'));
                             ?>
                                 <tr class="group">
                                     <td class="px-5 py-4 text-[11px] text-gray-300 font-medium"><?php echo $offset + $i + 1; ?></td>
@@ -849,6 +1219,17 @@ $rightActionHtml = '
                                             </div>
                                             <span class="text-[9px] text-gray-400">min <?php echo $p['stok_minimum']; ?></span>
                                         </div>
+                                    </td>
+                                    <td class="px-5 py-4 text-center">
+                                        <?php if ($expiredDate === ''): ?>
+                                            <span class="text-[9px] font-bold uppercase px-2 py-1 bg-gray-100 text-gray-500">Tidak diisi</span>
+                                        <?php elseif ($isExpired): ?>
+                                            <span class="text-[9px] font-bold uppercase px-2 py-1 bg-red-50 text-red-700 border border-red-200">Expired<br><?php echo date('d/m/Y', strtotime($expiredDate)); ?></span>
+                                        <?php elseif ($isExpiredSoon): ?>
+                                            <span class="text-[9px] font-bold uppercase px-2 py-1 bg-yellow-50 text-yellow-700 border border-yellow-200"><?php echo date('d/m/Y', strtotime($expiredDate)); ?></span>
+                                        <?php else: ?>
+                                            <span class="text-[9px] font-bold uppercase px-2 py-1 bg-green-50 text-green-700 border border-green-200"><?php echo date('d/m/Y', strtotime($expiredDate)); ?></span>
+                                        <?php endif; ?>
                                     </td>
                                     <td class="px-5 py-4 text-center">
                                         <?php if ($p['status'] === 'aktif'): ?>
@@ -905,6 +1286,9 @@ $rightActionHtml = '
                             $stokPct   = $p['stok_minimum'] > 0 ? min(100, round($p['stok'] / max($p['stok_minimum'] * 2, 1) * 100)) : 100;
                             $stokColor = $isHabis ? 'bg-red-400' : ($isLow ? 'bg-yellow-400' : 'bg-green-400');
                             $margin    = $p['harga_beli'] > 0 ? round(($p['harga_jual'] - $p['harga_beli']) / $p['harga_jual'] * 100) : 0;
+                            $expiredDate = !empty($p['expired_date']) ? (string)$p['expired_date'] : '';
+                            $isExpired = $expiredDate !== '' && $expiredDate < date('Y-m-d');
+                            $isExpiredSoon = $expiredDate !== '' && !$isExpired && $expiredDate <= date('Y-m-d', strtotime('+30 days'));
                         ?>
                             <div class="produk-mobile-card bg-white border border-subtle p-4">
                                 <div class="flex items-start justify-between gap-3 mb-3">
@@ -963,6 +1347,20 @@ $rightActionHtml = '
                                     </div>
                                     <p class="text-[9px] text-gray-400 mt-1">Minimum <?php echo $p['stok_minimum']; ?></p>
                                 </div>
+                                <div class="mb-4 border border-subtle bg-gray-50 p-3">
+                                    <div class="flex items-center justify-between gap-3">
+                                        <p class="text-[9px] font-bold text-gray-400 uppercase tracking-widest">Tanggal Kedaluwarsa</p>
+                                        <?php if ($expiredDate === ''): ?>
+                                            <span class="text-[10px] font-bold text-gray-500">Tidak diisi</span>
+                                        <?php elseif ($isExpired): ?>
+                                            <span class="text-[10px] font-black text-red-600"><?php echo date('d/m/Y', strtotime($expiredDate)); ?> · EXPIRED</span>
+                                        <?php elseif ($isExpiredSoon): ?>
+                                            <span class="text-[10px] font-black text-yellow-600"><?php echo date('d/m/Y', strtotime($expiredDate)); ?> · SEGERA</span>
+                                        <?php else: ?>
+                                            <span class="text-[10px] font-black text-green-600"><?php echo date('d/m/Y', strtotime($expiredDate)); ?></span>
+                                        <?php endif; ?>
+                                    </div>
+                                </div>
                                 <div class="flex items-center gap-2 pt-3 border-t border-subtle">
                                     <button onclick="openStokModal(<?php echo $p['id']; ?>, '<?php echo e(addslashes($p['nama'])); ?>', <?php echo $p['stok']; ?>)"
                                         class="flex-1 py-2 text-[10px] font-black uppercase tracking-widest border border-yellow-100 text-yellow-700 hover:bg-yellow-50 transition-all">
@@ -991,17 +1389,17 @@ $rightActionHtml = '
                     </span>
                     <div class="flex flex-wrap gap-2">
                         <?php if ($page > 1): ?>
-                            <a href="<?php echo e(produk_page_url($page - 1, $search, $katFilter, $statusFilter, $stokFilter, $perPage)); ?>"
+                            <a href="<?php echo e(produk_page_url($page - 1, $search, $katFilter, $statusFilter, $stokFilter, $expiredFilter, $perPage)); ?>"
                                 class="px-3 py-1.5 text-xs font-bold border border-subtle hover:bg-white transition-all">&larr; Prev</a>
                         <?php endif; ?>
                         <?php for ($pg = max(1, $page - 2); $pg <= min($totalPages, $page + 2); $pg++): ?>
-                            <a href="<?php echo e(produk_page_url($pg, $search, $katFilter, $statusFilter, $stokFilter, $perPage)); ?>"
+                            <a href="<?php echo e(produk_page_url($pg, $search, $katFilter, $statusFilter, $stokFilter, $expiredFilter, $perPage)); ?>"
                                 class="px-3 py-1.5 text-xs font-bold transition-all <?php echo $pg === $page ? 'bg-black text-white' : 'border border-subtle hover:bg-white'; ?>">
                                 <?php echo $pg; ?>
                             </a>
                         <?php endfor; ?>
                         <?php if ($page < $totalPages): ?>
-                            <a href="<?php echo e(produk_page_url($page + 1, $search, $katFilter, $statusFilter, $stokFilter, $perPage)); ?>"
+                            <a href="<?php echo e(produk_page_url($page + 1, $search, $katFilter, $statusFilter, $stokFilter, $expiredFilter, $perPage)); ?>"
                                 class="px-3 py-1.5 text-xs font-bold border border-subtle hover:bg-white transition-all">Next &rarr;</a>
                         <?php endif; ?>
                     </div>
@@ -1034,10 +1432,6 @@ $rightActionHtml = '
                             inputmode="numeric" autocomplete="off"
                             onkeydown="handleKodeProdukKeydown(event)"
                             class="w-full bg-gray-50 border border-gray-200 px-3 py-2.5 text-sm font-mono transition-all">
-                        <div class="scanner-hint mt-2">
-                            <span class="scanner-hint-dot"></span>
-                            <span>Scanner aktif di field ini. Scan barcode lalu Enter otomatis lanjut.</span>
-                        </div>
                     </div>
                     <div>
                         <label class="block text-[10px] font-bold uppercase tracking-widest text-gray-500 mb-1.5">Satuan</label>
@@ -1134,6 +1528,12 @@ $rightActionHtml = '
                     </div>
                 </div>
                 <div>
+                    <label class="block text-[10px] font-bold uppercase tracking-widest text-gray-500 mb-1.5">Tanggal Kedaluwarsa</label>
+                    <input type="date" id="form-expired-date"
+                        class="w-full bg-gray-50 border border-gray-200 px-3 py-2.5 text-sm transition-all">
+                    <p class="text-[9px] text-gray-400 mt-1">Opsional. Kosongkan untuk produk yang tidak memiliki masa kedaluwarsa.</p>
+                </div>
+                <div>
                     <label class="block text-[10px] font-bold uppercase tracking-widest text-gray-500 mb-1.5">Status</label>
                     <div class="flex gap-3">
                         <label class="flex items-center gap-2 cursor-pointer">
@@ -1213,6 +1613,7 @@ $rightActionHtml = '
         });
         document.getElementById('filter-status').addEventListener('change', applyFilter);
         document.getElementById('filter-stok').addEventListener('change', applyFilter);
+        document.getElementById('filter-expired').addEventListener('change', applyFilter);
         document.getElementById('filter-limit').addEventListener('change', applyFilter);
 
         document.addEventListener('DOMContentLoaded', function() {
@@ -1245,6 +1646,7 @@ $rightActionHtml = '
             url.searchParams.set('kat', document.getElementById('filter-kat').value);
             url.searchParams.set('status', document.getElementById('filter-status').value);
             url.searchParams.set('stok', document.getElementById('filter-stok').value);
+            url.searchParams.set('expired', document.getElementById('filter-expired').value);
             url.searchParams.set('limit', document.getElementById('filter-limit').value);
             url.searchParams.set('page', '1');
             window.location.href = url.toString();
@@ -1308,7 +1710,7 @@ $rightActionHtml = '
         }
 
         function resetForm() {
-            ['form-id', 'form-kode', 'form-nama', 'form-kategori-baru', 'form-harga-beli', 'form-harga-jual', 'form-stok', 'form-stok-min', 'form-gambar-current'].forEach(function(id) {
+            ['form-id', 'form-kode', 'form-nama', 'form-kategori-baru', 'form-harga-beli', 'form-harga-jual', 'form-stok', 'form-stok-min', 'form-expired-date', 'form-gambar-current'].forEach(function(id) {
                 document.getElementById(id).value = '';
             });
             var gambarInput = document.getElementById('form-gambar');
@@ -1346,6 +1748,7 @@ $rightActionHtml = '
                 document.getElementById('form-harga-jual').value = p.harga_jual;
                 document.getElementById('form-stok').value = p.stok;
                 document.getElementById('form-stok-min').value = p.stok_minimum;
+                document.getElementById('form-expired-date').value = p.expired_date || '';
                 document.getElementById('form-satuan').value = p.satuan;
                 document.getElementById('form-gambar-current').value = p.gambar || '';
                 setGambarPreview(p.gambar || '');
@@ -1385,6 +1788,7 @@ $rightActionHtml = '
             payload.append('harga_jual', document.getElementById('form-harga-jual').value);
             payload.append('stok', document.getElementById('form-stok').value || 0);
             payload.append('stok_minimum', document.getElementById('form-stok-min').value || 5);
+            payload.append('expired_date', document.getElementById('form-expired-date').value || '');
             payload.append('satuan', document.getElementById('form-satuan').value);
             payload.append('status', document.querySelector('input[name="form-status"]:checked').value);
             var gambarInput = document.getElementById('form-gambar');

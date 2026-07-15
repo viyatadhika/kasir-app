@@ -74,11 +74,19 @@ if (!function_exists('pos_ensure_kas_harian_table')) {
 }
 
 if (!function_exists('pos_get_kas_buka')) {
-    function pos_get_kas_buka(PDO $pdo, int $userId, ?string $tanggal = null): ?array
+    function pos_get_kas_buka(PDO $pdo, int $userId): ?array
     {
-        $tanggal = $tanggal ?: date('Y-m-d');
-        $stmt = $pdo->prepare("SELECT * FROM kas_harian WHERE tanggal=:tanggal AND user_id=:user_id AND status='buka' ORDER BY id DESC LIMIT 1");
-        $stmt->execute([':tanggal' => $tanggal, ':user_id' => $userId]);
+        // Audit safe: cari sesi kas terbuka milik operator tanpa membatasi tanggal.
+        // Dengan begitu, kas kemarin yang belum ditutup tetap terdeteksi.
+        $stmt = $pdo->prepare("
+            SELECT *
+            FROM kas_harian
+            WHERE user_id = :user_id
+              AND status = 'buka'
+            ORDER BY opened_at ASC, id ASC
+            LIMIT 1
+        ");
+        $stmt->execute([':user_id' => $userId]);
         $row = $stmt->fetch(PDO::FETCH_ASSOC);
         return $row ?: null;
     }
@@ -281,6 +289,25 @@ if (!function_exists('pos_ensure_gambar_column')) {
 
 pos_ensure_gambar_column($pdo);
 
+if (!function_exists('pos_ensure_expired_date_column')) {
+    function pos_ensure_expired_date_column(PDO $pdo): void
+    {
+        static $done = false;
+        if ($done) return;
+        $done = true;
+        try {
+            $cols = $pdo->query("SHOW COLUMNS FROM produk")->fetchAll(PDO::FETCH_COLUMN);
+            if (!in_array('expired_date', $cols, true)) {
+                $pdo->exec("ALTER TABLE produk ADD COLUMN expired_date DATE NULL AFTER gambar");
+            }
+        } catch (Throwable $e) {
+            error_log('POS EXPIRED COLUMN ERROR: ' . $e->getMessage());
+        }
+    }
+}
+
+pos_ensure_expired_date_column($pdo);
+
 define('POINT_RUPIAH', 1000);
 
 function diskonColumns(PDO $pdo): array
@@ -458,7 +485,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_GET['action'])) {
             }
             $aktif = pos_get_kas_buka($pdo, $uid);
             if ($aktif) {
-                echo json_encode(['success' => true, 'message' => 'Kas hari ini sudah terbuka.', 'data' => $aktif], JSON_UNESCAPED_UNICODE);
+                echo json_encode(['success' => true, 'message' => 'Masih ada sesi kas yang belum ditutup.', 'data' => $aktif], JSON_UNESCAPED_UNICODE);
                 exit;
             }
             $stmt = $pdo->prepare("INSERT INTO kas_harian (tanggal,user_id,operator,kas_awal,status,opened_at) VALUES (CURDATE(),:user_id,:operator,:kas_awal,'buka',NOW())");
@@ -471,7 +498,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_GET['action'])) {
             exit;
 
         case 'get_products':
-            $stmt = $pdo->query("SELECT id, kode, nama, kategori, harga_jual, stok, satuan, gambar FROM produk WHERE status = 'aktif' ORDER BY kategori, nama");
+            $stmt = $pdo->query("SELECT id, kode, nama, kategori, harga_jual, stok, satuan, gambar, expired_date FROM produk WHERE status = 'aktif' ORDER BY kategori, nama");
             echo json_encode(['success' => true, 'data' => $stmt->fetchAll(PDO::FETCH_ASSOC)], JSON_UNESCAPED_UNICODE);
             exit;
 
@@ -521,7 +548,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_GET['action'])) {
                 exit;
             }
             $placeholders = implode(',', array_fill(0, count($produkIds), '?'));
-            $stmtCheck = $pdo->prepare("SELECT id, kode, nama, kategori, harga_jual, stok FROM produk WHERE id IN ($placeholders) AND status='aktif'");
+            $stmtCheck = $pdo->prepare("SELECT id, kode, nama, kategori, harga_jual, stok, expired_date FROM produk WHERE id IN ($placeholders) AND status='aktif'");
             $stmtCheck->execute($produkIds);
             $produkMap = [];
             foreach ($stmtCheck->fetchAll(PDO::FETCH_ASSOC) as $p) $produkMap[(int)$p['id']] = $p;
@@ -538,7 +565,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_GET['action'])) {
             $userId = $_SESSION['user_id'] ?? null;
             $kasAktifTransaksi = pos_get_kas_buka($pdo, (int)($userId ?? pos_current_user_id()));
             if (!$kasAktifTransaksi) {
-                echo json_encode(['success' => false, 'need_open_cash' => true, 'message' => 'Kas hari ini belum dibuka. Silakan buka kas terlebih dahulu sebelum transaksi.'], JSON_UNESCAPED_UNICODE);
+                echo json_encode(['success' => false, 'need_open_cash' => true, 'message' => 'Belum ada sesi kas aktif. Silakan buka kas terlebih dahulu sebelum transaksi.'], JSON_UNESCAPED_UNICODE);
                 exit;
             }
             $invoice = generateInvoice();
@@ -547,7 +574,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_GET['action'])) {
             $memberId = !empty($input['member_id']) ? (int)$input['member_id'] : null;
             $produkIds = array_values(array_unique(array_column($items, 'id')));
             $placeholders = implode(',', array_fill(0, count($produkIds), '?'));
-            $stmtCheck = $pdo->prepare("SELECT id, kode, nama, kategori, harga_jual, stok FROM produk WHERE id IN ($placeholders) AND status = 'aktif'");
+            $stmtCheck = $pdo->prepare("SELECT id, kode, nama, kategori, harga_jual, stok, expired_date FROM produk WHERE id IN ($placeholders) AND status = 'aktif'");
             $stmtCheck->execute($produkIds);
             $produkMap = [];
             foreach ($stmtCheck->fetchAll(PDO::FETCH_ASSOC) as $p) $produkMap[(int)$p['id']] = $p;
@@ -560,6 +587,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_GET['action'])) {
                 }
                 if ($qty <= 0) {
                     echo json_encode(['success' => false, 'message' => "Qty tidak valid untuk {$produkMap[$pid]['nama']}."]);
+                    exit;
+                }
+                $expiredDate = trim((string)($produkMap[$pid]['expired_date'] ?? ''));
+                if ($expiredDate !== '' && $expiredDate < date('Y-m-d')) {
+                    echo json_encode([
+                        'success' => false,
+                        'message' => "Produk {$produkMap[$pid]['nama']} sudah kedaluwarsa pada " . date('d/m/Y', strtotime($expiredDate)) . ' dan tidak dapat dijual.'
+                    ], JSON_UNESCAPED_UNICODE);
                     exit;
                 }
                 if ((int)$produkMap[$pid]['stok'] < $qty) {
@@ -1198,6 +1233,310 @@ catat_view_once($pdo, 'Mesin Kasir', 'Membuka halaman Mesin Kasir');
             font-size: 11px;
             font-weight: 800;
         }
+
+
+        /* ==============================================================
+           POS MODERN COMPACT - hanya penyempurnaan tampilan
+           ============================================================== */
+        :root {
+            --pos-border: #e9edf2;
+            --pos-muted: #94a3b8;
+            --pos-soft: #f8fafc;
+        }
+
+        .pos-product-header-fixed {
+            padding: 18px 20px !important;
+            gap: 12px !important;
+        }
+
+        #search-input {
+            min-height: 50px;
+            font-size: 14px !important;
+            background: #f8fafc !important;
+            border-color: #e8edf3 !important;
+        }
+
+        #category-filters {
+            gap: 8px !important;
+        }
+
+        .category-scroll-shell {
+            display: grid;
+            grid-template-columns: 36px minmax(0, 1fr) 36px;
+            align-items: center;
+            gap: 8px;
+            min-width: 0;
+        }
+
+        .category-scroll-track {
+            min-width: 0;
+            overflow-x: auto;
+            overflow-y: hidden;
+            white-space: nowrap;
+            scroll-behavior: smooth;
+            -webkit-overflow-scrolling: touch;
+            overscroll-behavior-x: contain;
+            cursor: grab;
+            touch-action: pan-x;
+        }
+
+        .category-scroll-track.dragging {
+            cursor: grabbing;
+            user-select: none;
+            scroll-behavior: auto;
+        }
+
+        .category-scroll-btn {
+            width: 36px !important;
+            height: 36px !important;
+            min-width: 36px !important;
+            padding: 0 !important;
+            display: inline-flex !important;
+            align-items: center !important;
+            justify-content: center !important;
+            border: 1px solid #e7ebf0 !important;
+            background: #fff !important;
+            color: #111827 !important;
+            font-size: 22px !important;
+            line-height: 1 !important;
+            letter-spacing: 0 !important;
+            text-transform: none !important;
+            flex: 0 0 auto;
+        }
+
+        .category-scroll-btn:disabled {
+            opacity: .3;
+            cursor: default;
+            transform: none !important;
+        }
+
+        #category-filters .category-btn {
+            min-height: 36px;
+            padding: 0 18px !important;
+            background: #fff;
+            border-color: #e7ebf0;
+        }
+
+        .pos-product-scroll-fixed {
+            padding: 18px 20px 100px !important;
+            background: #fafbfc;
+        }
+
+        .product-grid {
+            grid-template-columns: repeat(auto-fill, minmax(132px, 1fr)) !important;
+            gap: 10px !important;
+            align-items: stretch;
+        }
+
+        #product-list>div[class*="bg-white"] {
+            padding: 10px !important;
+            min-height: 205px;
+            border-radius: 12px !important;
+            border-color: var(--pos-border) !important;
+            box-shadow: 0 2px 8px rgba(15, 23, 42, .035) !important;
+            position: relative;
+        }
+
+        #product-list>div[class*="bg-white"]:hover {
+            box-shadow: 0 10px 24px rgba(15, 23, 42, .08) !important;
+            transform: translateY(-2px);
+        }
+
+        .pos-product-image {
+            height: 108px !important;
+            aspect-ratio: auto !important;
+            margin-bottom: 9px !important;
+            border-radius: 9px !important;
+            background: #f8fafc;
+            border-color: #edf0f3;
+        }
+
+        #product-list h4 {
+            height: 34px !important;
+            font-size: 12px !important;
+            line-height: 1.35 !important;
+            margin-top: 1px;
+        }
+
+        #product-list p.text-xs.font-black {
+            font-size: 14px !important;
+            line-height: 1.2;
+            margin-top: 5px !important;
+        }
+
+        #product-list .text-\[8px\] {
+            line-height: 1.2;
+        }
+
+        #product-list span[class*="text-yellow"],
+        #product-list span[class*="text-orange"],
+        #product-list span[class*="text-red"] {
+            display: inline-flex;
+            align-items: center;
+            min-height: 20px;
+            padding: 3px 6px;
+            border-radius: 4px;
+            letter-spacing: .05em;
+        }
+
+        #product-list span[class*="text-yellow"] {
+            background: #fffbeb;
+            border: 1px solid #fde68a;
+        }
+
+        #product-list span[class*="text-orange"] {
+            background: #fff7ed;
+            border: 1px solid #fed7aa;
+        }
+
+        #product-list span[class*="text-red"] {
+            background: #fef2f2;
+            border: 1px solid #fecaca;
+        }
+
+        .pos-cart-desktop-fixed {
+            width: 390px !important;
+            border-left: 1px solid #edf0f3;
+            box-shadow: -12px 0 34px rgba(15, 23, 42, .05) !important;
+        }
+
+        .pos-cart-desktop-fixed>div:first-child {
+            padding: 18px 20px !important;
+            min-height: 64px;
+        }
+
+        .pos-cart-desktop-fixed #cart-container {
+            padding: 14px !important;
+            gap: 10px;
+        }
+
+        .cart-card {
+            border-radius: 10px !important;
+            padding: 12px !important;
+            border-color: #e8edf2 !important;
+            box-shadow: 0 2px 8px rgba(15, 23, 42, .025);
+        }
+
+        .cart-card .item-name {
+            font-size: 13px;
+            margin-bottom: 2px;
+        }
+
+        .cart-card .item-meta {
+            margin-bottom: 5px;
+        }
+
+        .cart-card .item-price-row {
+            margin-bottom: 8px;
+        }
+
+        .qty-btn {
+            width: 34px !important;
+            height: 34px !important;
+            font-size: 18px !important;
+        }
+
+        .qty-num {
+            min-width: 34px;
+            font-size: 14px !important;
+        }
+
+        .item-subtotal {
+            font-size: 15px;
+        }
+
+        .summary-bar,
+        .pos-cart-desktop-fixed>div:last-child {
+            padding: 18px 20px !important;
+        }
+
+        #total-price {
+            font-size: 30px !important;
+            line-height: 1;
+        }
+
+        .pos-cart-desktop-fixed button[onclick="openPayment()"] {
+            min-height: 52px;
+            font-size: 11px !important;
+            letter-spacing: .16em !important;
+        }
+
+        .cart-empty-state {
+            min-height: 300px;
+            padding: 40px 20px;
+        }
+
+        @media (min-width: 1440px) {
+            .product-grid {
+                grid-template-columns: repeat(auto-fill, minmax(138px, 1fr)) !important;
+            }
+        }
+
+        @media (min-width: 1024px) and (max-width: 1280px) {
+            .pos-cart-desktop-fixed {
+                width: 360px !important;
+            }
+
+            .product-grid {
+                grid-template-columns: repeat(auto-fill, minmax(126px, 1fr)) !important;
+            }
+
+            .pos-product-image {
+                height: 96px !important;
+            }
+        }
+
+        @media (max-width: 1023px) {
+            .pos-product-header-fixed {
+                padding: 12px !important;
+            }
+
+            .pos-product-scroll-fixed {
+                padding: 12px 12px 160px !important;
+            }
+
+            .product-grid {
+                grid-template-columns: repeat(auto-fill, minmax(145px, 1fr)) !important;
+                gap: 9px !important;
+            }
+
+            #product-list>div[class*="bg-white"] {
+                min-height: 205px;
+            }
+        }
+
+        @media (max-width: 640px) {
+            #search-input {
+                min-height: 46px;
+            }
+
+            .category-scroll-shell {
+                display: block;
+            }
+
+            .category-scroll-btn {
+                display: none !important;
+            }
+
+            #category-filters .category-btn {
+                padding: 0 14px !important;
+                min-height: 34px;
+            }
+
+            .product-grid {
+                grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+                gap: 8px !important;
+            }
+
+            #product-list>div[class*="bg-white"] {
+                min-height: 198px;
+                padding: 9px !important;
+            }
+
+            .pos-product-image {
+                height: 104px !important;
+            }
+        }
     </style>
 </head>
 
@@ -1211,9 +1550,9 @@ catat_view_once($pdo, 'Mesin Kasir', 'Membuka halaman Mesin Kasir');
     <div id="pos-kas-lock" class="<?= $posKasWajibBuka ? 'show' : '' ?>">
         <div class="pos-kas-card">
             <div class="mb-5">
-                <span class="pos-kas-status-pill">● Belum Buka Kas</span>
-                <h2 class="text-2xl font-black tracking-tight mt-4">Buka Kas Hari Ini</h2>
-                <p class="text-xs text-gray-500 mt-2 leading-relaxed">Untuk mencegah operator lupa, transaksi POS dikunci sampai kas hari ini dibuka.</p>
+                <span class="pos-kas-status-pill">● Kas Belum Aktif</span>
+                <h2 class="text-2xl font-black tracking-tight mt-4">Buka Sesi Kas</h2>
+                <p class="text-xs text-gray-500 mt-2 leading-relaxed">Untuk mencegah operator lupa, transaksi POS dikunci sampai sesi kas operator dibuka.</p>
             </div>
             <div class="grid grid-cols-2 gap-3 mb-5">
                 <div class="bg-gray-50 border border-subtle p-3">
@@ -1229,7 +1568,7 @@ catat_view_once($pdo, 'Mesin Kasir', 'Membuka halaman Mesin Kasir');
             <input type="text" id="pos-kas-awal" inputmode="numeric" placeholder="Contoh: 500000" class="w-full bg-gray-50 border border-gray-200 px-4 py-4 text-lg font-black focus:outline-none focus:ring-2 focus:ring-black/5">
             <div id="pos-kas-alert"></div>
             <button type="button" onclick="bukaKasPOS()" id="btn-buka-kas-pos" class="mt-4 w-full bg-black text-white py-4 text-xs font-black uppercase tracking-[0.25em] hover:bg-gray-800 transition-all">Buka Kas & Mulai POS</button>
-            <p class="text-[10px] text-gray-400 font-bold mt-4 leading-relaxed">Buka kas hanya wajib untuk transaksi POS. Menu produk, laporan, stok, dan member tidak ikut dikunci.</p>
+            <p class="text-[10px] text-gray-400 font-bold mt-4 leading-relaxed">Satu operator hanya boleh memiliki satu sesi kas terbuka. Buka kas hanya wajib untuk transaksi POS. Menu produk, laporan, stok, dan member tidak ikut dikunci.</p>
         </div>
     </div>
 
@@ -1258,11 +1597,15 @@ catat_view_once($pdo, 'Mesin Kasir', 'Membuka halaman Mesin Kasir');
                         placeholder="Cari nama produk atau scan barcode..."
                         class="w-full bg-gray-50 border border-gray-100 text-sm py-3 sm:py-4 pl-12 pr-4 focus:outline-none focus:ring-2 focus:ring-black/5 transition-all">
                 </div>
-                <div class="flex gap-3 overflow-x-auto no-scrollbar" id="category-filters">
-                    <button onclick="setCategory('Semua')" class="category-btn active-category px-6 py-2 bg-white border border-subtle text-gray-400 text-[10px] whitespace-nowrap">Semua</button>
-                    <?php foreach ($kategoriList as $kat): ?>
-                        <button onclick="setCategory('<?= e($kat) ?>')" class="category-btn px-6 py-2 bg-white border border-subtle text-gray-400 text-[10px] hover:border-black hover:text-black transition-colors whitespace-nowrap"><?= e($kat) ?></button>
-                    <?php endforeach; ?>
+                <div class="category-scroll-shell">
+                    <button type="button" class="category-scroll-btn category-scroll-left" onclick="scrollCategories(-1)" aria-label="Geser kategori ke kiri">&#8249;</button>
+                    <div class="flex gap-3 no-scrollbar category-scroll-track" id="category-filters">
+                        <button onclick="setCategory('Semua')" class="category-btn active-category px-6 py-2 bg-white border border-subtle text-gray-400 text-[10px] whitespace-nowrap">Semua</button>
+                        <?php foreach ($kategoriList as $kat): ?>
+                            <button onclick="setCategory('<?= e($kat) ?>')" class="category-btn px-6 py-2 bg-white border border-subtle text-gray-400 text-[10px] hover:border-black hover:text-black transition-colors whitespace-nowrap"><?= e($kat) ?></button>
+                        <?php endforeach; ?>
+                    </div>
+                    <button type="button" class="category-scroll-btn category-scroll-right" onclick="scrollCategories(1)" aria-label="Geser kategori ke kanan">&#8250;</button>
                 </div>
             </div>
             <div class="pos-product-scroll-fixed flex-1 overflow-y-auto p-4 sm:p-6 no-scrollbar">
@@ -1505,6 +1848,27 @@ catat_view_once($pdo, 'Mesin Kasir', 'Membuka halaman Mesin Kasir');
     <nav class="lg:hidden fixed bottom-0 left-0 right-0 bg-white border-t border-subtle px-6 py-2 flex justify-between items-center z-[100] shadow-lg" style="display:none !important">
         <!-- Hidden — diganti oleh cart sheet -->
     </nav>
+
+    <!-- ── Peringatan Produk H-7 ─────────────────────────────────────── -->
+    <div id="expiry-warning-modal" class="fixed inset-0 bg-black/40 backdrop-blur-sm z-[260] items-center justify-center p-4" style="display:none">
+        <div class="bg-white w-full max-w-md border border-orange-200 shadow-2xl p-6 sm:p-8">
+            <div class="w-14 h-14 bg-orange-50 border border-orange-200 flex items-center justify-center mx-auto mb-4">
+                <span class="text-2xl">⚠</span>
+            </div>
+            <div class="text-center">
+                <p class="text-[10px] font-black uppercase tracking-[0.2em] text-orange-600">Peringatan H-7</p>
+                <h3 class="text-xl font-black mt-2" id="expiry-warning-name">Produk</h3>
+                <p class="text-sm text-gray-500 mt-3">Produk akan mencapai tanggal kedaluwarsa dalam</p>
+                <p class="text-2xl font-black text-orange-600 mt-1" id="expiry-warning-days">0 hari lagi</p>
+                <p class="text-[11px] text-gray-400 mt-2">Tanggal kedaluwarsa: <strong id="expiry-warning-date" class="text-gray-700">-</strong></p>
+                <p class="text-xs text-gray-500 mt-4 leading-relaxed">Pastikan kondisi dan kelayakan produk sebelum melanjutkan penjualan.</p>
+            </div>
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-6">
+                <button type="button" onclick="closeExpiryWarning()" class="w-full py-3 border border-gray-200 bg-white text-gray-600 hover:bg-gray-50">Batal</button>
+                <button type="button" onclick="confirmExpiryWarning()" class="w-full py-3 bg-orange-600 text-white hover:bg-orange-700">Masukkan ke Keranjang</button>
+            </div>
+        </div>
+    </div>
 
     <!-- ── Payment Modal ──────────────────────────────────────────────── -->
     <div id="payment-modal" class="fixed inset-0 bg-black/40 backdrop-blur-sm z-[200] items-center justify-center p-4" style="display:none">
@@ -2072,12 +2436,44 @@ catat_view_once($pdo, 'Mesin Kasir', 'Membuka halaman Mesin Kasir');
         }
 
         // ── Produk ───────────────────────────────────────────────────────────────────
+        function updateCategoryScrollButtons() {
+            const track = document.getElementById('category-filters');
+            const left = document.querySelector('.category-scroll-left');
+            const right = document.querySelector('.category-scroll-right');
+            if (!track) return;
+            const maxScroll = Math.max(0, track.scrollWidth - track.clientWidth);
+            if (left) left.disabled = track.scrollLeft <= 2;
+            if (right) right.disabled = track.scrollLeft >= maxScroll - 2;
+        }
+
+        function scrollCategories(direction) {
+            const track = document.getElementById('category-filters');
+            if (!track) return;
+            const amount = Math.max(220, Math.round(track.clientWidth * 0.7));
+            track.scrollBy({
+                left: direction * amount,
+                behavior: 'smooth'
+            });
+            setTimeout(updateCategoryScrollButtons, 350);
+        }
+
         function setCategory(cat) {
             currentCat = cat;
-            document.querySelectorAll('.category-btn').forEach(b =>
-                b.classList.toggle('active-category', b.textContent.trim().toLowerCase() === cat.trim().toLowerCase())
-            );
+            let activeButton = null;
+            document.querySelectorAll('.category-btn').forEach(b => {
+                const active = b.textContent.trim().toLowerCase() === cat.trim().toLowerCase();
+                b.classList.toggle('active-category', active);
+                if (active) activeButton = b;
+            });
+            if (activeButton) {
+                activeButton.scrollIntoView({
+                    behavior: 'smooth',
+                    block: 'nearest',
+                    inline: 'center'
+                });
+            }
             filterProducts();
+            setTimeout(updateCategoryScrollButtons, 350);
         }
 
         function filterProducts() {
@@ -2088,6 +2484,53 @@ catat_view_once($pdo, 'Mesin Kasir', 'Membuka halaman Mesin Kasir');
             ));
         }
 
+        function getExpiredInfo(product) {
+            const raw = String(product && product.expired_date ? product.expired_date : '').trim();
+            if (!raw || raw === '0000-00-00') return {
+                expired: false,
+                near: false,
+                warning30: false,
+                normal: true,
+                days: null,
+                label: '',
+                status: 'normal'
+            };
+
+            const exp = new Date(raw + 'T00:00:00');
+            if (Number.isNaN(exp.getTime())) return {
+                expired: false,
+                near: false,
+                warning30: false,
+                normal: true,
+                days: null,
+                label: '',
+                status: 'normal'
+            };
+
+            const now = new Date();
+            const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+            const expDay = new Date(exp.getFullYear(), exp.getMonth(), exp.getDate());
+            const days = Math.round((expDay.getTime() - today.getTime()) / 86400000);
+
+            return {
+                expired: days < 0,
+                near: days >= 0 && days <= 7,
+                warning30: days >= 8 && days <= 30,
+                normal: days > 30,
+                days: days,
+                label: expDay.toLocaleDateString('id-ID'),
+                status: days < 0 ? 'expired' : (days <= 7 ? 'h7' : (days <= 30 ? 'h30' : 'normal'))
+            };
+        }
+
+        function focusBarcodeInput() {
+            const input = document.getElementById('search-input');
+            if (!input) return;
+            input.value = '';
+            filterProducts();
+            setTimeout(() => input.focus(), 50);
+        }
+
         function renderProducts(data) {
             const list = document.getElementById('product-list');
             if (!data.length) {
@@ -2095,36 +2538,90 @@ catat_view_once($pdo, 'Mesin Kasir', 'Membuka halaman Mesin Kasir');
                 return;
             }
             list.innerHTML = data.map(p => {
-                const habis = p.stok <= 0,
-                    low = p.stok > 0 && p.stok <= 5;
-                return `<div onclick="${habis?'':'addToCart('+p.id+')'}"
-            class="bg-white p-3 rounded-2xl border border-subtle transition-all cursor-pointer group active:scale-95 shadow-sm ${habis?'opacity-40 cursor-not-allowed':'hover:border-black hover:shadow-md'}">
-            <div class="pos-product-image ${habis?'':'group-hover:text-blue-500'} transition-colors">
+                const exp = getExpiredInfo(p);
+                const habis = Number(p.stok) <= 0;
+                const low = Number(p.stok) > 0 && Number(p.stok) <= 5;
+                const blocked = habis || exp.expired;
+                const clickAction = blocked ? '' : 'addToCart(' + Number(p.id) + ')';
+                const statusHtml = exp.expired ?
+                    `<span class="inline-flex items-center px-2 py-1 border border-red-200 bg-red-50 text-[8px] font-black text-red-700 uppercase tracking-wider">Expired · ${exp.label}</span>` :
+                    exp.near ?
+                    `<span class="inline-flex items-center px-2 py-1 border border-orange-200 bg-orange-50 text-[8px] font-black text-orange-700 uppercase tracking-wider">H-7 · ${exp.days === 0 ? 'Hari Ini' : exp.days + ' Hari Lagi'}</span>` :
+                    exp.warning30 ?
+                    `<span class="inline-flex items-center px-2 py-1 border border-yellow-200 bg-yellow-50 text-[8px] font-black text-yellow-700 uppercase tracking-wider">H-30 · ${exp.days} Hari Lagi</span>` :
+                    habis ?
+                    '<span class="text-[8px] font-black text-red-500 uppercase">Habis</span>' :
+                    low ?
+                    `<span class="text-[8px] font-black text-orange-500 uppercase">Sisa ${p.stok}</span>` :
+                    `<span class="text-[8px] text-gray-300 uppercase">Stok ${p.stok}</span>`;
+                const expiryBorder = exp.expired ? 'border-red-300 bg-red-50/30' : (exp.near ? 'border-orange-300 bg-orange-50/30' : (exp.warning30 ? 'border-yellow-300 bg-yellow-50/20' : 'border-subtle'));
+
+                return `<div onclick="${clickAction}"
+            class="bg-white p-3 rounded-2xl border ${expiryBorder} transition-all group active:scale-95 shadow-sm ${blocked ? 'opacity-40 cursor-not-allowed' : 'cursor-pointer hover:border-black hover:shadow-md'}">
+            <div class="pos-product-image ${blocked ? '' : 'group-hover:text-blue-500'} transition-colors">
                 ${p.gambar
                     ? `<img src="${p.gambar}" alt="${p.nama || 'Produk'}">`
                     : `<svg class="h-8 w-8" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4"/></svg>`}
             </div>
-            <p class="text-[8px] font-black uppercase text-gray-400 tracking-widest mb-1">${p.kategori||'-'}</p>
+            <p class="text-[8px] font-black uppercase text-gray-400 tracking-widest mb-1">${p.kategori || '-'}</p>
             <h4 class="text-[12px] font-bold leading-tight h-8 overflow-hidden text-slate-800">${p.nama}</h4>
             <p class="text-xs font-black text-black mt-1">${formatRp(p.harga_jual)}</p>
-            <div class="mt-1">${habis
-                ? '<span class="text-[8px] font-black text-red-500 uppercase">Habis</span>'
-                : low ? `<span class="text-[8px] font-black text-orange-500 uppercase">Sisa ${p.stok}</span>`
-                      : `<span class="text-[8px] text-gray-300 uppercase">Stok ${p.stok}</span>`
-            }</div></div>`;
+            <div class="mt-1">${statusHtml}</div></div>`;
             }).join('');
         }
 
         // ── Cart ─────────────────────────────────────────────────────────────────────
-        function addToCart(id) {
+        let pendingExpiryProductId = null;
+
+        function showExpiryWarning(product, exp) {
+            pendingExpiryProductId = parseInt(product.id);
+            const modal = document.getElementById('expiry-warning-modal');
+            const nameEl = document.getElementById('expiry-warning-name');
+            const dateEl = document.getElementById('expiry-warning-date');
+            const daysEl = document.getElementById('expiry-warning-days');
+            if (nameEl) nameEl.textContent = product.nama || 'Produk';
+            if (dateEl) dateEl.textContent = exp.label || '-';
+            if (daysEl) daysEl.textContent = exp.days === 0 ? 'Kedaluwarsa hari ini' : `${exp.days} hari lagi`;
+            if (modal) modal.style.display = 'flex';
+        }
+
+        function closeExpiryWarning() {
+            pendingExpiryProductId = null;
+            const modal = document.getElementById('expiry-warning-modal');
+            if (modal) modal.style.display = 'none';
+            focusBarcodeInput();
+        }
+
+        function confirmExpiryWarning() {
+            const pid = pendingExpiryProductId;
+            pendingExpiryProductId = null;
+            const modal = document.getElementById('expiry-warning-modal');
+            if (modal) modal.style.display = 'none';
+            if (pid) addToCart(pid, true);
+            focusBarcodeInput();
+        }
+
+        function addToCart(id, expiryConfirmed = false) {
             if (!POS_KAS_OPEN) {
                 showKasLock();
-                return;
+                return false;
             }
             const pid = parseInt(id),
                 p = PRODUCTS.find(x => parseInt(x.id) === pid);
-            if (!p || p.stok <= 0) return;
+            if (!p || Number(p.stok) <= 0) return false;
+
+            const exp = getExpiredInfo(p);
+            if (exp.expired) {
+                alert(`Produk ${p.nama} sudah kedaluwarsa pada ${exp.label} dan tidak dapat dijual.`);
+                focusBarcodeInput();
+                return false;
+            }
+
             const inCart = cart.find(x => parseInt(x.id) === pid);
+            if (!inCart && exp.near && !expiryConfirmed) {
+                showExpiryWarning(p, exp);
+                return 'pending';
+            }
             if (inCart) {
                 if (inCart.qty >= parseInt(p.stok)) {
                     alert(`Stok ${p.nama} hanya ${p.stok} pcs.`);
@@ -2140,6 +2637,7 @@ catat_view_once($pdo, 'Mesin Kasir', 'Membuka halaman Mesin Kasir');
                     harga_jual: parseInt(p.harga_jual),
                     stok: parseInt(p.stok),
                     satuan: p.satuan,
+                    expired_date: p.expired_date || null,
                     qty: 1
                 });
             }
@@ -2154,6 +2652,7 @@ catat_view_once($pdo, 'Mesin Kasir', 'Membuka halaman Mesin Kasir');
                 }, 350);
             }
             updateUI();
+            return true;
         }
 
         function updateQty(id, delta) {
@@ -2705,32 +3204,27 @@ catat_view_once($pdo, 'Mesin Kasir', 'Membuka halaman Mesin Kasir');
         // ── Barcode ──────────────────────────────────────────────────────────────────
         function handleBarcodeScan(code) {
             const clean = String(code || '').trim().toLowerCase();
-            if (!clean) return;
-            const found = PRODUCTS.find(p => String(p.kode || '').trim().toLowerCase() === clean);
-            if (found) {
-                addToCart(found.id);
-                const inp = document.getElementById('search-input');
-                if (inp) {
-                    inp.value = '';
-                    filterProducts();
-                    inp.focus();
-                }
-            } else {
-                const inp = document.getElementById('search-input');
-                if (inp) {
-                    inp.value = '';
-                    filterProducts();
-                }
-                alert(`Produk "${code}" tidak ditemukan.`);
-                setTimeout(() => {
-                    const scanInput = document.getElementById('search-input');
-                    if (scanInput) {
-                        scanInput.value = '';
-                        filterProducts();
-                        scanInput.focus();
-                    }
-                }, 50);
+            if (!clean) {
+                focusBarcodeInput();
+                return;
             }
+
+            const found = PRODUCTS.find(p => String(p.kode || '').trim().toLowerCase() === clean);
+            if (!found) {
+                alert(`Produk "${code}" tidak ditemukan.`);
+                focusBarcodeInput();
+                return;
+            }
+
+            const exp = getExpiredInfo(found);
+            if (exp.expired) {
+                alert(`Produk ${found.nama} sudah kedaluwarsa pada ${exp.label} dan tidak dapat dijual.`);
+                focusBarcodeInput();
+                return;
+            }
+
+            const result = addToCart(found.id);
+            if (result !== 'pending') focusBarcodeInput();
         }
 
         // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -2753,6 +3247,55 @@ catat_view_once($pdo, 'Mesin Kasir', 'Membuka halaman Mesin Kasir');
 
         // ── Event Listeners ──────────────────────────────────────────────────────────
         document.addEventListener('DOMContentLoaded', () => {
+            const categoryTrack = document.getElementById('category-filters');
+            if (categoryTrack) {
+                let dragging = false;
+                let startX = 0;
+                let startScrollLeft = 0;
+
+                categoryTrack.addEventListener('wheel', function(e) {
+                    if (Math.abs(e.deltaY) > Math.abs(e.deltaX)) {
+                        e.preventDefault();
+                        categoryTrack.scrollLeft += e.deltaY;
+                    }
+                    updateCategoryScrollButtons();
+                }, {
+                    passive: false
+                });
+
+                categoryTrack.addEventListener('pointerdown', function(e) {
+                    if (e.pointerType === 'touch') return;
+                    dragging = true;
+                    startX = e.clientX;
+                    startScrollLeft = categoryTrack.scrollLeft;
+                    categoryTrack.classList.add('dragging');
+                    categoryTrack.setPointerCapture(e.pointerId);
+                });
+
+                categoryTrack.addEventListener('pointermove', function(e) {
+                    if (!dragging) return;
+                    categoryTrack.scrollLeft = startScrollLeft - (e.clientX - startX);
+                });
+
+                function stopCategoryDrag(e) {
+                    if (!dragging) return;
+                    dragging = false;
+                    categoryTrack.classList.remove('dragging');
+                    try {
+                        categoryTrack.releasePointerCapture(e.pointerId);
+                    } catch (err) {}
+                    updateCategoryScrollButtons();
+                }
+
+                categoryTrack.addEventListener('pointerup', stopCategoryDrag);
+                categoryTrack.addEventListener('pointercancel', stopCategoryDrag);
+                categoryTrack.addEventListener('scroll', updateCategoryScrollButtons, {
+                    passive: true
+                });
+                window.addEventListener('resize', updateCategoryScrollButtons);
+                updateCategoryScrollButtons();
+            }
+
             const o = document.getElementById('mobileMenuOverlay');
             if (o) o.addEventListener('click', e => {
                 if (e.target === o) toggleMobileMenu();

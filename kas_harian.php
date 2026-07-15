@@ -162,6 +162,31 @@ if (!function_exists('ensure_kas_harian_table')) {
 }
 ensure_kas_harian_table($pdo);
 
+// Tambahan struktur audit dan indeks untuk menjaga satu sesi kas aktif per operator.
+try {
+    if (!has_column($pdo, 'kas_harian', 'closed_by_user_id')) {
+        $pdo->exec("ALTER TABLE kas_harian ADD COLUMN closed_by_user_id INT NULL AFTER closed_at");
+    }
+    if (!has_column($pdo, 'kas_harian', 'closed_by_name')) {
+        $pdo->exec("ALTER TABLE kas_harian ADD COLUMN closed_by_name VARCHAR(150) NULL AFTER closed_by_user_id");
+    }
+    if (!has_column($pdo, 'kas_harian', 'close_type')) {
+        $pdo->exec("ALTER TABLE kas_harian ADD COLUMN close_type ENUM('normal','admin') NOT NULL DEFAULT 'normal' AFTER closed_by_name");
+    }
+    if (!has_column($pdo, 'kas_harian', 'close_reason')) {
+        $pdo->exec("ALTER TABLE kas_harian ADD COLUMN close_reason VARCHAR(255) NULL AFTER close_type");
+    }
+    $indexes = $pdo->query("SHOW INDEX FROM kas_harian")->fetchAll(PDO::FETCH_ASSOC);
+    $indexNames = array_map(function ($row) {
+        return (string)($row['Key_name'] ?? $row['key_name'] ?? '');
+    }, $indexes);
+    if (!in_array('idx_user_status', $indexNames, true)) {
+        $pdo->exec("ALTER TABLE kas_harian ADD INDEX idx_user_status (user_id, status)");
+    }
+} catch (Throwable $e) {
+    // Struktur lama tetap dapat digunakan jika akun database tidak memiliki izin ALTER.
+}
+
 $userId        = current_user_id_safe();
 $operatorName  = current_user_name_safe();
 $today         = date('Y-m-d');
@@ -175,9 +200,10 @@ $isAdminKas   = is_admin_kas_safe();
  */
 function get_shift_buka(PDO $pdo, $tanggal, $userId)
 {
-    // STRICT per user: tidak fallback ke shift milik user lain.
-    $st = $pdo->prepare("SELECT * FROM kas_harian WHERE tanggal=:tanggal AND user_id=:user_id AND status='buka' ORDER BY id DESC LIMIT 1");
-    $st->execute([':tanggal' => $tanggal, ':user_id' => $userId]);
+    // Satu operator hanya boleh memiliki satu sesi berstatus buka, tanpa membatasi tanggal.
+    // Parameter $tanggal dipertahankan agar kompatibel dengan pemanggilan lama.
+    $st = $pdo->prepare("SELECT * FROM kas_harian WHERE user_id=:user_id AND status='buka' ORDER BY opened_at ASC, id ASC LIMIT 1");
+    $st->execute([':user_id' => $userId]);
     $row = $st->fetch(PDO::FETCH_ASSOC);
     return $row ?: null;
 }
@@ -190,9 +216,9 @@ function get_shift_buka(PDO $pdo, $tanggal, $userId)
  */
 function get_shift_terakhir(PDO $pdo, $tanggal, $userId)
 {
-    // STRICT per user: hanya riwayat milik user yang sedang login.
-    $st = $pdo->prepare("SELECT * FROM kas_harian WHERE tanggal=:tanggal AND user_id=:user_id ORDER BY id DESC LIMIT 1");
-    $st->execute([':tanggal' => $tanggal, ':user_id' => $userId]);
+    // Ambil sesi terakhir operator tanpa membatasi tanggal agar sesi lama tetap terlihat.
+    $st = $pdo->prepare("SELECT * FROM kas_harian WHERE user_id=:user_id ORDER BY opened_at DESC, id DESC LIMIT 1");
+    $st->execute([':user_id' => $userId]);
     $row = $st->fetch(PDO::FETCH_ASSOC);
     return $row ?: null;
 }
@@ -266,6 +292,25 @@ function hitung_penjualan_shift(PDO $pdo, $openedAt, $closedAt = null)
     return $data;
 }
 
+if (!function_exists('durasi_sesi_kas')) {
+    function durasi_sesi_kas($openedAt, $closedAt = null)
+    {
+        if (!$openedAt) return '-';
+        $start = strtotime((string)$openedAt);
+        $end = $closedAt ? strtotime((string)$closedAt) : time();
+        if (!$start || !$end || $end < $start) return '-';
+        $seconds = $end - $start;
+        $days = intdiv($seconds, 86400);
+        $hours = intdiv($seconds % 86400, 3600);
+        $minutes = intdiv($seconds % 3600, 60);
+        $parts = [];
+        if ($days > 0) $parts[] = $days . ' hari';
+        if ($hours > 0 || $days > 0) $parts[] = $hours . ' jam';
+        $parts[] = $minutes . ' menit';
+        return implode(' ', $parts);
+    }
+}
+
 /**
  * @param array $arr
  * @return void
@@ -285,26 +330,54 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_GET['action'])) {
         if ($_GET['action'] === 'buka') {
             $kasAwal = (float)preg_replace('/[^0-9]/', '', (string)($input['kas_awal'] ?? 0));
             if ($kasAwal < 0) json_response(['success' => false, 'message' => 'Kas awal tidak valid.']);
-            $aktif = get_shift_buka($pdo, $today, $userId);
-            if ($aktif) json_response(['success' => false, 'message' => 'Kas hari ini masih terbuka. Tutup kas terlebih dahulu.']);
-            $st = $pdo->prepare("INSERT INTO kas_harian (tanggal,user_id,operator,kas_awal,status,opened_at) VALUES (:tanggal,:user_id,:operator,:kas_awal,'buka',NOW())");
-            $st->execute([':tanggal' => $today, ':user_id' => $userId, ':operator' => $operatorName, ':kas_awal' => $kasAwal]);
-            json_response(['success' => true, 'message' => 'Kas berhasil dibuka.', 'id' => $pdo->lastInsertId()]);
+            if ($userId <= 0) json_response(['success' => false, 'message' => 'Session pengguna tidak valid. Silakan login ulang.']);
+
+            $lockName = 'kas_harian_user_' . $userId;
+            $lockStmt = $pdo->prepare("SELECT GET_LOCK(:lock_name, 5)");
+            $lockStmt->execute([':lock_name' => $lockName]);
+            if ((int)$lockStmt->fetchColumn() !== 1) {
+                json_response(['success' => false, 'message' => 'Sistem sedang memproses kas operator ini. Silakan coba kembali.']);
+            }
+
+            try {
+                $aktif = get_shift_buka($pdo, $today, $userId);
+                if ($aktif) {
+                    $pesan = 'Masih ada sesi kas yang belum ditutup sejak ' . tanggal_id($aktif['opened_at']) . ' (' . durasi_sesi_kas($aktif['opened_at']) . '). Tutup sesi tersebut terlebih dahulu.';
+                    $pdo->prepare("SELECT RELEASE_LOCK(:lock_name)")->execute([':lock_name' => $lockName]);
+                    json_response(['success' => false, 'message' => $pesan, 'open_shift_id' => (int)$aktif['id']]);
+                }
+                $st = $pdo->prepare("INSERT INTO kas_harian (tanggal,user_id,operator,kas_awal,status,opened_at) VALUES (:tanggal,:user_id,:operator,:kas_awal,'buka',NOW())");
+                $st->execute([':tanggal' => $today, ':user_id' => $userId, ':operator' => $operatorName, ':kas_awal' => $kasAwal]);
+                $newId = (int)$pdo->lastInsertId();
+                $pdo->prepare("SELECT RELEASE_LOCK(:lock_name)")->execute([':lock_name' => $lockName]);
+                json_response(['success' => true, 'message' => 'Kas berhasil dibuka.', 'id' => $newId]);
+            } catch (Throwable $e) {
+                try {
+                    $pdo->prepare("SELECT RELEASE_LOCK(:lock_name)")->execute([':lock_name' => $lockName]);
+                } catch (Throwable $ignore) {
+                }
+                throw $e;
+            }
         }
 
         if ($_GET['action'] === 'tutup') {
             $aktif = get_shift_buka($pdo, $today, $userId);
-            if (!$aktif) json_response(['success' => false, 'message' => 'Belum ada kas yang terbuka hari ini.']);
+            if (!$aktif) json_response(['success' => false, 'message' => 'Tidak ada sesi kas yang sedang terbuka.']);
             $kasAktual = (float)preg_replace('/[^0-9]/', '', (string)($input['kas_aktual'] ?? 0));
             $catatan   = trim((string)($input['catatan'] ?? ''));
             $sales     = hitung_penjualan_shift($pdo, $aktif['opened_at'], date('Y-m-d H:i:s'));
             $kasAkhir  = (float)$aktif['kas_awal'] + (float)$sales['total_tunai'];
+            $auditSet = '';
+            if (has_column($pdo, 'kas_harian', 'closed_by_user_id')) $auditSet .= ', closed_by_user_id=:closed_by_user_id';
+            if (has_column($pdo, 'kas_harian', 'closed_by_name')) $auditSet .= ', closed_by_name=:closed_by_name';
+            if (has_column($pdo, 'kas_harian', 'close_type')) $auditSet .= ", close_type='normal'";
             $st = $pdo->prepare("UPDATE kas_harian SET
                 kas_akhir_sistem=:kas_akhir_sistem, kas_aktual=:kas_aktual, total_sales=:total_sales,
                 total_tunai=:total_tunai, total_nontunai=:total_nontunai, total_struk=:total_struk,
                 margin=:margin, fee_promosi=:fee_promosi, catatan=:catatan, status='tutup', closed_at=NOW(), updated_at=NOW()
-                WHERE id=:id");
-            $st->execute([
+                $auditSet
+                WHERE id=:id AND status='buka'");
+            $closeParams = [
                 ':kas_akhir_sistem' => $kasAkhir,
                 ':kas_aktual'       => $kasAktual,
                 ':total_sales'      => $sales['total_sales'],
@@ -315,7 +388,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_GET['action'])) {
                 ':fee_promosi'      => $sales['fee_promosi'],
                 ':catatan'          => $catatan,
                 ':id'               => $aktif['id']
-            ]);
+            ];
+            if (has_column($pdo, 'kas_harian', 'closed_by_user_id')) $closeParams[':closed_by_user_id'] = $userId;
+            if (has_column($pdo, 'kas_harian', 'closed_by_name')) $closeParams[':closed_by_name'] = $operatorName;
+            $st->execute($closeParams);
             json_response(['success' => true, 'message' => 'Kas berhasil ditutup.', 'id' => $aktif['id']]);
         }
 
@@ -381,6 +457,8 @@ $salesNow   = $shiftLast ? (($shiftLast['status'] === 'buka') ? hitung_penjualan
 $kasAkhirNow  = $shiftLast ? (($shiftLast['status'] === 'buka') ? ((float)$shiftLast['kas_awal'] + (float)$salesNow['total_tunai']) : (float)$shiftLast['kas_akhir_sistem']) : 0;
 $kasAktualNow = $shiftLast && $shiftLast['kas_aktual'] !== null ? (float)$shiftLast['kas_aktual'] : $kasAkhirNow;
 $selisihNow   = $kasAktualNow - $kasAkhirNow;
+$durasiShiftNow = $shiftAktif ? durasi_sesi_kas($shiftAktif['opened_at']) : '-';
+$shiftOverdue = $shiftAktif && date('Y-m-d', strtotime((string)$shiftAktif['opened_at'])) < $today;
 
 // ── Filter + pagination riwayat kas ─────────────────────────────────────────
 $filterStart   = trim((string)($_GET['start'] ?? ''));
@@ -1232,10 +1310,22 @@ $rightActionHtml = '
             Isi: <code>http://<?php echo e($_SERVER['HTTP_HOST'] ?? '192.168.x.x'); ?></code> &#8594; Enable &#8594; Relaunch
         </div>
 
-        <div class="no-print grid grid-cols-2 md:grid-cols-4 gap-3 md:gap-4 mb-6 md:mb-8">
+        <?php if ($shiftAktif && date('Y-m-d', strtotime((string)$shiftAktif['opened_at'])) !== $today): ?>
+            <div class="no-print mb-4 border <?php echo $shiftOverdue ? 'border-red-200 bg-red-50 text-red-700' : 'border-yellow-200 bg-yellow-50 text-yellow-700'; ?> px-4 py-3">
+                <p class="text-[10px] font-black uppercase tracking-widest"><?php echo $shiftOverdue ? 'Terlambat Tutup Kas' : 'Sesi Kas Belum Ditutup'; ?></p>
+                <p class="text-xs font-bold mt-1">Dibuka <?php echo e(tanggal_id($shiftAktif['opened_at'])); ?> · berjalan <?php echo e($durasiShiftNow); ?>.</p>
+                <p class="text-[10px] mt-1">Selesaikan tutup kas lama sebelum membuka sesi baru.</p>
+            </div>
+        <?php endif; ?>
+
+        <div class="no-print grid grid-cols-2 md:grid-cols-5 gap-3 md:gap-4 mb-6 md:mb-8">
             <div class="summary-card p-4 md:p-5">
                 <p class="text-[10px] font-bold text-gray-400 uppercase tracking-widest">Status</p>
-                <p class="text-2xl font-bold <?php echo $shiftAktif ? 'text-green-600' : 'text-gray-900'; ?>"><?php echo $shiftAktif ? 'Kas Buka' : 'Kas Tutup'; ?></p>
+                <p class="text-2xl font-bold <?php echo $shiftOverdue ? 'text-red-600' : ($shiftAktif ? 'text-green-600' : 'text-gray-900'); ?>"><?php echo $shiftOverdue ? 'Terlambat Tutup' : ($shiftAktif ? 'Kas Buka' : 'Kas Tutup'); ?></p>
+            </div>
+            <div class="summary-card p-4 md:p-5 <?php echo $shiftOverdue ? 'border-red-200' : ''; ?>">
+                <p class="text-[10px] font-bold text-gray-400 uppercase tracking-widest">Lama Sesi</p>
+                <p class="text-lg font-bold <?php echo $shiftOverdue ? 'text-red-600' : 'text-gray-900'; ?>"><?php echo e($durasiShiftNow); ?></p>
             </div>
             <div class="summary-card p-4 md:p-5">
                 <p class="text-[10px] font-bold text-gray-400 uppercase tracking-widest">Kas Awal</p>
@@ -1359,7 +1449,9 @@ $rightActionHtml = '
                                     <td class="px-4 py-3 text-xs text-right"><?php echo rupiah($h['kas_awal']); ?></td>
                                     <td class="px-4 py-3 text-xs text-right"><?php echo rupiah($h['total_sales']); ?></td>
                                     <td class="px-4 py-3 text-xs text-right"><?php echo rupiah($h['kas_akhir_sistem']); ?></td>
-                                    <td class="px-4 py-3 text-center"><span class="text-[9px] font-black uppercase px-2 py-1 <?php echo $h['status'] === 'buka' ? 'bg-green-50 text-green-700' : 'bg-gray-100 text-gray-700'; ?>"><?php echo e($h['status']); ?></span></td>
+                                    <td class="px-4 py-3 text-center"><?php $rowOverdue = (($h['status'] ?? '') === 'buka' && !empty($h['opened_at']) && date('Y-m-d', strtotime((string)$h['opened_at'])) < $today); ?>
+                                        <span class="text-[9px] font-black uppercase px-2 py-1 <?php echo $rowOverdue ? 'bg-red-50 text-red-700' : (($h['status'] ?? '') === 'buka' ? 'bg-green-50 text-green-700' : 'bg-gray-100 text-gray-700'); ?>"><?php echo $rowOverdue ? 'Terlambat Tutup' : e($h['status']); ?></span>
+                                    </td>
                                     <td class="px-4 py-3 text-center">
                                         <button type="button" onclick="event.stopPropagation(); printKasRiwayat(<?php echo (int)$h['id']; ?>)" class="btn px-3 py-2 bg-black text-white text-[9px] font-black uppercase tracking-widest hover:bg-gray-800 transition-all">
                                             <?php echo $h['status'] === 'buka' ? 'Print Sementara' : 'Print'; ?>
@@ -1581,6 +1673,22 @@ $rightActionHtml = '
             });
         }
 
+        function durasiKasJs(openedAt, closedAt) {
+            if (!openedAt) return '-';
+            var start = new Date(String(openedAt).replace(' ', 'T'));
+            var end = closedAt ? new Date(String(closedAt).replace(' ', 'T')) : new Date();
+            if (isNaN(start.getTime()) || isNaN(end.getTime()) || end < start) return '-';
+            var totalMinutes = Math.floor((end - start) / 60000);
+            var days = Math.floor(totalMinutes / 1440);
+            var hours = Math.floor((totalMinutes % 1440) / 60);
+            var minutes = totalMinutes % 60;
+            var parts = [];
+            if (days > 0) parts.push(days + ' hari');
+            if (hours > 0 || days > 0) parts.push(hours + ' jam');
+            parts.push(minutes + ' menit');
+            return parts.join(' ');
+        }
+
         function setKasReceiptFromDetail(detail) {
             if (!detail || !detail.success || !detail.data) return false;
             var r = detail.data,
@@ -1639,6 +1747,7 @@ $rightActionHtml = '
                     ['Status', (r.status || '-').toUpperCase()],
                     ['Dibuka', tglIdJs(r.opened_at)],
                     ['Ditutup', r.closed_at ? tglIdJs(r.closed_at) : '-'],
+                    ['Durasi Sesi', durasiKasJs(r.opened_at, r.closed_at)],
                     ['Kas Awal', rupiahJs(r.kas_awal)],
                     ['Total Sales', rupiahJs(s.total_sales)],
                     ['Total Tunai', rupiahJs(s.total_tunai)],

@@ -8,7 +8,7 @@ requireAccess();
 require_once 'activity_helper.php';
 
 $activeMenu  = 'laporan';
-$pageTitle   = 'Laporan Keuangan';
+$pageTitle   = 'Laporan Operasional';
 $backUrl     = 'dashboard.php';
 $isAdmin       = has_role('admin');
 $isKasirOnly   = has_role('kasir') && !$isAdmin;
@@ -69,6 +69,19 @@ function transaksi_col_exists(PDO $pdo, string $column): bool
     return in_array($column, $cols, true);
 }
 
+function produk_col_exists(PDO $pdo, string $column): bool
+{
+    static $cols = null;
+    if ($cols === null) {
+        try {
+            $cols = $pdo->query("SHOW COLUMNS FROM produk")->fetchAll(PDO::FETCH_COLUMN);
+        } catch (Throwable $e) {
+            $cols = [];
+        }
+    }
+    return in_array($column, $cols, true);
+}
+
 // ── Rentang tanggal ──────────────────────────────────────────────────────────
 $today  = date('Y-m-d');
 $preset = $_GET['preset'] ?? 'hari_ini';
@@ -109,6 +122,18 @@ $totalPoint           = 0;
 $totalPointPakai      = 0;
 $totalNilaiPointPakai = 0;
 $rata                 = 0;
+
+// Produk kedaluwarsa
+$expiredSummary = [
+    'expired' => 0,
+    'h7' => 0,
+    'h30' => 0,
+    'tanpa_tanggal' => 0,
+    'stok_expired' => 0,
+    'nilai_expired' => 0,
+];
+$produkExpiredList = [];
+$expiredColumnReady = false;
 
 // Rental
 $ringkasanRental    = ['total_order' => 0, 'total_pendapatan' => 0, 'total_driver' => 0];
@@ -252,6 +277,49 @@ if ($isKasir) {
 }
 
 // ════════════════════════════════════════════════════════════════════════════
+// DATA: PRODUK KEDALUWARSA — Admin & Kasir
+// ════════════════════════════════════════════════════════════════════════════
+if ($isKasir) {
+    $expiredColumnReady = produk_col_exists($pdo, 'expired_date');
+
+    if ($expiredColumnReady) {
+        try {
+            $stmtExpiredSummary = $pdo->query("
+                SELECT
+                    SUM(CASE WHEN expired_date IS NOT NULL AND expired_date < CURDATE() THEN 1 ELSE 0 END) AS expired,
+                    SUM(CASE WHEN expired_date BETWEEN CURDATE() AND DATE_ADD(CURDATE(), INTERVAL 7 DAY) THEN 1 ELSE 0 END) AS h7,
+                    SUM(CASE WHEN expired_date BETWEEN DATE_ADD(CURDATE(), INTERVAL 8 DAY) AND DATE_ADD(CURDATE(), INTERVAL 30 DAY) THEN 1 ELSE 0 END) AS h30,
+                    SUM(CASE WHEN expired_date IS NULL THEN 1 ELSE 0 END) AS tanpa_tanggal,
+                    SUM(CASE WHEN expired_date IS NOT NULL AND expired_date < CURDATE() THEN stok ELSE 0 END) AS stok_expired,
+                    SUM(CASE WHEN expired_date IS NOT NULL AND expired_date < CURDATE() THEN (stok * harga_beli) ELSE 0 END) AS nilai_expired
+                FROM produk
+                WHERE status = 'aktif'
+            ");
+            $rowExpiredSummary = $stmtExpiredSummary->fetch(PDO::FETCH_ASSOC) ?: [];
+            foreach ($expiredSummary as $key => $defaultValue) {
+                $expiredSummary[$key] = (float)($rowExpiredSummary[$key] ?? $defaultValue);
+            }
+
+            $stmtExpiredList = $pdo->query("
+                SELECT id, kode, nama, kategori, stok, satuan, harga_beli, harga_jual, expired_date,
+                       DATEDIFF(expired_date, CURDATE()) AS sisa_hari
+                FROM produk
+                WHERE status = 'aktif'
+                  AND expired_date IS NOT NULL
+                  AND expired_date <= DATE_ADD(CURDATE(), INTERVAL 30 DAY)
+                ORDER BY
+                    CASE WHEN expired_date < CURDATE() THEN 0 ELSE 1 END,
+                    expired_date ASC,
+                    nama ASC
+            ");
+            $produkExpiredList = $stmtExpiredList->fetchAll(PDO::FETCH_ASSOC);
+        } catch (Throwable $e) {
+            $produkExpiredList = [];
+        }
+    }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
 // DATA: RENTAL — Data rental_bandara saja
 // ════════════════════════════════════════════════════════════════════════════
 if ($isRental) {
@@ -372,7 +440,7 @@ if ($isKsp) {
     }
 }
 
-catat_view_once($pdo, 'Laporan Keuangan', 'Membuka halaman Laporan Keuangan');
+catat_view_once($pdo, 'Laporan Operasional', 'Membuka halaman Laporan Operasional');
 ?>
 <!DOCTYPE html>
 <html lang="id">
@@ -380,7 +448,7 @@ catat_view_once($pdo, 'Laporan Keuangan', 'Membuka halaman Laporan Keuangan');
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title><?= e($isMurniKsp ? 'Laporan Simpan Pinjam' : ($isRental ? 'Laporan Rental' : 'Laporan Keuangan')) ?> — SEJAHUB</title>
+    <title>Laporan Operasional — SEJAHUB</title>
     <link rel="icon" type="image/png" href="assets/sejahub_icon.png">
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
@@ -489,6 +557,24 @@ catat_view_once($pdo, 'Laporan Keuangan', 'Membuka halaman Laporan Keuangan');
             background: #fef2f2;
             color: #dc2626;
             border: 1px solid #fecaca;
+        }
+
+        .badge-expired {
+            background: #fef2f2;
+            color: #b91c1c;
+            border: 1px solid #fecaca;
+        }
+
+        .badge-expired-h7 {
+            background: #fff7ed;
+            color: #c2410c;
+            border: 1px solid #fed7aa;
+        }
+
+        .badge-expired-h30 {
+            background: #fffbeb;
+            color: #a16207;
+            border: 1px solid #fde68a;
         }
 
         .card-list {
@@ -605,14 +691,9 @@ catat_view_once($pdo, 'Laporan Keuangan', 'Membuka halaman Laporan Keuangan');
             <!-- ── Judul + Tab (admin lihat semua) ─────────────────────────────────── -->
             <div class="flex flex-col sm:flex-row sm:items-end justify-between gap-4">
                 <div>
-                    <h2 class="text-lg font-bold tracking-tight">Laporan Keuangan</h2>
+                    <h2 class="text-lg font-bold tracking-tight">Laporan Operasional</h2>
                     <p class="text-[10px] text-gray-400 uppercase tracking-widest mt-0.5">
-                        <?php
-                        if ($isAdmin) echo 'Lihat semua laporan — kasir, rental, simpan pinjam, dan lainnya';
-                        elseif ($isMurniRental) echo 'Data order &amp; pendapatan rental';
-                        elseif ($isMurniKsp) echo 'Data pengajuan, pinjaman aktif, dan angsuran';
-                        else echo 'Data transaksi POS &amp; diskon';
-                        ?>
+                        Monitoring seluruh aktivitas operasional koperasi meliputi POS, Rental Bandara, dan Simpan Pinjam.
                     </p>
                 </div>
             </div>
@@ -979,6 +1060,155 @@ catat_view_once($pdo, 'Laporan Keuangan', 'Membuka halaman Laporan Keuangan');
                             </div>
                         </section>
                     <?php endif; ?>
+
+
+                    <!-- Laporan Produk Kedaluwarsa -->
+                    <section class="bg-white border border-subtle overflow-hidden mt-5 md:mt-6">
+                        <div class="px-5 py-4 border-b border-subtle flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+                            <div>
+                                <h2 class="text-[10px] font-bold uppercase tracking-widest text-gray-400">Laporan Produk Kedaluwarsa</h2>
+                                <p class="text-xs text-gray-400 mt-0.5">Monitoring produk kedaluwarsa dan yang akan kedaluwarsa dalam 30 hari</p>
+                            </div>
+                            <div class="flex flex-wrap gap-2 no-print">
+                                <a href="produk.php?expired=expired" class="px-3 py-2 border border-red-200 bg-red-50 text-red-700 text-[9px] font-black uppercase tracking-widest">Lihat Produk Expired</a>
+                                <button type="button" onclick="window.print()" class="px-3 py-2 bg-black text-white text-[9px] font-black uppercase tracking-widest">Cetak Laporan</button>
+                            </div>
+                        </div>
+
+                        <?php if (!$expiredColumnReady): ?>
+                            <div class="m-5 border border-yellow-200 bg-yellow-50 px-4 py-3">
+                                <p class="text-xs font-bold text-yellow-800">Kolom expired_date belum tersedia pada tabel produk.</p>
+                                <p class="text-[10px] text-yellow-700 mt-1">Buka halaman Produk terlebih dahulu agar kolom tanggal kedaluwarsa dibuat otomatis.</p>
+                            </div>
+                        <?php else: ?>
+                            <div class="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-3 p-4 md:p-5 border-b border-subtle bg-gray-50/50">
+                                <div class="bg-white border border-red-200 p-3">
+                                    <p class="text-[9px] font-black uppercase tracking-widest text-red-500">Sudah Kedaluwarsa</p>
+                                    <p class="text-2xl font-black text-red-700 mt-1"><?= angka($expiredSummary['expired']) ?></p>
+                                    <p class="text-[9px] text-gray-400 mt-1">SKU aktif</p>
+                                </div>
+                                <div class="bg-white border border-orange-200 p-3">
+                                    <p class="text-[9px] font-black uppercase tracking-widest text-orange-500">H-7</p>
+                                    <p class="text-2xl font-black text-orange-700 mt-1"><?= angka($expiredSummary['h7']) ?></p>
+                                    <p class="text-[9px] text-gray-400 mt-1">Segera diperiksa</p>
+                                </div>
+                                <div class="bg-white border border-yellow-200 p-3">
+                                    <p class="text-[9px] font-black uppercase tracking-widest text-yellow-600">H-8 s.d. H-30</p>
+                                    <p class="text-2xl font-black text-yellow-700 mt-1"><?= angka($expiredSummary['h30']) ?></p>
+                                    <p class="text-[9px] text-gray-400 mt-1">Perlu dipantau</p>
+                                </div>
+                                <div class="bg-white border border-gray-200 p-3">
+                                    <p class="text-[9px] font-black uppercase tracking-widest text-gray-500">Tanpa Tanggal</p>
+                                    <p class="text-2xl font-black text-gray-800 mt-1"><?= angka($expiredSummary['tanpa_tanggal']) ?></p>
+                                    <p class="text-[9px] text-gray-400 mt-1">Belum diisi</p>
+                                </div>
+                                <div class="bg-white border border-red-200 p-3">
+                                    <p class="text-[9px] font-black uppercase tracking-widest text-red-500">Stok Expired</p>
+                                    <p class="text-2xl font-black text-red-700 mt-1"><?= angka($expiredSummary['stok_expired']) ?></p>
+                                    <p class="text-[9px] text-gray-400 mt-1">Total unit</p>
+                                </div>
+                                <div class="bg-white border border-red-200 p-3">
+                                    <p class="text-[9px] font-black uppercase tracking-widest text-red-500">Nilai HPP Expired</p>
+                                    <p class="text-lg font-black text-red-700 mt-1"><?= rupiah($expiredSummary['nilai_expired']) ?></p>
+                                    <p class="text-[9px] text-gray-400 mt-1">Estimasi kerugian</p>
+                                </div>
+                            </div>
+
+                            <div class="tbl-desktop overflow-x-auto no-scrollbar">
+                                <table class="w-full text-left" style="min-width:860px">
+                                    <thead class="border-b border-subtle bg-gray-50">
+                                        <tr>
+                                            <th class="px-5 py-4 text-[10px] font-bold uppercase tracking-widest text-gray-400">Produk</th>
+                                            <th class="px-5 py-4 text-[10px] font-bold uppercase tracking-widest text-gray-400">Kategori</th>
+                                            <th class="px-5 py-4 text-[10px] font-bold uppercase tracking-widest text-gray-400 text-center">Stok</th>
+                                            <th class="px-5 py-4 text-[10px] font-bold uppercase tracking-widest text-gray-400">Tanggal Kedaluwarsa</th>
+                                            <th class="px-5 py-4 text-[10px] font-bold uppercase tracking-widest text-gray-400 text-center">Status</th>
+                                            <th class="px-5 py-4 text-[10px] font-bold uppercase tracking-widest text-gray-400 text-right">Nilai HPP</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody class="divide-y divide-[#f5f5f5]">
+                                        <?php if (!$produkExpiredList): ?>
+                                            <tr>
+                                                <td colspan="6" class="py-16 text-center text-[10px] font-bold uppercase tracking-widest text-gray-300">Tidak ada produk kedaluwarsa atau H-30</td>
+                                            </tr>
+                                        <?php endif; ?>
+                                        <?php foreach ($produkExpiredList as $px):
+                                            $sisaHari = (int)($px['sisa_hari'] ?? 0);
+                                            if ($sisaHari < 0) {
+                                                $statusExpired = 'Kedaluwarsa ' . abs($sisaHari) . ' hari';
+                                                $expiredClass = 'badge-expired';
+                                            } elseif ($sisaHari <= 7) {
+                                                $statusExpired = $sisaHari === 0 ? 'Kedaluwarsa Hari Ini' : 'H-' . $sisaHari;
+                                                $expiredClass = 'badge-expired-h7';
+                                            } else {
+                                                $statusExpired = 'H-' . $sisaHari;
+                                                $expiredClass = 'badge-expired-h30';
+                                            }
+                                        ?>
+                                            <tr>
+                                                <td class="px-5 py-4">
+                                                    <div class="font-semibold text-sm"><?= e($px['nama'] ?? '-') ?></div>
+                                                    <div class="text-[10px] text-gray-400 font-mono mt-0.5"><?= e($px['kode'] ?? '') ?></div>
+                                                </td>
+                                                <td class="px-5 py-4 text-sm text-gray-600"><?= e($px['kategori'] ?? '-') ?></td>
+                                                <td class="px-5 py-4 text-center text-sm font-bold"><?= angka($px['stok'] ?? 0) ?> <span class="text-[9px] text-gray-400 font-normal"><?= e($px['satuan'] ?? '') ?></span></td>
+                                                <td class="px-5 py-4 text-sm font-semibold"><?= e(tgl($px['expired_date'] ?? null)) ?></td>
+                                                <td class="px-5 py-4 text-center"><span class="<?= $expiredClass ?> text-[9px] font-bold uppercase px-2 py-1 rounded-full"><?= e($statusExpired) ?></span></td>
+                                                <td class="px-5 py-4 text-right text-sm font-bold"><?= rupiah(((float)($px['harga_beli'] ?? 0)) * ((float)($px['stok'] ?? 0))) ?></td>
+                                            </tr>
+                                        <?php endforeach; ?>
+                                    </tbody>
+                                </table>
+                            </div>
+
+                            <div class="card-list">
+                                <?php if (!$produkExpiredList): ?>
+                                    <div class="col-span-full py-12 text-center text-[10px] font-bold uppercase tracking-widest text-gray-400">Tidak ada produk kedaluwarsa atau H-30</div>
+                                <?php endif; ?>
+                                <?php foreach ($produkExpiredList as $px):
+                                    $sisaHari = (int)($px['sisa_hari'] ?? 0);
+                                    if ($sisaHari < 0) {
+                                        $statusExpired = 'Kedaluwarsa ' . abs($sisaHari) . ' hari';
+                                        $expiredClass = 'badge-expired';
+                                    } elseif ($sisaHari <= 7) {
+                                        $statusExpired = $sisaHari === 0 ? 'Kedaluwarsa Hari Ini' : 'H-' . $sisaHari;
+                                        $expiredClass = 'badge-expired-h7';
+                                    } else {
+                                        $statusExpired = 'H-' . $sisaHari;
+                                        $expiredClass = 'badge-expired-h30';
+                                    }
+                                ?>
+                                    <div class="bg-white border border-subtle p-4 flex flex-col gap-3">
+                                        <div class="flex items-start justify-between gap-3">
+                                            <div class="min-w-0">
+                                                <p class="text-sm font-bold truncate"><?= e($px['nama'] ?? '-') ?></p>
+                                                <p class="text-[10px] text-gray-400 font-mono mt-0.5"><?= e($px['kode'] ?? '') ?></p>
+                                            </div>
+                                            <span class="<?= $expiredClass ?> text-[9px] font-bold uppercase px-2 py-1 rounded-full shrink-0"><?= e($statusExpired) ?></span>
+                                        </div>
+                                        <div class="grid grid-cols-2 gap-2 pt-2 border-t border-subtle">
+                                            <div>
+                                                <p class="text-[9px] text-gray-400 font-bold uppercase">Kedaluwarsa</p>
+                                                <p class="text-xs font-bold mt-0.5"><?= e(tgl($px['expired_date'] ?? null)) ?></p>
+                                            </div>
+                                            <div class="text-right">
+                                                <p class="text-[9px] text-gray-400 font-bold uppercase">Stok</p>
+                                                <p class="text-xs font-bold mt-0.5"><?= angka($px['stok'] ?? 0) ?> <?= e($px['satuan'] ?? '') ?></p>
+                                            </div>
+                                            <div>
+                                                <p class="text-[9px] text-gray-400 font-bold uppercase">Kategori</p>
+                                                <p class="text-xs font-semibold mt-0.5"><?= e($px['kategori'] ?? '-') ?></p>
+                                            </div>
+                                            <div class="text-right">
+                                                <p class="text-[9px] text-gray-400 font-bold uppercase">Nilai HPP</p>
+                                                <p class="text-xs font-bold mt-0.5"><?= rupiah(((float)($px['harga_beli'] ?? 0)) * ((float)($px['stok'] ?? 0))) ?></p>
+                                            </div>
+                                        </div>
+                                    </div>
+                                <?php endforeach; ?>
+                            </div>
+                        <?php endif; ?>
+                    </section>
 
                 </div><!-- end panel-kasir -->
             <?php endif; // end isKasir 
