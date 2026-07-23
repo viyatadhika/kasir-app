@@ -270,6 +270,325 @@ function ensure_stok_opname_tables(PDO $pdo): void
 
 ensure_stok_opname_tables($pdo);
 
+/*
+|--------------------------------------------------------------------------
+| Template stok opname manual
+|--------------------------------------------------------------------------
+| - action=template_excel : unduh CSV yang dapat dibuka di Excel
+| - action=template_print : formulir kosong A4 landscape untuk ditulis tangan
+| Filter q, kategori, status, dan expired tetap dihormati.
+*/
+if (isset($_GET['action']) && in_array((string)$_GET['action'], ['template_excel', 'template_print'], true)) {
+    $templateQ = trim((string)($_GET['q'] ?? ''));
+    $templateKategori = trim((string)($_GET['kategori'] ?? ''));
+    $templateStatus = trim((string)($_GET['status'] ?? 'aktif'));
+    $templateExpired = trim((string)($_GET['expired'] ?? ''));
+
+    $produkColsTemplate = $pdo->query("SHOW COLUMNS FROM produk")->fetchAll(PDO::FETCH_COLUMN);
+    $hasExpiredTemplate = in_array('expired_date', $produkColsTemplate, true);
+
+    $templateWhere = ['1=1'];
+    $templateParams = [];
+
+    if ($templateQ !== '') {
+        $templateWhere[] = '(kode LIKE :tq1 OR nama LIKE :tq2 OR kategori LIKE :tq3)';
+        $templateParams[':tq1'] = '%' . $templateQ . '%';
+        $templateParams[':tq2'] = '%' . $templateQ . '%';
+        $templateParams[':tq3'] = '%' . $templateQ . '%';
+    }
+    if ($templateKategori !== '') {
+        $templateWhere[] = 'kategori = :tkategori';
+        $templateParams[':tkategori'] = $templateKategori;
+    }
+    if ($templateStatus !== '') {
+        $templateWhere[] = 'status = :tstatus';
+        $templateParams[':tstatus'] = $templateStatus;
+    }
+    if ($hasExpiredTemplate) {
+        if ($templateExpired === 'expired') {
+            $templateWhere[] = 'expired_date IS NOT NULL AND YEAR(expired_date) > 0 AND expired_date < CURDATE()';
+        } elseif ($templateExpired === 'h7') {
+            $templateWhere[] = 'expired_date BETWEEN CURDATE() AND DATE_ADD(CURDATE(), INTERVAL 7 DAY)';
+        } elseif ($templateExpired === 'h30') {
+            $templateWhere[] = 'expired_date > DATE_ADD(CURDATE(), INTERVAL 7 DAY) AND expired_date <= DATE_ADD(CURDATE(), INTERVAL 30 DAY)';
+        } elseif ($templateExpired === 'safe') {
+            $templateWhere[] = 'expired_date > DATE_ADD(CURDATE(), INTERVAL 30 DAY)';
+        } elseif ($templateExpired === 'none') {
+            $templateWhere[] = '(expired_date IS NULL OR YEAR(expired_date) = 0)';
+        }
+    }
+
+    $expiredSelectTemplate = $hasExpiredTemplate ? 'expired_date' : 'NULL AS expired_date';
+    $stmtTemplate = $pdo->prepare("SELECT id, kode, nama, kategori, satuan, stok, stok_minimum, $expiredSelectTemplate FROM produk WHERE " . implode(' AND ', $templateWhere) . " ORDER BY kategori ASC, nama ASC");
+    $stmtTemplate->execute($templateParams);
+    $templateProduk = $stmtTemplate->fetchAll(PDO::FETCH_ASSOC);
+
+    if ((string)$_GET['action'] === 'template_excel') {
+        $filename = 'template_stok_opname_manual_' . date('Ymd_His') . '.csv';
+        header('Content-Type: text/csv; charset=UTF-8');
+        header('Content-Disposition: attachment; filename="' . $filename . '"');
+        header('Pragma: no-cache');
+        header('Expires: 0');
+        echo "\xEF\xBB\xBF";
+        $output = fopen('php://output', 'w');
+        fputcsv($output, ['TEMPLATE STOK OPNAME MANUAL']);
+        fputcsv($output, ['Tanggal', date('d/m/Y'), 'Petugas', '', 'Lokasi/Rak', '']);
+        fputcsv($output, []);
+        fputcsv($output, ['No', 'Kode Produk', 'Nama Produk', 'Kategori', 'Satuan', 'Stok Sistem', 'Stok Fisik', 'Selisih', 'Tanggal Kedaluwarsa', 'Catatan']);
+        foreach ($templateProduk as $i => $p) {
+            fputcsv($output, [
+                $i + 1,
+                $p['kode'],
+                $p['nama'],
+                $p['kategori'] ?: '-',
+                $p['satuan'] ?: 'pcs',
+                (int)$p['stok'],
+                '',
+                '',
+                stok_tgl_expired($p['expired_date'] ?? null),
+                ''
+            ]);
+        }
+        fputcsv($output, []);
+        fputcsv($output, ['Catatan Umum', '']);
+        fclose($output);
+        exit;
+    }
+
+    $filterParts = [];
+    if ($templateQ !== '') $filterParts[] = 'Pencarian: ' . $templateQ;
+    if ($templateKategori !== '') $filterParts[] = 'Kategori: ' . $templateKategori;
+    if ($templateStatus !== '') $filterParts[] = 'Status: ' . ucfirst($templateStatus);
+    if ($templateExpired !== '') $filterParts[] = 'Filter kedaluwarsa: ' . $templateExpired;
+    $filterText = $filterParts ? implode(' | ', $filterParts) : 'Semua produk';
+?>
+    <!DOCTYPE html>
+    <html lang="id">
+
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Template Stok Opname Manual</title>
+        <style>
+            @page {
+                size: A4 landscape;
+                margin: 10mm;
+            }
+
+            * {
+                box-sizing: border-box;
+            }
+
+            body {
+                font-family: Arial, sans-serif;
+                color: #111;
+                margin: 0;
+                font-size: 10px;
+            }
+
+            .toolbar {
+                display: flex;
+                gap: 8px;
+                margin-bottom: 12px;
+            }
+
+            .toolbar button,
+            .toolbar a {
+                border: 1px solid #111;
+                background: #fff;
+                color: #111;
+                padding: 8px 12px;
+                text-decoration: none;
+                cursor: pointer;
+                font-weight: 700;
+            }
+
+            .toolbar .primary {
+                background: #111;
+                color: #fff;
+            }
+
+            .header {
+                display: flex;
+                justify-content: space-between;
+                gap: 20px;
+                border-bottom: 2px solid #111;
+                padding-bottom: 8px;
+                margin-bottom: 10px;
+            }
+
+            h1 {
+                margin: 0 0 4px;
+                font-size: 18px;
+            }
+
+            .muted {
+                color: #555;
+            }
+
+            .meta {
+                display: grid;
+                grid-template-columns: 100px 180px 90px 180px 80px 1fr;
+                border: 1px solid #111;
+                margin-bottom: 10px;
+            }
+
+            .meta div {
+                min-height: 28px;
+                padding: 7px;
+                border-right: 1px solid #111;
+            }
+
+            .meta div:nth-child(6n) {
+                border-right: 0;
+            }
+
+            .meta .label {
+                font-weight: 700;
+                background: #f3f3f3;
+            }
+
+            table {
+                width: 100%;
+                border-collapse: collapse;
+                table-layout: fixed;
+            }
+
+            th,
+            td {
+                border: 1px solid #222;
+                padding: 5px;
+                vertical-align: middle;
+            }
+
+            th {
+                background: #e9e9e9;
+                text-transform: uppercase;
+                font-size: 8px;
+                letter-spacing: .4px;
+            }
+
+            td.blank {
+                height: 26px;
+            }
+
+            .num {
+                text-align: right;
+            }
+
+            .center {
+                text-align: center;
+            }
+
+            .sign {
+                margin-top: 16px;
+                display: grid;
+                grid-template-columns: 1fr 1fr 1fr;
+                gap: 50px;
+                text-align: center;
+            }
+
+            .sign .space {
+                height: 55px;
+            }
+
+            .page-break {
+                page-break-before: always;
+            }
+
+            @media print {
+                .toolbar {
+                    display: none;
+                }
+
+                body {
+                    font-size: 9px;
+                }
+
+                thead {
+                    display: table-header-group;
+                }
+
+                tr {
+                    page-break-inside: avoid;
+                }
+            }
+        </style>
+    </head>
+
+    <body>
+        <div class="toolbar">
+            <button type="button" class="primary" onclick="window.print()">Print / Simpan PDF</button>
+            <a href="stok_opname.php">Kembali</a>
+        </div>
+        <div class="header">
+            <div>
+                <h1>FORM STOK OPNAME MANUAL</h1>
+                <div class="muted">Daftar ini diisi berdasarkan hasil perhitungan fisik barang.</div>
+            </div>
+            <div style="text-align:right">
+                <strong><?= angka(count($templateProduk)) ?> produk</strong><br>
+                <span class="muted"><?= h($filterText) ?></span>
+            </div>
+        </div>
+        <div class="meta">
+            <div class="label">Tanggal</div>
+            <div></div>
+            <div class="label">Petugas</div>
+            <div></div>
+            <div class="label">Lokasi/Rak</div>
+            <div></div>
+        </div>
+        <table>
+            <thead>
+                <tr>
+                    <th style="width:3%">No</th>
+                    <th style="width:10%">Kode</th>
+                    <th style="width:22%">Nama Produk</th>
+                    <th style="width:10%">Kategori</th>
+                    <th style="width:6%">Satuan</th>
+                    <th style="width:7%">Stok Sistem</th>
+                    <th style="width:8%">Stok Fisik</th>
+                    <th style="width:7%">Selisih</th>
+                    <th style="width:10%">Kedaluwarsa</th>
+                    <th style="width:17%">Catatan</th>
+                </tr>
+            </thead>
+            <tbody>
+                <?php if (!$templateProduk): ?>
+                    <tr>
+                        <td colspan="10" class="center" style="padding:30px">Produk tidak ditemukan.</td>
+                    </tr>
+                    <?php else: foreach ($templateProduk as $i => $p): ?>
+                        <tr>
+                            <td class="center"><?= $i + 1 ?></td>
+                            <td><?= h($p['kode']) ?></td>
+                            <td><strong><?= h($p['nama']) ?></strong></td>
+                            <td><?= h($p['kategori'] ?: '-') ?></td>
+                            <td class="center"><?= h($p['satuan'] ?: 'pcs') ?></td>
+                            <td class="num"><?= angka($p['stok']) ?></td>
+                            <td class="blank"></td>
+                            <td class="blank"></td>
+                            <td class="center"><?= h(stok_tgl_expired($p['expired_date'] ?? null)) ?></td>
+                            <td class="blank"></td>
+                        </tr>
+                <?php endforeach;
+                endif; ?>
+            </tbody>
+        </table>
+        <div style="border:1px solid #222; border-top:0; min-height:42px; padding:7px"><strong>Catatan Umum:</strong></div>
+        <div class="sign">
+            <div>Petugas Opname<div class="space"></div>(________________________)</div>
+            <div>Penanggung Jawab<div class="space"></div>(________________________)</div>
+            <div>Mengetahui<div class="space"></div>(________________________)</div>
+        </div>
+    </body>
+
+    </html>
+<?php
+    exit;
+}
+
 $error = '';
 $success = '';
 
@@ -1597,6 +1916,31 @@ catat_view_once($pdo, 'Stok Opname', 'Membuka halaman Stok Opname');
                 </form>
             </section>
 
+            <?php
+            $templateParamsUrl = [
+                'q' => $q,
+                'kategori' => $kategoriFilter,
+                'status' => $statusFilter,
+                'expired' => $expiredFilter,
+            ];
+            $templatePrintUrl = 'stok_opname.php?' . http_build_query(array_merge($templateParamsUrl, ['action' => 'template_print']));
+            $templateExcelUrl = 'stok_opname.php?' . http_build_query(array_merge($templateParamsUrl, ['action' => 'template_excel']));
+            ?>
+            <section class="bg-white border border-subtle p-4 flex flex-col md:flex-row md:items-center md:justify-between gap-3">
+                <div>
+                    <h2 class="text-[10px] font-black uppercase tracking-widest text-gray-700">Template Opname Manual</h2>
+                    <p class="text-[10px] text-gray-400 mt-1">Unduh daftar produk untuk dihitung dan ditulis manual di gudang. Filter yang aktif tetap digunakan.</p>
+                </div>
+                <div class="grid grid-cols-1 sm:grid-cols-2 gap-2 w-full md:w-auto">
+                    <a href="<?= h($templatePrintUrl) ?>" target="_blank" class="inline-flex items-center justify-center px-4 py-2.5 border border-gray-200 text-[10px] font-black uppercase tracking-widest hover:bg-gray-50">
+                        Print Form Manual
+                    </a>
+                    <a href="<?= h($templateExcelUrl) ?>" class="inline-flex items-center justify-center px-4 py-2.5 bg-green-600 text-white text-[10px] font-black uppercase tracking-widest hover:bg-green-700">
+                        Download Excel
+                    </a>
+                </div>
+            </section>
+
             <form method="POST" id="form-opname" class="bg-white border border-subtle overflow-hidden">
                 <div class="stok-form-header px-5 py-4 border-b border-subtle flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
                     <div>
@@ -1813,13 +2157,14 @@ catat_view_once($pdo, 'Stok Opname', 'Membuka halaman Stok Opname');
                                 <th class="px-5 py-4 text-[10px] font-bold uppercase tracking-widest text-gray-400 text-right">Selisih</th>
                                 <th class="px-5 py-4 text-[10px] font-bold uppercase tracking-widest text-gray-400">User</th>
                                 <th class="px-5 py-4 text-[10px] font-bold uppercase tracking-widest text-gray-400">Catatan</th>
+                                <th class="px-5 py-4 text-[10px] font-bold uppercase tracking-widest text-gray-400 text-right">Laporan</th>
                             </tr>
                         </thead>
 
                         <tbody class="divide-y divide-[#f5f5f5]">
                             <?php if (!$riwayat): ?>
                                 <tr>
-                                    <td colspan="6" class="py-16 text-center text-[10px] font-bold uppercase tracking-widest text-gray-300">
+                                    <td colspan="7" class="py-16 text-center text-[10px] font-bold uppercase tracking-widest text-gray-300">
                                         Belum ada riwayat opname
                                     </td>
                                 </tr>
@@ -1835,6 +2180,13 @@ catat_view_once($pdo, 'Stok Opname', 'Membuka halaman Stok Opname');
                                     </td>
                                     <td class="px-5 py-4 text-sm"><?= h($r['user_nama'] ?: '-') ?></td>
                                     <td class="px-5 py-4 text-xs text-gray-500"><?= h($r['catatan'] ?: '-') ?></td>
+                                    <td class="px-5 py-4 text-right whitespace-nowrap">
+                                        <div class="inline-flex items-center justify-end gap-1">
+                                            <a href="stok_opname_laporan.php?id=<?= (int)$r['id'] ?>" target="_blank" class="px-2.5 py-2 border border-gray-200 text-[9px] font-black uppercase tracking-widest hover:bg-gray-50">Detail</a>
+                                            <a href="stok_opname_laporan.php?id=<?= (int)$r['id'] ?>&print=1" target="_blank" class="px-2.5 py-2 bg-black text-white text-[9px] font-black uppercase tracking-widest hover:bg-gray-800">Print</a>
+                                            <a href="stok_opname_laporan.php?id=<?= (int)$r['id'] ?>&format=excel" class="px-2.5 py-2 border border-green-200 bg-green-50 text-green-700 text-[9px] font-black uppercase tracking-widest hover:bg-green-100">Excel</a>
+                                        </div>
+                                    </td>
                                 </tr>
                             <?php endforeach; ?>
                         </tbody>
@@ -1878,6 +2230,12 @@ catat_view_once($pdo, 'Stok Opname', 'Membuka halaman Stok Opname');
                             <?php if (!empty($r['catatan'])): ?>
                                 <p class="text-xs text-gray-500 pt-2 border-t border-subtle"><?= h($r['catatan']) ?></p>
                             <?php endif; ?>
+
+                            <div class="grid grid-cols-3 gap-2 pt-3 border-t border-subtle">
+                                <a href="stok_opname_laporan.php?id=<?= (int)$r['id'] ?>" target="_blank" class="py-2.5 border border-gray-200 text-center text-[9px] font-black uppercase tracking-widest">Detail</a>
+                                <a href="stok_opname_laporan.php?id=<?= (int)$r['id'] ?>&print=1" target="_blank" class="py-2.5 bg-black text-white text-center text-[9px] font-black uppercase tracking-widest">Print</a>
+                                <a href="stok_opname_laporan.php?id=<?= (int)$r['id'] ?>&format=excel" class="py-2.5 border border-green-200 bg-green-50 text-green-700 text-center text-[9px] font-black uppercase tracking-widest">Excel</a>
+                            </div>
                         </div>
                     <?php endforeach; ?>
                 </div>
@@ -1915,7 +2273,7 @@ catat_view_once($pdo, 'Stok Opname', 'Membuka halaman Stok Opname');
         function stokSyncResponsiveInputs() {
             var form = document.getElementById('form-opname');
             if (!form) return;
-            var isDesktop = window.matchMedia('(min-width: 1024px)').matches;
+            var isDesktop = window.matchMedia('(min-width: 1366px)').matches;
             var desktopInputs = form.querySelectorAll('.tbl-desktop input, .tbl-desktop textarea, .tbl-desktop select');
             var mobileInputs = form.querySelectorAll('.card-list input, .card-list textarea, .card-list select');
 

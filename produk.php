@@ -161,6 +161,409 @@ if (!function_exists('produk_ensure_expired_column')) {
 produk_ensure_gambar_column($pdo);
 produk_ensure_expired_column($pdo);
 
+// ── Print / Export Produk (satu file, tanpa file tambahan) ──────────────────
+if ($_SERVER['REQUEST_METHOD'] === 'GET' && isset($_GET['action']) && in_array($_GET['action'], ['print', 'excel'], true)) {
+    $exportSearch        = trim(isset($_GET['q']) ? $_GET['q'] : '');
+    $exportKatFilter     = isset($_GET['kat']) ? $_GET['kat'] : '';
+    $exportStatusFilter  = isset($_GET['status']) ? $_GET['status'] : 'aktif';
+    $exportStokFilter    = isset($_GET['stok']) ? $_GET['stok'] : '';
+    $exportExpiredFilter = isset($_GET['expired']) ? $_GET['expired'] : '';
+
+    $exportWhere  = ['1=1'];
+    $exportParams = [];
+
+    if ($exportSearch !== '') {
+        $exportWhere[] = '(nama LIKE :q OR kode LIKE :q2 OR kategori LIKE :q3)';
+        $exportParams[':q']  = "%{$exportSearch}%";
+        $exportParams[':q2'] = "%{$exportSearch}%";
+        $exportParams[':q3'] = "%{$exportSearch}%";
+    }
+    if ($exportKatFilter !== '') {
+        $exportWhere[] = 'kategori = :kat';
+        $exportParams[':kat'] = $exportKatFilter;
+    }
+    if ($exportStatusFilter !== 'semua') {
+        $exportWhere[] = 'status = :status';
+        $exportParams[':status'] = $exportStatusFilter;
+    }
+    if ($exportStokFilter === 'limit') {
+        $exportWhere[] = 'stok > 0 AND stok <= stok_minimum';
+    } elseif ($exportStokFilter === 'habis') {
+        $exportWhere[] = 'stok <= 0';
+    }
+    if ($exportExpiredFilter === 'expired') {
+        $exportWhere[] = "expired_date IS NOT NULL AND expired_date <> '0000-00-00' AND expired_date < CURDATE()";
+    } elseif ($exportExpiredFilter === '30_hari') {
+        $exportWhere[] = "expired_date IS NOT NULL AND expired_date <> '0000-00-00' AND expired_date >= CURDATE() AND expired_date <= DATE_ADD(CURDATE(), INTERVAL 30 DAY)";
+    } elseif ($exportExpiredFilter === '90_hari') {
+        $exportWhere[] = "expired_date IS NOT NULL AND expired_date <> '0000-00-00' AND expired_date >= CURDATE() AND expired_date <= DATE_ADD(CURDATE(), INTERVAL 90 DAY)";
+    } elseif ($exportExpiredFilter === 'tanpa_tanggal') {
+        $exportWhere[] = "(expired_date IS NULL OR expired_date = '0000-00-00')";
+    }
+
+    $exportWhereStr = implode(' AND ', $exportWhere);
+    $exportStmt = $pdo->prepare("SELECT * FROM produk WHERE {$exportWhereStr} ORDER BY kategori ASC, nama ASC");
+    $exportStmt->execute($exportParams);
+    $exportRows = $exportStmt->fetchAll(PDO::FETCH_ASSOC);
+
+    $totalStok = 0;
+    $totalNilaiBeli = 0;
+    $totalNilaiJual = 0;
+    foreach ($exportRows as $row) {
+        $qty = (int)($row['stok'] ?? 0);
+        $totalStok += $qty;
+        $totalNilaiBeli += $qty * (float)($row['harga_beli'] ?? 0);
+        $totalNilaiJual += $qty * (float)($row['harga_jual'] ?? 0);
+    }
+
+    if ($_GET['action'] === 'excel') {
+        $filename = 'laporan_produk_' . date('Ymd_His') . '.csv';
+        header('Content-Type: text/csv; charset=UTF-8');
+        header('Content-Disposition: attachment; filename="' . $filename . '"');
+        header('Pragma: no-cache');
+        header('Expires: 0');
+
+        $out = fopen('php://output', 'w');
+        fwrite($out, "\xEF\xBB\xBF");
+        fputcsv($out, ['No', 'Kode Produk', 'Nama Produk', 'Kategori', 'Harga Beli', 'Harga Jual', 'Margin (%)', 'Stok', 'Stok Minimum', 'Satuan', 'Tanggal Kedaluwarsa', 'Status'], ';');
+        foreach ($exportRows as $i => $row) {
+            $hargaBeli = (float)($row['harga_beli'] ?? 0);
+            $hargaJual = (float)($row['harga_jual'] ?? 0);
+            $margin = $hargaJual > 0 ? round((($hargaJual - $hargaBeli) / $hargaJual) * 100, 2) : 0;
+            $expired = !empty($row['expired_date']) && $row['expired_date'] !== '0000-00-00'
+                ? date('d/m/Y', strtotime($row['expired_date']))
+                : '';
+            fputcsv($out, [
+                $i + 1,
+                $row['kode'] ?? '',
+                $row['nama'] ?? '',
+                $row['kategori'] ?? '',
+                $hargaBeli,
+                $hargaJual,
+                $margin,
+                (int)($row['stok'] ?? 0),
+                (int)($row['stok_minimum'] ?? 0),
+                $row['satuan'] ?? '',
+                $expired,
+                $row['status'] ?? '',
+            ], ';');
+        }
+        fclose($out);
+        exit;
+    }
+
+    $filterLabels = [];
+    if ($exportSearch !== '') $filterLabels[] = 'Pencarian: ' . $exportSearch;
+    if ($exportKatFilter !== '') $filterLabels[] = 'Kategori: ' . $exportKatFilter;
+    if ($exportStatusFilter !== 'semua') $filterLabels[] = 'Status: ' . ucfirst($exportStatusFilter);
+    if ($exportStokFilter === 'limit') $filterLabels[] = 'Stok limit';
+    if ($exportStokFilter === 'habis') $filterLabels[] = 'Stok habis';
+    if ($exportExpiredFilter !== '') $filterLabels[] = 'Filter kedaluwarsa: ' . str_replace('_', ' ', $exportExpiredFilter);
+    $filterText = $filterLabels ? implode(' • ', $filterLabels) : 'Seluruh data produk';
+?>
+    <!DOCTYPE html>
+    <html lang="id">
+
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Laporan Produk</title>
+        <style>
+            * {
+                box-sizing: border-box
+            }
+
+            body {
+                font-family: Arial, sans-serif;
+                color: #111;
+                margin: 0;
+                background: #f3f4f6
+            }
+
+            .toolbar {
+                position: sticky;
+                top: 0;
+                z-index: 10;
+                display: flex;
+                gap: 8px;
+                justify-content: flex-end;
+                padding: 12px 18px;
+                background: #fff;
+                border-bottom: 1px solid #ddd
+            }
+
+            .toolbar button,
+            .toolbar a {
+                border: 1px solid #111;
+                background: #fff;
+                color: #111;
+                padding: 9px 14px;
+                text-decoration: none;
+                font-size: 12px;
+                font-weight: 700;
+                cursor: pointer
+            }
+
+            .toolbar .primary {
+                background: #111;
+                color: #fff
+            }
+
+            .sheet {
+                width: 297mm;
+                min-height: 210mm;
+                margin: 18px auto;
+                background: #fff;
+                padding: 12mm;
+                box-shadow: 0 3px 18px rgba(0, 0, 0, .12)
+            }
+
+            .header {
+                text-align: center;
+                border-bottom: 2px solid #111;
+                padding-bottom: 10px;
+                margin-bottom: 12px
+            }
+
+            .header h1 {
+                font-size: 20px;
+                margin: 0 0 4px;
+                text-transform: uppercase;
+                letter-spacing: .8px
+            }
+
+            .header p {
+                font-size: 11px;
+                margin: 2px 0;
+                color: #555
+            }
+
+            .summary {
+                display: grid;
+                grid-template-columns: repeat(4, 1fr);
+                gap: 8px;
+                margin: 12px 0
+            }
+
+            .summary div {
+                border: 1px solid #bbb;
+                padding: 8px
+            }
+
+            .summary span {
+                display: block;
+                font-size: 9px;
+                text-transform: uppercase;
+                color: #666;
+                font-weight: bold
+            }
+
+            .summary strong {
+                display: block;
+                font-size: 15px;
+                margin-top: 4px
+            }
+
+            .meta {
+                font-size: 10px;
+                margin-bottom: 10px;
+                display: flex;
+                justify-content: space-between;
+                gap: 20px
+            }
+
+            .meta div:last-child {
+                text-align: right
+            }
+
+            table {
+                width: 100%;
+                border-collapse: collapse;
+                font-size: 8.5px
+            }
+
+            th,
+            td {
+                border: 1px solid #999;
+                padding: 5px 4px;
+                vertical-align: middle
+            }
+
+            th {
+                background: #e5e7eb;
+                text-transform: uppercase;
+                font-size: 8px;
+                letter-spacing: .2px
+            }
+
+            .right {
+                text-align: right
+            }
+
+            .center {
+                text-align: center
+            }
+
+            .expired {
+                color: #b91c1c;
+                font-weight: bold
+            }
+
+            .soon {
+                color: #b45309;
+                font-weight: bold
+            }
+
+            .signature {
+                display: grid;
+                grid-template-columns: 1fr 1fr;
+                gap: 80mm;
+                margin-top: 18px;
+                text-align: center;
+                font-size: 10px
+            }
+
+            .signature .space {
+                height: 48px
+            }
+
+            .footer {
+                margin-top: 12px;
+                font-size: 8px;
+                color: #666;
+                text-align: right
+            }
+
+            @media print {
+                body {
+                    background: #fff
+                }
+
+                .toolbar {
+                    display: none
+                }
+
+                .sheet {
+                    width: auto;
+                    min-height: auto;
+                    margin: 0;
+                    padding: 8mm;
+                    box-shadow: none
+                }
+
+                @page {
+                    size: A4 landscape;
+                    margin: 8mm
+                }
+            }
+
+            @media(max-width:1000px) {
+                .sheet {
+                    width: 100%;
+                    margin: 0;
+                    box-shadow: none;
+                    padding: 12px
+                }
+
+                .summary {
+                    grid-template-columns: repeat(2, 1fr)
+                }
+
+                .table-wrap {
+                    overflow-x: auto
+                }
+            }
+        </style>
+    </head>
+
+    <body>
+        <div class="toolbar">
+            <a href="produk.php">Kembali</a>
+            <button class="primary" onclick="window.print()">Print / Simpan PDF</button>
+        </div>
+        <section class="sheet">
+            <div class="header">
+                <h1>Laporan Daftar Produk</h1>
+                <p>SEJAHUB — Sistem Informasi Koperasi dan Penjualan</p>
+                <p><?php echo e($filterText); ?></p>
+            </div>
+            <div class="meta">
+                <div>Tanggal cetak: <strong><?php echo date('d/m/Y H:i'); ?></strong></div>
+                <div>Jumlah data: <strong><?php echo number_format(count($exportRows)); ?> produk</strong></div>
+            </div>
+            <div class="summary">
+                <div><span>Total SKU</span><strong><?php echo number_format(count($exportRows)); ?></strong></div>
+                <div><span>Total Stok</span><strong><?php echo number_format($totalStok); ?></strong></div>
+                <div><span>Nilai Persediaan (Beli)</span><strong><?php echo rupiah($totalNilaiBeli); ?></strong></div>
+                <div><span>Nilai Potensi Jual</span><strong><?php echo rupiah($totalNilaiJual); ?></strong></div>
+            </div>
+            <div class="table-wrap">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>No</th>
+                            <th>Kode</th>
+                            <th>Nama Produk</th>
+                            <th>Kategori</th>
+                            <th>Harga Beli</th>
+                            <th>Harga Jual</th>
+                            <th>Stok</th>
+                            <th>Min.</th>
+                            <th>Satuan</th>
+                            <th>Kedaluwarsa</th>
+                            <th>Status</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <?php if (!$exportRows): ?>
+                            <tr>
+                                <td colspan="11" class="center">Tidak ada data produk.</td>
+                            </tr>
+                            <?php else: foreach ($exportRows as $i => $row):
+                                $expired = !empty($row['expired_date']) && $row['expired_date'] !== '0000-00-00' ? $row['expired_date'] : '';
+                                $expiredClass = '';
+                                if ($expired !== '' && $expired < date('Y-m-d')) $expiredClass = 'expired';
+                                elseif ($expired !== '' && $expired <= date('Y-m-d', strtotime('+30 days'))) $expiredClass = 'soon';
+                            ?>
+                                <tr>
+                                    <td class="center"><?php echo $i + 1; ?></td>
+                                    <td><?php echo e($row['kode'] ?? ''); ?></td>
+                                    <td><?php echo e($row['nama'] ?? ''); ?></td>
+                                    <td><?php echo e($row['kategori'] ?? '-'); ?></td>
+                                    <td class="right"><?php echo rupiah($row['harga_beli'] ?? 0); ?></td>
+                                    <td class="right"><?php echo rupiah($row['harga_jual'] ?? 0); ?></td>
+                                    <td class="center"><?php echo number_format((int)($row['stok'] ?? 0)); ?></td>
+                                    <td class="center"><?php echo number_format((int)($row['stok_minimum'] ?? 0)); ?></td>
+                                    <td class="center"><?php echo e($row['satuan'] ?? ''); ?></td>
+                                    <td class="center <?php echo $expiredClass; ?>"><?php echo $expired !== '' ? date('d/m/Y', strtotime($expired)) : '-'; ?></td>
+                                    <td class="center"><?php echo e(ucfirst($row['status'] ?? '')); ?></td>
+                                </tr>
+                        <?php endforeach;
+                        endif; ?>
+                    </tbody>
+                </table>
+            </div>
+            <div class="signature">
+                <div>
+                    <div>Petugas</div>
+                    <div class="space"></div>
+                    <div>( ____________________ )</div>
+                </div>
+                <div>
+                    <div>Pemeriksa / Penanggung Jawab</div>
+                    <div class="space"></div>
+                    <div>( ____________________ )</div>
+                </div>
+            </div>
+            <div class="footer">Dicetak otomatis dari SEJAHUB pada <?php echo date('d/m/Y H:i:s'); ?></div>
+        </section>
+    </body>
+
+    </html>
+<?php
+    exit;
+}
+
 // ── API Handler (AJAX) ────────────────────────────────────────────────────────
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_GET['action'])) {
     ini_set('display_errors', '0');
@@ -421,16 +824,37 @@ $summary = $stmtSummary->fetch();
 catat_view_once($pdo, 'Produk', 'Membuka halaman Produk');
 
 // ── Tombol di Navbar ─────────────────────────────────────────────────────────
+$reportQuery = http_build_query([
+    'q' => $search,
+    'kat' => $katFilter,
+    'status' => $statusFilter,
+    'stok' => $stokFilter,
+    'expired' => $expiredFilter,
+]);
 $rightActionHtml = '
-<button
-    onclick="openModal(\'tambah\')"
-    class="inline-flex items-center gap-2 px-4 py-2 text-[10px] font-black uppercase tracking-widest bg-black text-white hover:bg-gray-800 transition-all">
-    <svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-        <path stroke-width="2.5" d="M12 4v16m8-8H4" />
-    </svg>
-    <span class="hidden sm:inline">Tambah Produk</span>
-    <span class="sm:hidden">+</span>
-</button>';
+<div class="flex items-center gap-1 sm:gap-2">
+    <a href="produk.php?action=print&amp;' . e($reportQuery) . '" target="_blank"
+       class="inline-flex items-center gap-2 px-3 py-2 text-[10px] font-black uppercase tracking-widest border border-gray-200 bg-white text-gray-700 hover:bg-gray-50 transition-all"
+       title="Cetak daftar produk">
+        <svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 9V2h12v7M6 18h12v4H6v-4zm-2 0H2V9h20v9h-4"/></svg>
+        <span class="hidden md:inline">Print</span>
+    </a>
+    <a href="produk.php?action=excel&amp;' . e($reportQuery) . '"
+       class="inline-flex items-center gap-2 px-3 py-2 text-[10px] font-black uppercase tracking-widest border border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100 transition-all"
+       title="Download Excel CSV">
+        <svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 3v12m0 0l-4-4m4 4l4-4M5 21h14"/></svg>
+        <span class="hidden md:inline">Excel</span>
+    </a>
+    <button
+        onclick="openModal(\'tambah\')"
+        class="inline-flex items-center gap-2 px-3 sm:px-4 py-2 text-[10px] font-black uppercase tracking-widest bg-black text-white hover:bg-gray-800 transition-all">
+        <svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path stroke-width="2.5" d="M12 4v16m8-8H4" />
+        </svg>
+        <span class="hidden sm:inline">Tambah Produk</span>
+        <span class="sm:hidden">+</span>
+    </button>
+</div>';
 ?>
 <!DOCTYPE html>
 <html lang="id">
