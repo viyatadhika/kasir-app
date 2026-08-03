@@ -308,7 +308,25 @@ if (!function_exists('pos_ensure_expired_date_column')) {
 
 pos_ensure_expired_date_column($pdo);
 
-define('POINT_RUPIAH', 1000);
+/*
+|--------------------------------------------------------------------------
+| KONFIGURASI POINT MEMBER
+|--------------------------------------------------------------------------
+| POINT_BELANJA_PER_POIN:
+|   Nilai transaksi bersih untuk mendapatkan 1 point.
+|   Contoh 15000 berarti setiap Rp15.000 mendapatkan 1 point.
+|
+| POINT_RUPIAH:
+|   Nilai potongan untuk setiap 1 point yang ditukarkan.
+|   Contoh 1000 berarti 1 point bernilai Rp1.000.
+*/
+if (!defined('POINT_BELANJA_PER_POIN')) {
+    define('POINT_BELANJA_PER_POIN', 15000);
+}
+
+if (!defined('POINT_RUPIAH')) {
+    define('POINT_RUPIAH', 1000);
+}
 
 function diskonColumns(PDO $pdo): array
 {
@@ -627,7 +645,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_GET['action'])) {
                 } elseif (!$memberId && $pointPakaiInput > 0) throw new Exception('Pilih member terlebih dahulu untuk tukar point.');
                 $kembalian = max(0, $bayar - $total);
                 if ($bayar > 0 && $bayar < $total) throw new Exception('Uang bayar kurang dari total tagihan.');
-                $pointDapat = $memberId ? (int)floor($total / 10000) : 0;
+                $pointDapat = $memberId ? (int)floor($total / POINT_BELANJA_PER_POIN) : 0;
                 $hasTrxDiscount = transaksiHasDiscountColumns($pdo);
                 $hasTrxPointRedeem = transaksiHasPointRedeemColumns($pdo);
                 if ($hasTrxDiscount && $hasTrxPointRedeem) {
@@ -2079,7 +2097,8 @@ catat_view_once($pdo, 'Mesin Kasir', 'Membuka halaman Mesin Kasir');
         const POS_ENDPOINT = <?= json_encode(basename($_SERVER['PHP_SELF'])) ?>;
         let POS_KAS_OPEN = <?= $posKasAktif ? 'true' : 'false' ?>;
         const OPERATOR_NAME = '<?= $operatorName ?>';
-        const POINT_VALUE = 1000;
+        const POINT_VALUE = <?= (int)POINT_RUPIAH ?>;
+        const POINT_EARN_THRESHOLD = <?= (int)POINT_BELANJA_PER_POIN ?>;
 
         let PRODUCTS = [];
         let cart = [];
@@ -2995,7 +3014,7 @@ catat_view_once($pdo, 'Mesin Kasir', 'Membuka halaman Mesin Kasir');
                 if (mobileRedeemBox) mobileRedeemBox.classList.add('hidden');
             }
 
-            const pointDapat = activeMember ? Math.floor(total / 10000) : 0;
+            const pointDapat = activeMember ? Math.floor(total / POINT_EARN_THRESHOLD) : 0;
             const ppWrap = document.getElementById('point-preview');
             if (activeMember && pointDapat > 0) {
                 document.getElementById('point-preview-val').innerText = '+' + pointDapat + ' pt';
@@ -3357,7 +3376,7 @@ catat_view_once($pdo, 'Mesin Kasir', 'Membuka halaman Mesin Kasir');
                 total: getGrandTotal(),
                 member: activeMember ? {
                     nama: activeMember.nama,
-                    point: Math.floor(getGrandTotal() / 10000)
+                    point: Math.floor(getGrandTotal() / POINT_EARN_THRESHOLD)
                 } : null
             };
         }
