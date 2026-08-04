@@ -12,12 +12,14 @@ $pageTitle   = 'Laporan Operasional';
 $backUrl     = 'dashboard.php';
 $isAdmin       = has_role('admin');
 $isKasirOnly   = has_role('kasir') && !$isAdmin;
+$isCafeOnly    = has_role('cafe') && !$isAdmin;
 $isMurniRental = has_role('rental') && !$isAdmin;
 $isMurniKsp    = has_role('ksp') && !$isAdmin;
-$showTabs      = $isAdmin; // admin lihat semua via tab
-$isKasir       = has_role('admin', 'kasir');   // admin + kasir lihat laporan POS
-$isRental      = has_role('admin', 'rental');  // admin + rental lihat laporan rental
-$isKsp         = has_role('admin', 'ksp');     // admin + ksp lihat laporan simpan pinjam
+$showTabs      = $isAdmin; // admin melihat seluruh modul melalui tab
+$isKasir       = has_role('admin', 'kasir');   // admin + kasir toko
+$isCafe        = has_role('admin', 'cafe');    // admin + kasir cafe
+$isRental      = has_role('admin', 'rental');  // admin + rental
+$isKsp         = has_role('admin', 'ksp');     // admin + ksp
 
 // ── Helper functions ─────────────────────────────────────────────────────────
 if (!function_exists('rupiah')) {
@@ -53,6 +55,32 @@ if (!function_exists('e')) {
     function e($v): string
     {
         return htmlspecialchars((string)($v ?? ''), ENT_QUOTES, 'UTF-8');
+    }
+}
+
+if (!function_exists('label_metode_pembayaran')) {
+    /** @param mixed $value */
+    function label_metode_pembayaran($value): string
+    {
+        $value = strtolower(trim((string)($value ?? '')));
+        $map = [
+            'cash' => 'Tunai',
+            'tunai' => 'Tunai',
+            'non_tunai' => 'Non Tunai',
+            'non-tunai' => 'Non Tunai',
+            'nontunai' => 'Non Tunai',
+            'qris' => 'QRIS',
+            'qr' => 'QRIS',
+            'transfer' => 'Transfer',
+            'bank_transfer' => 'Transfer',
+            'debit' => 'Debit',
+            'kartu_debit' => 'Debit',
+            'credit' => 'Kredit',
+            'kredit' => 'Kredit',
+            'kartu_kredit' => 'Kredit',
+            'edc' => 'EDC',
+        ];
+        return $map[$value] ?? ($value !== '' ? ucwords(str_replace(['_', '-'], ' ', $value)) : 'Tunai');
     }
 }
 
@@ -104,6 +132,46 @@ if ($preset === 'minggu_ini') {
     $akhir  = $today;
 }
 
+// ── Pagination detail transaksi POS ─────────────────────────────────────────
+$trxPage = max(1, (int)($_GET['trx_page'] ?? 1));
+$trxAllowedLimits = [10, 15, 25, 50, 100];
+$trxPerPage = (int)($_GET['trx_limit'] ?? 15);
+if (!in_array($trxPerPage, $trxAllowedLimits, true)) {
+    $trxPerPage = 15;
+}
+$trxOffset = ($trxPage - 1) * $trxPerPage;
+$trxTotalPages = 1;
+
+// ── Pagination detail transaksi Cafe ────────────────────────────────────────
+$cafePage = max(1, (int)($_GET['cafe_page'] ?? 1));
+$cafeAllowedLimits = [10, 15, 25, 50, 100];
+$cafePerPage = (int)($_GET['cafe_limit'] ?? 15);
+if (!in_array($cafePerPage, $cafeAllowedLimits, true)) {
+    $cafePerPage = 15;
+}
+$cafeOffset = ($cafePage - 1) * $cafePerPage;
+$cafeTotalPages = 1;
+
+if (!function_exists('laporan_trx_page_url')) {
+    function laporan_trx_page_url(int $page, int $limit): string
+    {
+        $query = $_GET;
+        $query['trx_page'] = max(1, $page);
+        $query['trx_limit'] = $limit;
+        return '?' . http_build_query($query);
+    }
+}
+
+if (!function_exists('laporan_cafe_page_url')) {
+    function laporan_cafe_page_url(int $page, int $limit): string
+    {
+        $query = $_GET;
+        $query['cafe_page'] = max(1, $page);
+        $query['cafe_limit'] = $limit;
+        return '?' . http_build_query($query);
+    }
+}
+
 // ── Inisialisasi variabel ────────────────────────────────────────────────────
 $summary              = [];
 $transaksi            = [];
@@ -122,6 +190,24 @@ $totalPoint           = 0;
 $totalPointPakai      = 0;
 $totalNilaiPointPakai = 0;
 $rata                 = 0;
+
+// Cafe
+$cafeSummary = [
+    'total_transaksi' => 0,
+    'omzet' => 0,
+    'tunai' => 0,
+    'nontunai' => 0,
+    'margin' => 0,
+    'rata' => 0,
+];
+$cafeTransaksi = [];
+$cafeProduk = [];
+$cafeTotalTransaksi = 0;
+$cafeOmzet = 0;
+$cafeTunai = 0;
+$cafeNontunai = 0;
+$cafeMargin = 0;
+$cafeRata = 0;
 
 // Produk kedaluwarsa
 $expiredSummary = [
@@ -162,7 +248,55 @@ if ($isKasir) {
 
     $hasPointPakai      = transaksi_col_exists($pdo, 'point_pakai');
     $hasNilaiPointPakai = transaksi_col_exists($pdo, 'nilai_point_pakai');
-    $whereStatus        = "AND (t.metode_pembayaran = 'tunai' OR t.payment_status = 'paid')";
+
+    /*
+     * Beberapa versi POS menyimpan metode pembayaran dengan nama kolom berbeda.
+     * Ambil nilai non-tunai yang benar terlebih dahulu, baru fallback ke tunai.
+     */
+    $metodeCandidates = [];
+    foreach (['metode_pembayaran', 'payment_method', 'metode', 'jenis_pembayaran', 'tipe_pembayaran'] as $column) {
+        if (transaksi_col_exists($pdo, $column)) {
+            $metodeCandidates[] = "NULLIF(TRIM(CAST(t.`{$column}` AS CHAR)), '')";
+        }
+    }
+    if ($metodeCandidates) {
+        $nonTunaiCandidates = [];
+        foreach ($metodeCandidates as $candidateSql) {
+            $nonTunaiCandidates[] = "CASE WHEN LOWER({$candidateSql}) NOT IN ('tunai','cash') THEN {$candidateSql} END";
+        }
+        $metodeSql = 'COALESCE(' . implode(', ', $nonTunaiCandidates) . ', ' . implode(', ', $metodeCandidates) . ", 'tunai')";
+    } else {
+        $metodeSql = "'tunai'";
+    }
+
+    /*
+     * Sinkron dengan Kas Harian:
+     * - transaksi wajib berada di dalam sesi buka-tutup kas;
+     * - user_id transaksi harus sama dengan operator sesi;
+     * - transaksi batal/void tidak dihitung;
+     * - payment_status tidak dipakai karena beberapa transaksi valid tersimpan pending.
+     */
+    $statusColumn = transaksi_col_exists($pdo, 'status_transaksi')
+        ? 'status_transaksi'
+        : (transaksi_col_exists($pdo, 'status') ? 'status' : '');
+
+    $whereStatus = $statusColumn !== ''
+        ? " AND LOWER(COALESCE(t.`{$statusColumn}`,'')) NOT IN ('batal','cancel','cancelled','void')"
+        : '';
+
+    // POS toko tidak mencampurkan transaksi cafe.
+    $whereSumberPos = transaksi_col_exists($pdo, 'sumber_transaksi')
+        ? " AND LOWER(COALESCE(t.sumber_transaksi,'toko')) <> 'cafe'"
+        : '';
+
+    $whereSesiKas = " AND EXISTS (
+        SELECT 1
+        FROM kas_harian kh
+        WHERE kh.user_id = t.user_id
+          AND kh.tanggal BETWEEN :awal AND :akhir
+          AND t.created_at >= kh.opened_at
+          AND t.created_at <= COALESCE(kh.closed_at, NOW())
+    )";
 
     try {
         $diskonSum          = "COALESCE(SUM(t.diskon), 0)";
@@ -176,16 +310,28 @@ if ($isKasir) {
                    COALESCE(SUM(t.kembalian),0) AS kembalian, $pointSum AS point,
                    $pointPakaiSum AS point_pakai, $nilaiPointPakaiSum AS nilai_point_pakai
             FROM transaksi t
-            WHERE DATE(t.created_at) BETWEEN :awal AND :akhir $whereStatus
+            WHERE 1=1 $whereSesiKas $whereStatus $whereSumberPos
         ");
         $stmt->execute([':awal' => $awal, ':akhir' => $akhir]);
         $summary = $stmt->fetch(PDO::FETCH_ASSOC) ?: [];
+
+        /*
+         * Pagination harus dihitung setelah jumlah transaksi periode diketahui.
+         * Ini mencegah tabel kosong saat pengguna sebelumnya berada di halaman
+         * tinggi lalu mengganti periode/filter yang jumlah datanya lebih sedikit.
+         */
+        $totalTransaksi = (int)($summary['total_transaksi'] ?? 0);
+        $trxTotalPages  = max(1, (int)ceil($totalTransaksi / $trxPerPage));
+        if ($trxPage > $trxTotalPages) {
+            $trxPage = $trxTotalPages;
+        }
+        $trxOffset = ($trxPage - 1) * $trxPerPage;
 
         // Diskon barang
         $stmt = $pdo->prepare("
             SELECT COALESCE(SUM(GREATEST(0,(COALESCE(td.harga_normal,td.harga)*td.qty)-td.subtotal)),0) AS total_diskon_barang
             FROM transaksi_detail td JOIN transaksi t ON t.id=td.transaksi_id
-            WHERE DATE(t.created_at) BETWEEN :awal AND :akhir $whereStatus
+            WHERE 1=1 $whereSesiKas $whereStatus $whereSumberPos
         ");
         $stmt->execute([':awal' => $awal, ':akhir' => $akhir]);
         $diskonBarangTotal = (int)($stmt->fetch(PDO::FETCH_ASSOC)['total_diskon_barang'] ?? 0);
@@ -199,11 +345,13 @@ if ($isKasir) {
                    t.diskon, ($diskonBarangPerTrx) AS diskon_barang,
                    t.point_dapat, $pointPakaiSelect, $nilaiPPSelect,
                    m.nama AS member_nama, m.kode AS member_kode,
-                   t.metode_pembayaran, t.payment_status
+                   {$metodeSql} AS metode_pembayaran,
+                   " . (transaksi_col_exists($pdo, 'payment_status') ? "t.payment_status" : "NULL AS payment_status") . "
             FROM transaksi t
             LEFT JOIN member m ON m.id = t.member_id
-            WHERE DATE(t.created_at) BETWEEN :awal AND :akhir $whereStatus
+            WHERE 1=1 $whereSesiKas $whereStatus $whereSumberPos
             ORDER BY t.created_at DESC, t.id DESC
+            LIMIT {$trxPerPage} OFFSET {$trxOffset}
         ");
         $stmt->execute([':awal' => $awal, ':akhir' => $akhir]);
         $transaksi = $stmt->fetchAll(PDO::FETCH_ASSOC);
@@ -215,7 +363,7 @@ if ($isKasir) {
                    SUM(GREATEST(0,(COALESCE(td.harga_normal,td.harga)*td.qty)-td.subtotal)) AS diskon,
                    SUM(td.subtotal) AS penjualan
             FROM transaksi_detail td JOIN transaksi t ON t.id=td.transaksi_id
-            WHERE DATE(t.created_at) BETWEEN :awal AND :akhir $whereStatus
+            WHERE 1=1 $whereSesiKas $whereStatus $whereSumberPos
             GROUP BY td.produk_id, td.nama ORDER BY qty DESC, penjualan DESC LIMIT 20
         ");
         $stmt->execute([':awal' => $awal, ':akhir' => $akhir]);
@@ -226,7 +374,7 @@ if ($isKasir) {
             SELECT COALESCE(d.nama,'Diskon Transaksi') AS nama, COUNT(t.id) AS jumlah,
                    COALESCE(SUM(t.diskon),0) AS total
             FROM transaksi t LEFT JOIN diskon d ON d.id=t.diskon_id
-            WHERE DATE(t.created_at) BETWEEN :awal AND :akhir $whereStatus AND COALESCE(t.diskon,0)>0
+            WHERE 1=1 $whereSesiKas $whereStatus $whereSumberPos AND COALESCE(t.diskon,0)>0
             GROUP BY t.diskon_id, d.nama ORDER BY total DESC
         ");
         $stmt->execute([':awal' => $awal, ':akhir' => $akhir]);
@@ -240,7 +388,7 @@ if ($isKasir) {
             FROM transaksi_detail td
             JOIN transaksi t ON t.id=td.transaksi_id
             LEFT JOIN diskon d ON d.id=td.diskon_id
-            WHERE DATE(t.created_at) BETWEEN :awal AND :akhir $whereStatus
+            WHERE 1=1 $whereSesiKas $whereStatus $whereSumberPos
               AND GREATEST(0,(COALESCE(td.harga_normal,td.harga)*td.qty)-td.subtotal)>0
             GROUP BY td.diskon_id, d.nama ORDER BY total DESC
         ");
@@ -255,7 +403,7 @@ if ($isKasir) {
                    COALESCE(SUM(t.point_dapat),0) AS point_periode,
                    $ppMemberSum AS point_pakai_periode, m.point AS point_total_lifetime
             FROM transaksi t JOIN member m ON m.id=t.member_id
-            WHERE DATE(t.created_at) BETWEEN :awal AND :akhir $whereStatus
+            WHERE 1=1 $whereSesiKas $whereStatus $whereSumberPos
             GROUP BY t.member_id, m.kode, m.nama, m.no_hp, m.point ORDER BY total_belanja DESC
         ");
         $stmt->execute([':awal' => $awal, ':akhir' => $akhir]);
@@ -274,6 +422,186 @@ if ($isKasir) {
     $totalPointPakai      = (int)($summary['point_pakai']       ?? 0);
     $totalNilaiPointPakai = (int)($summary['nilai_point_pakai'] ?? 0);
     $rata                 = $totalTransaksi > 0 ? (int)floor($omzet / $totalTransaksi) : 0;
+    $trxTotalPages        = max(1, (int)ceil($totalTransaksi / $trxPerPage));
+}
+
+
+// ════════════════════════════════════════════════════════════════════════════
+// DATA: CAFE — Transaksi POS Cafe
+// ════════════════════════════════════════════════════════════════════════════
+if ($isCafe) {
+    $cafeHasSource = transaksi_col_exists($pdo, 'sumber_transaksi');
+    $cafeStatusColumn = transaksi_col_exists($pdo, 'status_transaksi')
+        ? 'status_transaksi'
+        : (transaksi_col_exists($pdo, 'status') ? 'status' : '');
+
+    $cafeWhereStatus = $cafeStatusColumn !== ''
+        ? " AND LOWER(COALESCE(t.`{$cafeStatusColumn}`,'')) NOT IN ('batal','cancel','cancelled','void')"
+        : '';
+
+    $cafeWhereSource = $cafeHasSource
+        ? " AND LOWER(COALESCE(t.sumber_transaksi,'')) = 'cafe'"
+        : " AND 1=0";
+
+    $cafeWhereSesi = " AND EXISTS (
+        SELECT 1
+        FROM kas_harian kh
+        WHERE kh.user_id = t.user_id
+          AND kh.tanggal BETWEEN :awal AND :akhir
+          AND t.created_at >= kh.opened_at
+          AND t.created_at <= COALESCE(kh.closed_at, NOW())
+    )";
+
+    $cafeMetodeCandidates = [];
+    foreach (['metode_pembayaran', 'payment_method', 'metode', 'jenis_pembayaran', 'tipe_pembayaran'] as $column) {
+        if (transaksi_col_exists($pdo, $column)) {
+            $cafeMetodeCandidates[] = "NULLIF(TRIM(CAST(t.`{$column}` AS CHAR)), '')";
+        }
+    }
+
+    if ($cafeMetodeCandidates) {
+        $cafeNonTunaiCandidates = [];
+        foreach ($cafeMetodeCandidates as $candidateSql) {
+            $cafeNonTunaiCandidates[] = "CASE WHEN LOWER({$candidateSql}) NOT IN ('tunai','cash') THEN {$candidateSql} END";
+        }
+        $cafeMetodeSql = 'COALESCE(' . implode(', ', $cafeNonTunaiCandidates) . ', ' . implode(', ', $cafeMetodeCandidates) . ", 'tunai')";
+    } else {
+        $cafeMetodeSql = "'tunai'";
+    }
+
+    try {
+        $stmtCafe = $pdo->prepare("
+            SELECT
+                COUNT(*) AS total_transaksi,
+                COALESCE(SUM(t.total),0) AS omzet,
+                COALESCE(SUM(CASE WHEN LOWER({$cafeMetodeSql}) IN ('tunai','cash') THEN t.total ELSE 0 END),0) AS tunai,
+                COALESCE(SUM(CASE WHEN LOWER({$cafeMetodeSql}) NOT IN ('tunai','cash','') THEN t.total ELSE 0 END),0) AS nontunai
+            FROM transaksi t
+            WHERE 1=1 {$cafeWhereSesi} {$cafeWhereStatus} {$cafeWhereSource}
+        ");
+        $stmtCafe->execute([':awal' => $awal, ':akhir' => $akhir]);
+        $cafeSummaryRow = $stmtCafe->fetch(PDO::FETCH_ASSOC) ?: [];
+
+        $cafeTotalTransaksi = (int)($cafeSummaryRow['total_transaksi'] ?? 0);
+        $cafeOmzet = (float)($cafeSummaryRow['omzet'] ?? 0);
+        $cafeTunai = (float)($cafeSummaryRow['tunai'] ?? 0);
+        $cafeNontunai = (float)($cafeSummaryRow['nontunai'] ?? 0);
+        $cafeRata = $cafeTotalTransaksi > 0 ? ($cafeOmzet / $cafeTotalTransaksi) : 0;
+
+        $cafeTotalPages = max(1, (int)ceil($cafeTotalTransaksi / $cafePerPage));
+        if ($cafePage > $cafeTotalPages) {
+            $cafePage = $cafeTotalPages;
+        }
+        $cafeOffset = ($cafePage - 1) * $cafePerPage;
+
+        // Margin cafe.
+        $hasDetailHargaBeli = false;
+        try {
+            $detailCols = $pdo->query("SHOW COLUMNS FROM transaksi_detail")->fetchAll(PDO::FETCH_COLUMN);
+            $hasDetailHargaBeli = in_array('harga_beli', $detailCols, true);
+        } catch (Throwable $e) {
+            $detailCols = [];
+        }
+
+        $hargaBeliExpr = $hasDetailHargaBeli
+            ? "COALESCE(td.harga_beli,0)"
+            : (produk_col_exists($pdo, 'harga_beli') ? "COALESCE(p.harga_beli,0)" : "0");
+
+        $joinProdukMargin = (!$hasDetailHargaBeli && produk_col_exists($pdo, 'harga_beli'))
+            ? " LEFT JOIN produk p ON p.id = td.produk_id "
+            : "";
+
+        $stmtCafeMargin = $pdo->prepare("
+            SELECT COALESCE(SUM(
+                COALESCE(td.subtotal, COALESCE(td.harga,0) * COALESCE(td.qty,0))
+                - ({$hargaBeliExpr} * COALESCE(td.qty,0))
+            ),0)
+            FROM transaksi_detail td
+            JOIN transaksi t ON t.id = td.transaksi_id
+            {$joinProdukMargin}
+            WHERE 1=1 {$cafeWhereSesi} {$cafeWhereStatus} {$cafeWhereSource}
+        ");
+        $stmtCafeMargin->execute([':awal' => $awal, ':akhir' => $akhir]);
+        $cafeMargin = (float)$stmtCafeMargin->fetchColumn();
+
+        $cafeSummary = [
+            'total_transaksi' => $cafeTotalTransaksi,
+            'omzet' => $cafeOmzet,
+            'tunai' => $cafeTunai,
+            'nontunai' => $cafeNontunai,
+            'margin' => $cafeMargin,
+            'rata' => $cafeRata,
+        ];
+
+        $hasCafePesanan = false;
+        try {
+            $hasCafePesanan = (bool)$pdo->query("SHOW TABLES LIKE 'cafe_pesanan'")->fetchColumn();
+        } catch (Throwable $e) {
+            $hasCafePesanan = false;
+        }
+
+        $hasCafeMeja = false;
+        try {
+            $hasCafeMeja = (bool)$pdo->query("SHOW TABLES LIKE 'cafe_meja'")->fetchColumn();
+        } catch (Throwable $e) {
+            $hasCafeMeja = false;
+        }
+
+        $joinCafePesanan = $hasCafePesanan ? " LEFT JOIN cafe_pesanan cp ON cp.transaksi_id = t.id " : "";
+        $joinCafeMeja = ($hasCafePesanan && $hasCafeMeja) ? " LEFT JOIN cafe_meja cm ON cm.id = cp.meja_id " : "";
+
+        $selectCafePesanan = $hasCafePesanan
+            ? "cp.nomor_pesanan, cp.tipe_pesanan, cp.status AS status_pesanan"
+            : "NULL AS nomor_pesanan, NULL AS tipe_pesanan, NULL AS status_pesanan";
+
+        $selectCafeMeja = ($hasCafePesanan && $hasCafeMeja)
+            ? "cm.nomor_meja"
+            : "NULL AS nomor_meja";
+
+        $stmtCafeList = $pdo->prepare("
+            SELECT
+                t.id,
+                t.invoice,
+                t.created_at,
+                t.total,
+                t.bayar,
+                t.kembalian,
+                {$cafeMetodeSql} AS metode_pembayaran,
+                u.nama AS kasir,
+                {$selectCafePesanan},
+                {$selectCafeMeja}
+            FROM transaksi t
+            LEFT JOIN users u ON u.id = t.user_id
+            {$joinCafePesanan}
+            {$joinCafeMeja}
+            WHERE 1=1 {$cafeWhereSesi} {$cafeWhereStatus} {$cafeWhereSource}
+            ORDER BY t.created_at DESC, t.id DESC
+            LIMIT {$cafePerPage} OFFSET {$cafeOffset}
+        ");
+        $stmtCafeList->execute([':awal' => $awal, ':akhir' => $akhir]);
+        $cafeTransaksi = $stmtCafeList->fetchAll(PDO::FETCH_ASSOC);
+
+        $stmtCafeProduk = $pdo->prepare("
+            SELECT
+                td.produk_id,
+                td.nama,
+                MAX(td.kode) AS kode,
+                SUM(td.qty) AS qty,
+                SUM(td.subtotal) AS penjualan
+            FROM transaksi_detail td
+            JOIN transaksi t ON t.id = td.transaksi_id
+            WHERE 1=1 {$cafeWhereSesi} {$cafeWhereStatus} {$cafeWhereSource}
+            GROUP BY td.produk_id, td.nama
+            ORDER BY qty DESC, penjualan DESC
+            LIMIT 20
+        ");
+        $stmtCafeProduk->execute([':awal' => $awal, ':akhir' => $akhir]);
+        $cafeProduk = $stmtCafeProduk->fetchAll(PDO::FETCH_ASSOC);
+    } catch (Throwable $e) {
+        $cafeTransaksi = [];
+        $cafeProduk = [];
+        error_log('LAPORAN CAFE ERROR: ' . $e->getMessage());
+    }
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -440,7 +768,7 @@ if ($isKsp) {
     }
 }
 
-catat_view_once($pdo, 'Laporan Operasional', 'Membuka halaman Laporan Operasional');
+catat_view_once($pdo, 'Laporan Operasional', 'Membuka laporan POS Toko, Cafe, Rental, atau Simpan Pinjam');
 ?>
 <!DOCTYPE html>
 <html lang="id">
@@ -663,18 +991,242 @@ catat_view_once($pdo, 'Laporan Operasional', 'Membuka halaman Laporan Operasiona
             }
         }
 
+        .print-report-header {
+            display: none;
+        }
+
         @media print {
-            .no-print {
+            @page {
+                size: A4 landscape;
+                margin: 9mm;
+            }
+
+            html,
+            body {
+                width: 100%;
+                background: #fff !important;
+                color: #111 !important;
+                font-family: Arial, sans-serif !important;
+                font-size: 10px !important;
+            }
+
+            body {
+                padding: 0 !important;
+                margin: 0 !important;
+            }
+
+            .no-print,
+            .sidebar,
+            nav,
+            header,
+            .app-header,
+            .page-header {
                 display: none !important;
             }
 
             .laporan-header,
-            .laporan-main-wrap {
-                margin-left: 0 !important;
+            .laporan-main-wrap,
+            .laporan-main,
+            .content,
+            main {
+                margin: 0 !important;
+                padding: 0 !important;
+                width: 100% !important;
+                max-width: none !important;
             }
 
-            body {
-                background: #fff;
+            .laporan-main {
+                display: block !important;
+            }
+
+            .print-report-header {
+                display: block !important;
+                margin-bottom: 10px;
+                padding-bottom: 8px;
+                border-bottom: 2px solid #111;
+            }
+
+            .print-brand {
+                display: flex;
+                align-items: center;
+                gap: 10px;
+            }
+
+            .print-brand img {
+                width: 42px;
+                height: 42px;
+                object-fit: contain;
+            }
+
+            .print-brand h1 {
+                margin: 0;
+                font-size: 20px;
+                text-transform: uppercase;
+                letter-spacing: .8px;
+            }
+
+            .print-brand p {
+                margin: 2px 0 0;
+                font-size: 10px;
+                color: #555;
+            }
+
+            .print-meta {
+                margin-top: 7px;
+                display: flex;
+                justify-content: space-between;
+                gap: 15px;
+                font-size: 9px;
+            }
+
+            #panel-kasir,
+            #panel-cafe,
+            #panel-rental,
+            #panel-ksp {
+                display: block !important;
+            }
+
+            .card-list {
+                display: none !important;
+            }
+
+            .tbl-desktop {
+                display: block !important;
+                overflow: visible !important;
+            }
+
+            section,
+            .bg-white,
+            .border,
+            .border-subtle {
+                box-shadow: none !important;
+            }
+
+            section {
+                break-inside: avoid;
+                margin-bottom: 10px !important;
+            }
+
+            table {
+                width: 100% !important;
+                min-width: 0 !important;
+                border-collapse: collapse !important;
+                font-size: 8px !important;
+            }
+
+            thead {
+                display: table-header-group;
+            }
+
+            tfoot {
+                display: table-footer-group;
+            }
+
+            tr {
+                break-inside: avoid;
+            }
+
+            th,
+            td {
+                border: 1px solid #bbb !important;
+                padding: 4px 5px !important;
+                color: #111 !important;
+                background: #fff !important;
+            }
+
+            th {
+                background: #e5e7eb !important;
+                font-size: 7.5px !important;
+            }
+
+            .grid {
+                gap: 6px !important;
+            }
+
+            .text-2xl,
+            .text-lg {
+                font-size: 14px !important;
+            }
+
+            a {
+                color: #111 !important;
+                text-decoration: none !important;
+            }
+        }
+
+
+        /* Pagination seluruh tabel laporan */
+        .report-pagination {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            justify-content: space-between;
+            gap: 10px;
+            padding: 12px 16px;
+            border-top: 1px solid #f0f0f0;
+            background: #fafafa;
+        }
+
+        .report-pagination-info {
+            font-size: 11px;
+            color: #737373;
+            font-weight: 700;
+        }
+
+        .report-pagination-actions {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            overflow-x: auto;
+            max-width: 100%;
+        }
+
+        .report-pagination button,
+        .report-pagination select {
+            min-height: 34px;
+            border: 1px solid #e5e7eb;
+            background: #fff;
+            padding: 6px 10px;
+            font-size: 11px;
+            font-weight: 800;
+            color: #404040;
+            cursor: pointer;
+            border-radius: 0;
+        }
+
+        .report-pagination button.is-active {
+            background: #111;
+            color: #fff;
+            border-color: #111;
+        }
+
+        .report-pagination button:disabled {
+            opacity: .35;
+            cursor: not-allowed;
+        }
+
+        @media (max-width:640px) {
+            .report-pagination {
+                align-items: stretch;
+                flex-direction: column;
+            }
+
+            .report-pagination-actions {
+                width: 100%;
+            }
+        }
+
+        @media print {
+            .report-pagination {
+                display: none !important;
+            }
+
+            .report-page-hidden {
+                display: table-row !important;
+            }
+
+            .card-list .report-page-hidden {
+                display: block !important;
             }
         }
     </style>
@@ -688,13 +1240,30 @@ catat_view_once($pdo, 'Laporan Operasional', 'Membuka halaman Laporan Operasiona
     <div class="laporan-main-wrap">
         <main class="laporan-main p-4 sm:p-5 md:p-8 lg:p-10 flex flex-col gap-5 md:gap-6">
 
+            <section class="print-report-header" style="display:none">
+                <div class="print-brand">
+                    <img src="assets/sejahub_icon.png" alt="SEJAHUB">
+                    <div>
+                        <h1>Laporan Operasional</h1>
+                        <p>SEJAHUB — Sistem Informasi Koperasi dan Penjualan</p>
+                    </div>
+                </div>
+                <div class="print-meta">
+                    <span>Periode: <strong><?= e(tgl($awal)) ?> – <?= e(tgl($akhir)) ?></strong></span>
+                    <span>Dicetak: <strong><?= date('d/m/Y H:i') ?> WIB</strong></span>
+                </div>
+            </section>
+
             <!-- ── Judul + Tab (admin lihat semua) ─────────────────────────────────── -->
             <div class="flex flex-col sm:flex-row sm:items-end justify-between gap-4">
                 <div>
                     <h2 class="text-lg font-bold tracking-tight">Laporan Operasional</h2>
                     <p class="text-[10px] text-gray-400 uppercase tracking-widest mt-0.5">
-                        Monitoring seluruh aktivitas operasional koperasi meliputi POS, Rental Bandara, dan Simpan Pinjam.
+                        Monitoring seluruh aktivitas operasional koperasi meliputi POS Toko, POS Cafe, Rental Bandara, dan Simpan Pinjam.
                     </p>
+                </div>
+                <div class="no-print flex flex-wrap gap-2">
+                    <button type="button" onclick="window.print()" class="px-4 py-2.5 bg-black text-white text-[10px] font-black uppercase tracking-widest hover:bg-gray-800 transition-all">Cetak / Simpan PDF</button>
                 </div>
             </div>
 
@@ -704,6 +1273,10 @@ catat_view_once($pdo, 'Laporan Operasional', 'Membuka halaman Laporan Operasiona
                     <button id="tab-kasir" onclick="switchTab('kasir')"
                         class="tab-btn px-5 py-3 text-[10px] font-black uppercase tracking-widest border-b-2 transition-all">
                         Kasir / POS
+                    </button>
+                    <button id="tab-cafe" onclick="switchTab('cafe')"
+                        class="tab-btn px-5 py-3 text-[10px] font-black uppercase tracking-widest border-b-2 transition-all">
+                        Cafe
                     </button>
                     <button id="tab-rental" onclick="switchTab('rental')"
                         class="tab-btn px-5 py-3 text-[10px] font-black uppercase tracking-widest border-b-2 transition-all">
@@ -805,7 +1378,7 @@ catat_view_once($pdo, 'Laporan Operasional', 'Membuka halaman Laporan Operasiona
                         <div class="px-5 py-4 border-b border-subtle flex items-center justify-between">
                             <div>
                                 <h2 class="text-[10px] font-bold uppercase tracking-widest text-gray-400">Detail Transaksi</h2>
-                                <p class="text-xs text-gray-400 mt-0.5"><?= angka(count($transaksi)) ?> transaksi ditemukan</p>
+                                <p class="text-xs text-gray-400 mt-0.5"><?= angka($totalTransaksi) ?> transaksi ditemukan · halaman <?= angka($trxPage) ?> dari <?= angka($trxTotalPages) ?></p>
                             </div>
                         </div>
                         <!-- Desktop -->
@@ -832,8 +1405,9 @@ catat_view_once($pdo, 'Laporan Operasional', 'Membuka halaman Laporan Operasiona
                                         </tr>
                                     <?php endif; ?>
                                     <?php foreach ($transaksi as $t):
-                                        $metode = $t['metode_pembayaran'] ?? 'tunai';
-                                        $bCls   = in_array(strtolower($metode), ['transfer', 'qris', 'debit', 'kredit']) ? 'badge-blue' : 'badge-gray';
+                                        $metodeRaw = $t['metode_pembayaran'] ?? 'tunai';
+                                        $metode = label_metode_pembayaran($metodeRaw);
+                                        $bCls   = strtolower($metode) !== 'tunai' ? 'badge-blue' : 'badge-gray';
                                     ?>
                                         <tr>
                                             <td class="px-5 py-4 text-xs text-gray-500 whitespace-nowrap"><?= e(waktu($t['created_at'] ?? null)) ?></td>
@@ -911,6 +1485,44 @@ catat_view_once($pdo, 'Laporan Operasional', 'Membuka halaman Laporan Operasiona
                                 </div>
                             <?php endif; ?>
                         </div>
+
+                        <?php if ($trxTotalPages > 1): ?>
+                            <div class="no-print px-4 md:px-5 py-4 border-t border-subtle bg-gray-50 flex flex-col md:flex-row gap-3 md:items-center md:justify-between">
+                                <div class="text-xs text-gray-500">
+                                    Menampilkan <?= angka($trxOffset + 1) ?>–<?= angka(min($trxOffset + $trxPerPage, $totalTransaksi)) ?>
+                                    dari <?= angka($totalTransaksi) ?> transaksi
+                                </div>
+                                <div class="flex flex-col sm:flex-row gap-2 sm:items-center">
+                                    <form method="GET" class="flex items-center gap-2">
+                                        <?php foreach ($_GET as $key => $value): ?>
+                                            <?php if (!in_array($key, ['trx_page', 'trx_limit'], true) && !is_array($value)): ?>
+                                                <input type="hidden" name="<?= e($key) ?>" value="<?= e($value) ?>">
+                                            <?php endif; ?>
+                                        <?php endforeach; ?>
+                                        <input type="hidden" name="trx_page" value="1">
+                                        <select name="trx_limit" onchange="this.form.submit()" class="border border-gray-200 bg-white px-3 py-2 text-xs font-bold">
+                                            <?php foreach ($trxAllowedLimits as $limitOption): ?>
+                                                <option value="<?= $limitOption ?>" <?= $trxPerPage === $limitOption ? 'selected' : '' ?>><?= $limitOption ?> / halaman</option>
+                                            <?php endforeach; ?>
+                                        </select>
+                                    </form>
+                                    <div class="flex items-center gap-1 overflow-x-auto no-scrollbar">
+                                        <?php if ($trxPage > 1): ?>
+                                            <a href="<?= e(laporan_trx_page_url($trxPage - 1, $trxPerPage)) ?>" class="px-3 py-2 border border-gray-200 bg-white text-xs font-bold">&larr;</a>
+                                        <?php endif; ?>
+                                        <?php for ($pg = max(1, $trxPage - 2); $pg <= min($trxTotalPages, $trxPage + 2); $pg++): ?>
+                                            <a href="<?= e(laporan_trx_page_url($pg, $trxPerPage)) ?>"
+                                                class="px-3 py-2 text-xs font-bold <?= $pg === $trxPage ? 'bg-black text-white' : 'border border-gray-200 bg-white text-gray-700' ?>">
+                                                <?= $pg ?>
+                                            </a>
+                                        <?php endfor; ?>
+                                        <?php if ($trxPage < $trxTotalPages): ?>
+                                            <a href="<?= e(laporan_trx_page_url($trxPage + 1, $trxPerPage)) ?>" class="px-3 py-2 border border-gray-200 bg-white text-xs font-bold">&rarr;</a>
+                                        <?php endif; ?>
+                                    </div>
+                                </div>
+                            </div>
+                        <?php endif; ?>
                     </section>
 
                     <!-- Produk Terlaris + Diskon -->
@@ -1071,7 +1683,7 @@ catat_view_once($pdo, 'Laporan Operasional', 'Membuka halaman Laporan Operasiona
                             </div>
                             <div class="flex flex-wrap gap-2 no-print">
                                 <a href="produk.php?expired=expired" class="px-3 py-2 border border-red-200 bg-red-50 text-red-700 text-[9px] font-black uppercase tracking-widest">Lihat Produk Expired</a>
-                                <button type="button" onclick="window.print()" class="px-3 py-2 bg-black text-white text-[9px] font-black uppercase tracking-widest">Cetak Laporan</button>
+                                <button type="button" onclick="window.print()" class="px-3 py-2 bg-black text-white text-[9px] font-black uppercase tracking-widest">Cetak / Simpan PDF</button>
                             </div>
                         </div>
 
@@ -1214,6 +1826,195 @@ catat_view_once($pdo, 'Laporan Operasional', 'Membuka halaman Laporan Operasiona
             <?php endif; // end isKasir 
             ?>
 
+
+
+            <?php if ($isCafe): ?>
+                <!-- ══════════════════════════════════════════════════════════════════ -->
+                <!-- KONTEN CAFE                                                       -->
+                <!-- ══════════════════════════════════════════════════════════════════ -->
+                <div id="panel-cafe">
+                    <div class="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-6 gap-3 md:gap-4">
+                        <div class="bg-white border border-subtle p-4 md:p-5">
+                            <p class="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1">Omzet Cafe</p>
+                            <p class="text-2xl font-bold text-amber-600"><?= rupiah($cafeOmzet) ?></p>
+                            <p class="text-[10px] text-gray-400 mt-1">Transaksi sumber cafe</p>
+                        </div>
+                        <div class="bg-white border border-subtle p-4 md:p-5">
+                            <p class="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1">Total Transaksi</p>
+                            <p class="text-2xl font-bold"><?= angka($cafeTotalTransaksi) ?></p>
+                            <p class="text-[10px] text-gray-400 mt-1">Rata-rata <?= rupiah($cafeRata) ?></p>
+                        </div>
+                        <div class="bg-white border border-subtle p-4 md:p-5">
+                            <p class="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1">Tunai</p>
+                            <p class="text-xl font-bold text-green-600"><?= rupiah($cafeTunai) ?></p>
+                            <p class="text-[10px] text-gray-400 mt-1">Pembayaran cash</p>
+                        </div>
+                        <div class="bg-white border border-subtle p-4 md:p-5">
+                            <p class="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1">Non-Tunai</p>
+                            <p class="text-xl font-bold text-purple-600"><?= rupiah($cafeNontunai) ?></p>
+                            <p class="text-[10px] text-gray-400 mt-1">QRIS / EDC / transfer</p>
+                        </div>
+                        <div class="bg-white border border-subtle p-4 md:p-5">
+                            <p class="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1">Margin</p>
+                            <p class="text-xl font-bold text-blue-600"><?= rupiah($cafeMargin) ?></p>
+                            <p class="text-[10px] text-gray-400 mt-1">Penjualan dikurangi modal</p>
+                        </div>
+                        <div class="bg-white border border-subtle p-4 md:p-5">
+                            <p class="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1">Periode</p>
+                            <p class="text-sm font-bold leading-snug"><?= e(tgl($awal)) ?> – <?= e(tgl($akhir)) ?></p>
+                            <p class="text-[10px] text-gray-400 mt-1"><?= angka($cafeTotalTransaksi) ?> transaksi</p>
+                        </div>
+                    </div>
+
+                    <section class="bg-white border border-subtle overflow-hidden">
+                        <div class="px-5 py-4 border-b border-subtle">
+                            <h2 class="text-[10px] font-bold uppercase tracking-widest text-gray-400">Detail Transaksi Cafe</h2>
+                            <p class="text-xs text-gray-400 mt-0.5"><?= angka($cafeTotalTransaksi) ?> transaksi ditemukan · halaman <?= angka($cafePage) ?> dari <?= angka($cafeTotalPages) ?></p>
+                        </div>
+
+                        <div class="tbl-desktop overflow-x-auto no-scrollbar">
+                            <table class="w-full text-left" style="min-width:900px">
+                                <thead class="border-b border-subtle bg-gray-50">
+                                    <tr>
+                                        <th class="px-5 py-4 text-[10px] font-bold uppercase tracking-widest text-gray-400">Tanggal</th>
+                                        <th class="px-5 py-4 text-[10px] font-bold uppercase tracking-widest text-gray-400">Invoice</th>
+                                        <th class="px-5 py-4 text-[10px] font-bold uppercase tracking-widest text-gray-400">Kasir</th>
+                                        <th class="px-5 py-4 text-[10px] font-bold uppercase tracking-widest text-gray-400">Tipe</th>
+                                        <th class="px-5 py-4 text-[10px] font-bold uppercase tracking-widest text-gray-400">Meja</th>
+                                        <th class="px-5 py-4 text-[10px] font-bold uppercase tracking-widest text-gray-400">Status</th>
+                                        <th class="px-5 py-4 text-[10px] font-bold uppercase tracking-widest text-gray-400">Metode</th>
+                                        <th class="px-5 py-4 text-[10px] font-bold uppercase tracking-widest text-gray-400 text-right">Total</th>
+                                    </tr>
+                                </thead>
+                                <tbody class="divide-y divide-[#f5f5f5]">
+                                    <?php if (!$cafeTransaksi): ?>
+                                        <tr>
+                                            <td colspan="8" class="py-20 text-center text-[10px] font-bold uppercase tracking-widest text-gray-300">Belum ada transaksi cafe</td>
+                                        </tr>
+                                    <?php endif; ?>
+                                    <?php foreach ($cafeTransaksi as $ct): ?>
+                                        <?php
+                                        $cafeMetodeLabel = label_metode_pembayaran($ct['metode_pembayaran'] ?? 'tunai');
+                                        $cafeBadgeMetode = strtolower($cafeMetodeLabel) !== 'tunai' ? 'badge-blue' : 'badge-gray';
+                                        $cafeStatus = strtolower((string)($ct['status_pesanan'] ?? 'selesai'));
+                                        $cafeStatusClass = $cafeStatus === 'selesai'
+                                            ? 'badge-selesai'
+                                            : ($cafeStatus === 'batal' ? 'badge-batal' : 'badge-proses');
+                                        ?>
+                                        <tr>
+                                            <td class="px-5 py-4 text-xs text-gray-500 whitespace-nowrap"><?= e(waktu($ct['created_at'] ?? null)) ?></td>
+                                            <td class="px-5 py-4"><a href="struk.php?invoice=<?= urlencode($ct['invoice']) ?>" target="_blank" class="invoice-link text-sm"><?= e($ct['invoice']) ?></a></td>
+                                            <td class="px-5 py-4 text-sm font-semibold"><?= e($ct['kasir'] ?? '-') ?></td>
+                                            <td class="px-5 py-4 text-sm font-semibold"><?= e(($ct['tipe_pesanan'] ?? '') === 'takeaway' ? 'Takeaway' : 'Dine In') ?></td>
+                                            <td class="px-5 py-4 text-sm"><?= e($ct['nomor_meja'] ?? '-') ?></td>
+                                            <td class="px-5 py-4"><span class="<?= $cafeStatusClass ?> text-[9px] font-bold uppercase px-2 py-1 rounded-full"><?= e($cafeStatus ?: 'selesai') ?></span></td>
+                                            <td class="px-5 py-4"><span class="<?= $cafeBadgeMetode ?> text-[9px] font-bold uppercase px-2 py-1 rounded-full"><?= e($cafeMetodeLabel) ?></span></td>
+                                            <td class="px-5 py-4 text-right text-sm font-bold"><?= rupiah($ct['total'] ?? 0) ?></td>
+                                        </tr>
+                                    <?php endforeach; ?>
+                                </tbody>
+                                <?php if ($cafeTransaksi): ?>
+                                    <tfoot class="bg-gray-50 border-t-2 border-subtle">
+                                        <tr>
+                                            <td colspan="7" class="px-5 py-3 text-[10px] font-bold uppercase tracking-widest text-gray-400">Total Cafe</td>
+                                            <td class="px-5 py-3 text-right text-[11px] font-bold text-amber-600"><?= rupiah($cafeOmzet) ?></td>
+                                        </tr>
+                                    </tfoot>
+                                <?php endif; ?>
+                            </table>
+                        </div>
+
+                        <div class="card-list">
+                            <?php if (!$cafeTransaksi): ?>
+                                <div class="col-span-full py-12 text-center text-[10px] font-bold uppercase tracking-widest text-gray-400">Belum ada transaksi cafe</div>
+                            <?php endif; ?>
+                            <?php foreach ($cafeTransaksi as $ct): ?>
+                                <div class="bg-white border border-subtle p-4 flex flex-col gap-3">
+                                    <div class="flex items-start justify-between gap-2">
+                                        <div class="min-w-0">
+                                            <a href="struk.php?invoice=<?= urlencode($ct['invoice']) ?>" target="_blank" class="invoice-link text-sm block truncate"><?= e($ct['invoice']) ?></a>
+                                            <p class="text-[10px] text-gray-400 mt-0.5"><?= e(waktu($ct['created_at'] ?? null)) ?></p>
+                                        </div>
+                                        <p class="text-sm font-bold shrink-0"><?= rupiah($ct['total'] ?? 0) ?></p>
+                                    </div>
+                                    <div class="grid grid-cols-2 gap-2 pt-2 border-t border-subtle text-xs">
+                                        <div><span class="text-gray-400 block">Tipe</span><strong><?= e(($ct['tipe_pesanan'] ?? '') === 'takeaway' ? 'Takeaway' : 'Dine In') ?></strong></div>
+                                        <div><span class="text-gray-400 block">Meja</span><strong><?= e($ct['nomor_meja'] ?? '-') ?></strong></div>
+                                        <div><span class="text-gray-400 block">Kasir</span><strong><?= e($ct['kasir'] ?? '-') ?></strong></div>
+                                        <div><span class="text-gray-400 block">Metode</span><strong><?= e(label_metode_pembayaran($ct['metode_pembayaran'] ?? 'tunai')) ?></strong></div>
+                                    </div>
+                                </div>
+                            <?php endforeach; ?>
+                        </div>
+
+                        <?php if ($cafeTotalPages > 1): ?>
+                            <div class="no-print px-4 md:px-5 py-4 border-t border-subtle bg-gray-50 flex flex-col md:flex-row gap-3 md:items-center md:justify-between">
+                                <div class="text-xs text-gray-500">
+                                    Menampilkan <?= angka($cafeOffset + 1) ?>–<?= angka(min($cafeOffset + $cafePerPage, $cafeTotalTransaksi)) ?>
+                                    dari <?= angka($cafeTotalTransaksi) ?> transaksi
+                                </div>
+                                <div class="flex flex-col sm:flex-row gap-2 sm:items-center">
+                                    <form method="GET" class="flex items-center gap-2">
+                                        <?php foreach ($_GET as $key => $value): ?>
+                                            <?php if (!in_array($key, ['cafe_page', 'cafe_limit'], true) && !is_array($value)): ?>
+                                                <input type="hidden" name="<?= e($key) ?>" value="<?= e($value) ?>">
+                                            <?php endif; ?>
+                                        <?php endforeach; ?>
+                                        <input type="hidden" name="cafe_page" value="1">
+                                        <select name="cafe_limit" onchange="this.form.submit()" class="border border-gray-200 bg-white px-3 py-2 text-xs font-bold">
+                                            <?php foreach ($cafeAllowedLimits as $limitOption): ?>
+                                                <option value="<?= $limitOption ?>" <?= $cafePerPage === $limitOption ? 'selected' : '' ?>><?= $limitOption ?> / halaman</option>
+                                            <?php endforeach; ?>
+                                        </select>
+                                    </form>
+                                    <div class="flex items-center gap-1 overflow-x-auto no-scrollbar">
+                                        <?php if ($cafePage > 1): ?>
+                                            <a href="<?= e(laporan_cafe_page_url($cafePage - 1, $cafePerPage)) ?>" class="px-3 py-2 border border-gray-200 bg-white text-xs font-bold">&larr;</a>
+                                        <?php endif; ?>
+                                        <?php for ($pg = max(1, $cafePage - 2); $pg <= min($cafeTotalPages, $cafePage + 2); $pg++): ?>
+                                            <a href="<?= e(laporan_cafe_page_url($pg, $cafePerPage)) ?>"
+                                                class="px-3 py-2 text-xs font-bold <?= $pg === $cafePage ? 'bg-black text-white' : 'border border-gray-200 bg-white text-gray-700' ?>">
+                                                <?= $pg ?>
+                                            </a>
+                                        <?php endfor; ?>
+                                        <?php if ($cafePage < $cafeTotalPages): ?>
+                                            <a href="<?= e(laporan_cafe_page_url($cafePage + 1, $cafePerPage)) ?>" class="px-3 py-2 border border-gray-200 bg-white text-xs font-bold">&rarr;</a>
+                                        <?php endif; ?>
+                                    </div>
+                                </div>
+                            </div>
+                        <?php endif; ?>
+                    </section>
+
+                    <section class="bg-white border border-subtle overflow-hidden">
+                        <div class="px-5 py-4 border-b border-subtle">
+                            <h2 class="text-[10px] font-bold uppercase tracking-widest text-gray-400">Menu Cafe Terlaris</h2>
+                            <p class="text-xs text-gray-400 mt-0.5">Top 20 berdasarkan jumlah terjual</p>
+                        </div>
+                        <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3 p-4">
+                            <?php if (!$cafeProduk): ?>
+                                <div class="md:col-span-2 xl:col-span-3 py-12 text-center text-[10px] font-bold uppercase tracking-widest text-gray-300">Belum ada menu terjual</div>
+                            <?php endif; ?>
+                            <?php foreach ($cafeProduk as $i => $cp): ?>
+                                <div class="border border-subtle p-4 flex items-center justify-between gap-3">
+                                    <div class="min-w-0 flex items-center gap-3">
+                                        <span class="rank-circle"><?= $i + 1 ?></span>
+                                        <div class="min-w-0">
+                                            <p class="text-sm font-bold truncate"><?= e($cp['nama'] ?? '-') ?></p>
+                                            <p class="text-[10px] text-gray-400 mt-0.5"><?= e($cp['kode'] ?? '') ?></p>
+                                        </div>
+                                    </div>
+                                    <div class="text-right shrink-0">
+                                        <p class="text-sm font-bold"><?= angka($cp['qty'] ?? 0) ?>x</p>
+                                        <p class="text-[10px] text-gray-400"><?= rupiah($cp['penjualan'] ?? 0) ?></p>
+                                    </div>
+                                </div>
+                            <?php endforeach; ?>
+                        </div>
+                    </section>
+                </div>
+            <?php endif; // end isCafe 
+            ?>
 
             <?php if ($isRental): ?>
                 <!-- ══════════════════════════════════════════════════════════════════ -->
@@ -1487,16 +2288,18 @@ catat_view_once($pdo, 'Laporan Operasional', 'Membuka halaman Laporan Operasiona
 
     <script>
         // ── Tab switching (admin only) ────────────────────────────────────────────
-        var activeTab = '<?php echo $isAdmin ? "kasir" : ($isMurniRental ? "rental" : ($isMurniKsp ? "ksp" : "kasir")); ?>';
+        var activeTab = '<?php echo $isAdmin ? "kasir" : ($isCafeOnly ? "cafe" : ($isMurniRental ? "rental" : ($isMurniKsp ? "ksp" : "kasir"))); ?>';
 
         function switchTab(tab) {
             activeTab = tab;
 
             // Panel visibility
             var panelKasir = document.getElementById('panel-kasir');
+            var panelCafe = document.getElementById('panel-cafe');
             var panelRental = document.getElementById('panel-rental');
             var panelKsp = document.getElementById('panel-ksp');
             if (panelKasir) panelKasir.style.display = tab === 'kasir' ? '' : 'none';
+            if (panelCafe) panelCafe.style.display = tab === 'cafe' ? '' : 'none';
             if (panelRental) panelRental.style.display = tab === 'rental' ? '' : 'none';
             if (panelKsp) panelKsp.style.display = tab === 'ksp' ? '' : 'none';
 
@@ -1519,22 +2322,23 @@ catat_view_once($pdo, 'Laporan Operasional', 'Membuka halaman Laporan Operasiona
             <?php else: ?>
                 // Non-admin: pastikan panel yang relevan tampil, sisanya hidden
                 var panelKasir = document.getElementById('panel-kasir');
+                var panelCafe = document.getElementById('panel-cafe');
                 var panelRental = document.getElementById('panel-rental');
                 var panelKsp = document.getElementById('panel-ksp');
-                <?php if ($isMurniRental): ?>
-                    if (panelKasir) panelKasir.style.display = 'none';
+
+                if (panelKasir) panelKasir.style.display = 'none';
+                if (panelCafe) panelCafe.style.display = 'none';
+                if (panelRental) panelRental.style.display = 'none';
+                if (panelKsp) panelKsp.style.display = 'none';
+
+                <?php if ($isCafeOnly): ?>
+                    if (panelCafe) panelCafe.style.display = '';
+                <?php elseif ($isMurniRental): ?>
                     if (panelRental) panelRental.style.display = '';
-                    if (panelKsp) panelKsp.style.display = 'none';
+                <?php elseif ($isMurniKsp): ?>
+                    if (panelKsp) panelKsp.style.display = '';
                 <?php else: ?>
-                    <?php if ($isMurniKsp): ?>
-                        if (panelKasir) panelKasir.style.display = 'none';
-                        if (panelRental) panelRental.style.display = 'none';
-                        if (panelKsp) panelKsp.style.display = '';
-                    <?php else: ?>
-                        if (panelKasir) panelKasir.style.display = '';
-                        if (panelRental) panelRental.style.display = 'none';
-                        if (panelKsp) panelKsp.style.display = 'none';
-                    <?php endif; ?>
+                    if (panelKasir) panelKasir.style.display = '';
                 <?php endif; ?>
             <?php endif; ?>
 
@@ -1545,6 +2349,144 @@ catat_view_once($pdo, 'Laporan Operasional', 'Membuka halaman Laporan Operasiona
                 });
             });
         });
+
+
+        // Pagination otomatis untuk seluruh tabel/card laporan selain Detail Transaksi
+        (function() {
+            var DEFAULT_LIMIT = 10;
+
+            function sectionTitle(section) {
+                var h = section.querySelector('h2');
+                return h ? h.textContent.trim().toLowerCase() : '';
+            }
+
+            function collectItems(section) {
+                var rows = Array.prototype.slice.call(section.querySelectorAll('.tbl-desktop tbody > tr'))
+                    .filter(function(row) {
+                        return !row.querySelector('td[colspan]');
+                    });
+                var cards = Array.prototype.slice.call(section.querySelectorAll('.card-list > div'))
+                    .filter(function(card) {
+                        return !card.classList.contains('table-footer-mobile') &&
+                            !card.classList.contains('col-span-full');
+                    });
+                return {
+                    rows: rows,
+                    cards: cards
+                };
+            }
+
+            function makeButton(label, disabled, className) {
+                var b = document.createElement('button');
+                b.type = 'button';
+                b.textContent = label;
+                b.disabled = !!disabled;
+                if (className) b.className = className;
+                return b;
+            }
+
+            function initSectionPagination(section, index) {
+                var title = sectionTitle(section);
+                // Detail Transaksi sudah memiliki pagination server sendiri.
+                if (title.indexOf('detail transaksi') !== -1) return;
+
+                var items = collectItems(section);
+                var total = Math.max(items.rows.length, items.cards.length);
+                if (total <= DEFAULT_LIMIT) return;
+
+                var state = {
+                    page: 1,
+                    limit: DEFAULT_LIMIT
+                };
+                var wrap = document.createElement('div');
+                wrap.className = 'report-pagination no-print';
+                wrap.setAttribute('data-pagination-index', String(index));
+
+                var info = document.createElement('div');
+                info.className = 'report-pagination-info';
+
+                var actions = document.createElement('div');
+                actions.className = 'report-pagination-actions';
+
+                var limit = document.createElement('select');
+                [10, 15, 25, 50, 100].forEach(function(n) {
+                    var opt = document.createElement('option');
+                    opt.value = String(n);
+                    opt.textContent = n + ' / halaman';
+                    limit.appendChild(opt);
+                });
+                actions.appendChild(limit);
+                wrap.appendChild(info);
+                wrap.appendChild(actions);
+                section.appendChild(wrap);
+
+                function setVisibility(list, start, end, isCard) {
+                    list.forEach(function(el, i) {
+                        var visible = i >= start && i < end;
+                        el.classList.toggle('report-page-hidden', !visible);
+                        el.style.display = visible ? '' : 'none';
+                    });
+                }
+
+                function render() {
+                    var pages = Math.max(1, Math.ceil(total / state.limit));
+                    if (state.page > pages) state.page = pages;
+                    var start = (state.page - 1) * state.limit;
+                    var end = Math.min(total, start + state.limit);
+
+                    setVisibility(items.rows, start, end, false);
+                    setVisibility(items.cards, start, end, true);
+                    info.textContent = 'Menampilkan ' + (total ? start + 1 : 0) + '–' + end + ' dari ' + total + ' data';
+
+                    while (actions.children.length > 1) actions.removeChild(actions.lastChild);
+                    var prev = makeButton('←', state.page <= 1);
+                    prev.addEventListener('click', function() {
+                        state.page--;
+                        render();
+                    });
+                    actions.appendChild(prev);
+
+                    var from = Math.max(1, state.page - 2);
+                    var to = Math.min(pages, state.page + 2);
+                    for (var p = from; p <= to; p++) {
+                        (function(pageNo) {
+                            var btn = makeButton(String(pageNo), false, pageNo === state.page ? 'is-active' : '');
+                            btn.addEventListener('click', function() {
+                                state.page = pageNo;
+                                render();
+                            });
+                            actions.appendChild(btn);
+                        })(p);
+                    }
+
+                    var next = makeButton('→', state.page >= pages);
+                    next.addEventListener('click', function() {
+                        state.page++;
+                        render();
+                    });
+                    actions.appendChild(next);
+                }
+
+                limit.addEventListener('change', function() {
+                    state.limit = parseInt(this.value, 10) || DEFAULT_LIMIT;
+                    state.page = 1;
+                    render();
+                });
+                render();
+
+                window.addEventListener('beforeprint', function() {
+                    items.rows.concat(items.cards).forEach(function(el) {
+                        el.style.display = '';
+                    });
+                });
+                window.addEventListener('afterprint', render);
+            }
+
+            document.addEventListener('DOMContentLoaded', function() {
+                var sections = Array.prototype.slice.call(document.querySelectorAll('.laporan-main section'));
+                sections.forEach(initSectionPagination);
+            });
+        })();
     </script>
 </body>
 

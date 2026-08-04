@@ -84,39 +84,40 @@ if (!function_exists('is_admin_kas_safe')) {
 }
 if (!function_exists('has_table')) {
     /**
-     * @param PDO $pdo
-     * @param string $table
-     * @return bool
+     * Cek tabel menggunakan INFORMATION_SCHEMA agar stabil pada PDO MySQL/MariaDB.
+     * SHOW TABLES LIKE dengan placeholder tidak selalu didukung oleh driver tertentu.
      */
-    function has_table(PDO $pdo, $table)
+    function has_table(PDO $pdo, string $table): bool
     {
         try {
-            $st = $pdo->prepare("SHOW TABLES LIKE :t");
-            $st->execute([':t' => $table]);
-            return (bool)$st->fetchColumn();
+            $st = $pdo->prepare("SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = :table_name");
+            $st->execute([':table_name' => (string)$table]);
+            return (int)$st->fetchColumn() > 0;
         } catch (Throwable $e) {
             return false;
         }
     }
 }
+
 if (!function_exists('has_column')) {
     /**
-     * @param PDO $pdo
-     * @param string $table
-     * @param string $col
-     * @return bool
+     * Cek kolom menggunakan INFORMATION_SCHEMA agar tidak gagal pada native prepare.
      */
-    function has_column(PDO $pdo, $table, $col)
+    function has_column(PDO $pdo, string $table, string $col): bool
     {
         try {
-            $st = $pdo->prepare("SHOW COLUMNS FROM `$table` LIKE :c");
-            $st->execute([':c' => $col]);
-            return (bool)$st->fetchColumn();
+            $st = $pdo->prepare("SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = :table_name AND COLUMN_NAME = :column_name");
+            $st->execute([
+                ':table_name' => (string)$table,
+                ':column_name' => (string)$col,
+            ]);
+            return (int)$st->fetchColumn() > 0;
         } catch (Throwable $e) {
             return false;
         }
     }
 }
+
 if (!function_exists('first_existing_column')) {
     /**
      * @param PDO $pdo
@@ -229,7 +230,7 @@ function get_shift_terakhir(PDO $pdo, $tanggal, $userId)
  * @param string|null $closedAt
  * @return array
  */
-function hitung_penjualan_shift(PDO $pdo, $openedAt, $closedAt = null)
+function hitung_penjualan_shift(PDO $pdo, $openedAt, $closedAt = null, $operatorUserId = 0)
 {
     $data = [
         'total_sales'    => 0,
@@ -237,63 +238,161 @@ function hitung_penjualan_shift(PDO $pdo, $openedAt, $closedAt = null)
         'total_nontunai' => 0,
         'total_struk'    => 0,
         'margin'         => 0,
-        'fee_promosi'    => 0
+        'fee_promosi'    => 0,
+        'debug_start'    => '',
+        'debug_end'      => '',
+        'debug_error'    => ''
     ];
-    if (!has_table($pdo, 'transaksi')) return $data;
 
-    $dateCol   = first_existing_column($pdo, 'transaksi', ['created_at', 'tanggal', 'waktu', 'tgl_transaksi', 'tanggal_transaksi'], 'created_at');
-    $totalCol  = first_existing_column($pdo, 'transaksi', ['grand_total', 'total_bayar', 'total', 'subtotal', 'total_harga'], '');
-    $payCol    = first_existing_column($pdo, 'transaksi', ['metode_pembayaran', 'metode_bayar', 'payment_method', 'jenis_bayar', 'pembayaran'], '');
-    $statusCol = first_existing_column($pdo, 'transaksi', ['status', 'status_transaksi'], '');
-    $promoCol  = first_existing_column($pdo, 'transaksi', ['fee_promosi', 'biaya_promosi', 'promo_fee'], '');
-
-    if ($totalCol === '') return $data;
-
-    $where  = "`$dateCol` >= :start";
-    $params = [':start' => $openedAt];
-    if ($closedAt) {
-        $where .= " AND `$dateCol` <= :end";
-        $params[':end'] = $closedAt;
-    }
-    if ($statusCol !== '') {
-        $where .= " AND (`$statusCol` IS NULL OR `$statusCol` NOT IN ('batal','cancel','cancelled','void'))";
-    }
-
-    $tunaiExpr    = "0";
-    $nontunaiExpr = "0";
-    if ($payCol !== '') {
-        $tunaiExpr    = "SUM(CASE WHEN LOWER(COALESCE(`$payCol`,'')) IN ('tunai','cash') THEN `$totalCol` ELSE 0 END)";
-        $nontunaiExpr = "SUM(CASE WHEN LOWER(COALESCE(`$payCol`,'')) NOT IN ('tunai','cash') THEN `$totalCol` ELSE 0 END)";
-    }
-    $promoExpr = $promoCol !== '' ? "SUM(COALESCE(`$promoCol`,0))" : "0";
-
-    $sql = "SELECT COALESCE(SUM(`$totalCol`),0) total_sales, COALESCE($tunaiExpr,0) total_tunai, COALESCE($nontunaiExpr,0) total_nontunai, COUNT(*) total_struk, COALESCE($promoExpr,0) fee_promosi FROM transaksi WHERE $where";
-    $st  = $pdo->prepare($sql);
-    $st->execute($params);
-    $r = $st->fetch(PDO::FETCH_ASSOC) ?: [];
-    foreach ($data as $k => $v) if (isset($r[$k])) $data[$k] = (float)$r[$k];
-
-    if (has_table($pdo, 'transaksi_detail')) {
-        $detailTransCol = first_existing_column($pdo, 'transaksi_detail', ['transaksi_id', 'id_transaksi'], 'transaksi_id');
-        $detailQtyCol   = first_existing_column($pdo, 'transaksi_detail', ['qty', 'jumlah', 'kuantitas'], '');
-        $detailHargaCol = first_existing_column($pdo, 'transaksi_detail', ['harga', 'harga_jual', 'harga_satuan'], '');
-        $detailBeliCol  = first_existing_column($pdo, 'transaksi_detail', ['harga_beli', 'modal', 'hpp'], '');
-        if ($detailQtyCol !== '' && $detailHargaCol !== '' && $detailBeliCol !== '') {
-            $idCol = first_existing_column($pdo, 'transaksi', ['id', 'transaksi_id'], 'id');
-            $sqlM  = "SELECT COALESCE(SUM((COALESCE(d.`$detailHargaCol`,0)-COALESCE(d.`$detailBeliCol`,0))*COALESCE(d.`$detailQtyCol`,0)),0) AS margin
-                     FROM transaksi_detail d JOIN transaksi t ON t.`$idCol` = d.`$detailTransCol` WHERE t.`$dateCol` >= :start";
-            if ($closedAt) $sqlM .= " AND t.`$dateCol` <= :end";
-            if ($statusCol !== '') $sqlM .= " AND (t.`$statusCol` IS NULL OR t.`$statusCol` NOT IN ('batal','cancel','cancelled','void'))";
-            $stm = $pdo->prepare($sqlM);
-            $stm->execute($params);
-            $data['margin'] = (float)$stm->fetchColumn();
+    try {
+        if (!has_table($pdo, 'transaksi')) {
+            $data['debug_error'] = 'Tabel transaksi tidak ditemukan.';
+            return $data;
         }
+
+        $dateCol   = first_existing_column($pdo, 'transaksi', ['created_at', 'tanggal', 'waktu', 'tgl_transaksi', 'tanggal_transaksi'], '');
+        $totalCol  = first_existing_column($pdo, 'transaksi', ['total', 'grand_total', 'total_bayar', 'subtotal', 'total_harga'], '');
+        $payCol    = first_existing_column($pdo, 'transaksi', ['metode_pembayaran', 'payment_method', 'metode_bayar', 'jenis_bayar', 'pembayaran'], '');
+        $statusCol = first_existing_column($pdo, 'transaksi', ['status_transaksi', 'status'], '');
+        $userCol   = first_existing_column($pdo, 'transaksi', ['user_id', 'kasir_id', 'operator_id', 'created_by'], '');
+        $promoCol  = first_existing_column($pdo, 'transaksi', ['fee_promosi', 'biaya_promosi', 'promo_fee'], '');
+
+        if ($dateCol === '' || $totalCol === '') {
+            $data['debug_error'] = 'Kolom tanggal atau total transaksi tidak ditemukan.';
+            return $data;
+        }
+
+        // Gunakan nilai created_at secara langsung seperti Laporan Operasional.
+        // Ini menjaga Total Sales dan Margin konsisten pada database/server yang sama.
+        $queryStart = (string)$openedAt;
+        $queryEnd = $closedAt ? (string)$closedAt : date('Y-m-d H:i:s');
+        $data['debug_start'] = (string)$queryStart;
+        $data['debug_end'] = (string)$queryEnd;
+
+        $where = ["`$dateCol` >= :start", "`$dateCol` <= :end"];
+        $params = [':start' => $queryStart, ':end' => $queryEnd];
+
+        // Satu sesi kas hanya menghitung transaksi operator yang membuka kas.
+        if ($operatorUserId > 0 && $userCol !== '') {
+            $where[] = "`$userCol` = :operator_user_id";
+            $params[':operator_user_id'] = (int)$operatorUserId;
+        }
+
+        if ($statusCol !== '') {
+            $where[] = "(LOWER(COALESCE(`$statusCol`,'')) NOT IN ('batal','cancel','cancelled','void'))";
+        }
+
+        $totalExpr = "COALESCE(`$totalCol`,0)";
+        if ($payCol !== '') {
+            $methodExpr = "LOWER(TRIM(COALESCE(`$payCol`,'')))";
+            $tunaiExpr = "SUM(CASE WHEN $methodExpr IN ('tunai','cash','uang tunai') THEN $totalExpr ELSE 0 END)";
+            $nontunaiExpr = "SUM(CASE WHEN $methodExpr NOT IN ('tunai','cash','uang tunai','') THEN $totalExpr ELSE 0 END)";
+        } else {
+            $tunaiExpr = "SUM($totalExpr)";
+            $nontunaiExpr = "0";
+        }
+        $promoExpr = $promoCol !== '' ? "SUM(COALESCE(`$promoCol`,0))" : "0";
+
+        $sql = "SELECT
+                    COALESCE(SUM($totalExpr),0) AS total_sales,
+                    COALESCE($tunaiExpr,0) AS total_tunai,
+                    COALESCE($nontunaiExpr,0) AS total_nontunai,
+                    COUNT(*) AS total_struk,
+                    COALESCE($promoExpr,0) AS fee_promosi
+                FROM transaksi
+                WHERE " . implode(' AND ', $where);
+
+        $st = $pdo->prepare($sql);
+        foreach ($params as $key => $value) {
+            $st->bindValue($key, $value, is_int($value) ? PDO::PARAM_INT : PDO::PARAM_STR);
+        }
+        $st->execute();
+        $r = $st->fetch(PDO::FETCH_ASSOC) ?: [];
+        foreach (['total_sales', 'total_tunai', 'total_nontunai', 'total_struk', 'fee_promosi'] as $key) {
+            $data[$key] = (float)($r[$key] ?? 0);
+        }
+
+        // Margin = total keuntungan per item: (harga jual - harga beli) x qty.
+        // Prioritas harga beli dari transaksi_detail agar historis tetap akurat.
+        // Jika kolom tersebut belum tersedia, gunakan harga_beli pada tabel produk.
+        if (has_table($pdo, 'transaksi_detail')) {
+            try {
+                $detailTransCol = first_existing_column($pdo, 'transaksi_detail', ['transaksi_id', 'id_transaksi'], '');
+                $detailQtyCol   = first_existing_column($pdo, 'transaksi_detail', ['qty', 'jumlah', 'kuantitas'], '');
+                $detailHargaCol = first_existing_column($pdo, 'transaksi_detail', ['harga', 'harga_jual', 'harga_satuan'], '');
+                $detailSubtotalCol = first_existing_column($pdo, 'transaksi_detail', ['subtotal', 'total', 'jumlah_harga'], '');
+                $detailBeliCol  = first_existing_column($pdo, 'transaksi_detail', ['harga_beli', 'harga_modal', 'harga_pokok', 'modal', 'hpp'], '');
+                $detailProdukCol = first_existing_column($pdo, 'transaksi_detail', ['produk_id', 'id_produk'], '');
+                $idCol = first_existing_column($pdo, 'transaksi', ['id', 'transaksi_id'], '');
+
+                if ($detailTransCol && $detailQtyCol && $detailHargaCol && $idCol) {
+                    $whereMargin = ["t.`$dateCol` >= :start", "t.`$dateCol` <= :end"];
+                    if ($operatorUserId > 0 && $userCol !== '') $whereMargin[] = "t.`$userCol` = :operator_user_id";
+                    if ($statusCol !== '') $whereMargin[] = "LOWER(COALESCE(t.`$statusCol`,'')) NOT IN ('batal','cancel','cancelled','void')";
+
+                    $joinProduk = '';
+                    $hargaBeliExpr = '0';
+                    if ($detailBeliCol !== '') {
+                        $hargaBeliExpr = "COALESCE(d.`$detailBeliCol`,0)";
+                    } elseif ($detailProdukCol !== '' && has_table($pdo, 'produk')) {
+                        $produkIdCol = first_existing_column($pdo, 'produk', ['id', 'produk_id'], '');
+                        $produkBeliCol = first_existing_column($pdo, 'produk', ['harga_beli', 'harga_modal', 'harga_pokok', 'modal', 'hpp'], '');
+                        if ($produkIdCol !== '' && $produkBeliCol !== '') {
+                            $joinProduk = " LEFT JOIN produk p ON p.`$produkIdCol` = d.`$detailProdukCol` ";
+                            $hargaBeliExpr = "COALESCE(p.`$produkBeliCol`,0)";
+                        }
+                    }
+
+                    $pendapatanItemExpr = $detailSubtotalCol !== ''
+                        ? "COALESCE(d.`$detailSubtotalCol`,0)"
+                        : "COALESCE(d.`$detailHargaCol`,0)*COALESCE(d.`$detailQtyCol`,0)";
+                    $sqlM = "SELECT COALESCE(SUM($pendapatanItemExpr-($hargaBeliExpr*COALESCE(d.`$detailQtyCol`,0))),0)
+                             FROM transaksi_detail d
+                             JOIN transaksi t ON t.`$idCol` = d.`$detailTransCol`
+                             $joinProduk
+                             WHERE " . implode(' AND ', $whereMargin);
+                    $stm = $pdo->prepare($sqlM);
+                    foreach ($params as $key => $value) {
+                        $stm->bindValue($key, $value, is_int($value) ? PDO::PARAM_INT : PDO::PARAM_STR);
+                    }
+                    $stm->execute();
+                    $data['margin'] = (float)$stm->fetchColumn();
+                }
+            } catch (Throwable $marginError) {
+                $data['margin'] = 0;
+            }
+        }
+    } catch (Throwable $e) {
+        $data['debug_error'] = $e->getMessage();
     }
+
     return $data;
 }
 
+
+if (!function_exists('waktu_lokal_ke_db_utc')) {
+    /**
+     * Konversi waktu Asia/Jakarta yang dipakai kas_harian menjadi UTC
+     * karena created_at pada tabel transaksi tersimpan 7 jam lebih awal.
+     *
+     * @param string|null $dateTime
+     * @return string|null
+     */
+    function waktu_lokal_ke_db_utc(?string $dateTime): ?string
+    {
+        if (!$dateTime) return null;
+        try {
+            $dt = new DateTime((string)$dateTime, new DateTimeZone('Asia/Jakarta'));
+            $dt->setTimezone(new DateTimeZone('UTC'));
+            return $dt->format('Y-m-d H:i:s');
+        } catch (Throwable $e) {
+            return (string)$dateTime;
+        }
+    }
+}
+
 if (!function_exists('durasi_sesi_kas')) {
-    function durasi_sesi_kas($openedAt, $closedAt = null)
+    function durasi_sesi_kas(?string $openedAt, ?string $closedAt = null): string
     {
         if (!$openedAt) return '-';
         $start = strtotime((string)$openedAt);
@@ -320,6 +419,58 @@ function json_response($arr)
     header('Content-Type: application/json; charset=utf-8');
     echo json_encode($arr, JSON_UNESCAPED_UNICODE);
     exit;
+}
+
+
+// Endpoint snapshot aman untuk auto-refresh.
+// Tidak mengubah query riwayat atau data sesi yang sudah ditutup.
+if (isset($_GET['action']) && $_GET['action'] === 'snapshot') {
+    while (ob_get_level() > 0) {
+        @ob_end_clean();
+    }
+    header('Content-Type: application/json; charset=utf-8');
+    header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
+    header('Pragma: no-cache');
+
+    try {
+        if ($isAdminKas) {
+            $stSnapshot = $pdo->query("SELECT * FROM kas_harian WHERE status='buka' ORDER BY opened_at DESC, id DESC");
+        } else {
+            $stSnapshot = $pdo->prepare("SELECT * FROM kas_harian WHERE status='buka' AND user_id=:user_id ORDER BY opened_at DESC, id DESC");
+            $stSnapshot->execute([':user_id' => $userId]);
+        }
+
+        $items = [];
+        foreach ($stSnapshot->fetchAll(PDO::FETCH_ASSOC) as $rowSnapshot) {
+            $salesSnapshot = hitung_penjualan_shift(
+                $pdo,
+                $rowSnapshot['opened_at'],
+                null,
+                (int)($rowSnapshot['user_id'] ?? 0)
+            );
+            $items[] = [
+                'id' => (int)$rowSnapshot['id'],
+                'total_sales' => (float)$salesSnapshot['total_sales'],
+                'total_tunai' => (float)$salesSnapshot['total_tunai'],
+                'total_nontunai' => (float)$salesSnapshot['total_nontunai'],
+                'total_struk' => (int)$salesSnapshot['total_struk'],
+                'margin' => (float)$salesSnapshot['margin'],
+                'kas_akhir_sistem' => (float)$rowSnapshot['kas_awal'] + (float)$salesSnapshot['total_sales'],
+                'kas_aktual' => (float)$rowSnapshot['kas_awal'] + (float)$salesSnapshot['total_sales']
+            ];
+        }
+
+        echo json_encode([
+            'success' => true,
+            'items' => $items,
+            'server_time' => date('Y-m-d H:i:s')
+        ], JSON_UNESCAPED_UNICODE);
+        exit;
+    } catch (Throwable $e) {
+        http_response_code(500);
+        echo json_encode(['success' => false, 'message' => $e->getMessage()], JSON_UNESCAPED_UNICODE);
+        exit;
+    }
 }
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_GET['action'])) {
@@ -365,8 +516,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_GET['action'])) {
             if (!$aktif) json_response(['success' => false, 'message' => 'Tidak ada sesi kas yang sedang terbuka.']);
             $kasAktual = (float)preg_replace('/[^0-9]/', '', (string)($input['kas_aktual'] ?? 0));
             $catatan   = trim((string)($input['catatan'] ?? ''));
-            $sales     = hitung_penjualan_shift($pdo, $aktif['opened_at'], date('Y-m-d H:i:s'));
-            $kasAkhir  = (float)$aktif['kas_awal'] + (float)$sales['total_tunai'];
+            $sales     = hitung_penjualan_shift($pdo, $aktif['opened_at'], date('Y-m-d H:i:s'), (int)$aktif['user_id']);
+            $kasAkhir  = (float)$aktif['kas_awal'] + (float)$sales['total_sales'];
+            // Sesuai aturan operasional: kas aktual disamakan dengan kas akhir sistem.
+            $kasAktual = $kasAkhir;
             $auditSet = '';
             if (has_column($pdo, 'kas_harian', 'closed_by_user_id')) $auditSet .= ', closed_by_user_id=:closed_by_user_id';
             if (has_column($pdo, 'kas_harian', 'closed_by_name')) $auditSet .= ', closed_by_name=:closed_by_name';
@@ -399,15 +552,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_GET['action'])) {
             $aktif = get_shift_buka($pdo, $today, $userId);
             $last  = $aktif ?: get_shift_terakhir($pdo, $today, $userId);
             if (!$last) json_response(['success' => true, 'data' => null]);
-            $sales = ($last['status'] === 'buka') ? hitung_penjualan_shift($pdo, $last['opened_at']) : [
-                'total_sales'    => $last['total_sales'],
-                'total_tunai'    => $last['total_tunai'],
-                'total_nontunai' => $last['total_nontunai'],
-                'total_struk'    => $last['total_struk'],
-                'margin'         => $last['margin'],
-                'fee_promosi'    => $last['fee_promosi']
-            ];
-            $last['kas_akhir_sistem'] = ($last['status'] === 'buka') ? ((float)$last['kas_awal'] + (float)$sales['total_tunai']) : (float)$last['kas_akhir_sistem'];
+            $sales = hitung_penjualan_shift(
+                $pdo,
+                $last['opened_at'],
+                (($last['status'] ?? '') === 'tutup' && !empty($last['closed_at'])) ? $last['closed_at'] : null,
+                (int)($last['user_id'] ?? 0)
+            );
+            $last['kas_akhir_sistem'] = (float)$last['kas_awal'] + (float)$sales['total_sales'];
+            $last['kas_aktual'] = $last['kas_akhir_sistem'];
             json_response(['success' => true, 'data' => $last, 'sales' => $sales]);
         }
 
@@ -423,16 +575,33 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_GET['action'])) {
             }
             $row = $st->fetch(PDO::FETCH_ASSOC);
             if (!$row) json_response(['success' => false, 'message' => 'Data tidak ditemukan.']);
-            $sales = ($row['status'] === 'buka') ? hitung_penjualan_shift($pdo, $row['opened_at']) : [
-                'total_sales'    => $row['total_sales'],
-                'total_tunai'    => $row['total_tunai'],
-                'total_nontunai' => $row['total_nontunai'],
-                'total_struk'    => $row['total_struk'],
-                'margin'         => $row['margin'],
-                'fee_promosi'    => $row['fee_promosi']
-            ];
-            $kasAkhir = ($row['status'] === 'buka') ? ((float)$row['kas_awal'] + (float)$sales['total_tunai']) : (float)$row['kas_akhir_sistem'];
-            $kasAktual = $row['kas_aktual'] !== null ? (float)$row['kas_aktual'] : $kasAkhir;
+            // Hitung ulang dari transaksi sesuai rentang sesi agar data lama yang salah ikut diperbaiki.
+            $sales = hitung_penjualan_shift(
+                $pdo,
+                $row['opened_at'],
+                (($row['status'] ?? '') === 'tutup' && !empty($row['closed_at'])) ? $row['closed_at'] : null,
+                (int)($row['user_id'] ?? 0)
+            );
+            $kasAkhir = (float)$row['kas_awal'] + (float)$sales['total_sales'];
+
+            if (($row['status'] ?? '') === 'tutup') {
+                try {
+                    $sync = $pdo->prepare("UPDATE kas_harian SET total_sales=:total_sales, total_tunai=:total_tunai, total_nontunai=:total_nontunai, total_struk=:total_struk, margin=:margin, fee_promosi=:fee_promosi, kas_akhir_sistem=:kas_akhir, kas_aktual=:kas_aktual, updated_at=NOW() WHERE id=:id");
+                    $sync->execute([
+                        ':total_sales' => $sales['total_sales'],
+                        ':total_tunai' => $sales['total_tunai'],
+                        ':total_nontunai' => $sales['total_nontunai'],
+                        ':total_struk' => $sales['total_struk'],
+                        ':margin' => $sales['margin'],
+                        ':fee_promosi' => $sales['fee_promosi'],
+                        ':kas_akhir' => $kasAkhir,
+                        ':kas_aktual' => $kasAkhir,
+                        ':id' => $row['id']
+                    ]);
+                } catch (Throwable $ignore) {
+                }
+            }
+            $kasAktual = $kasAkhir;
             $row['kas_akhir_sistem'] = $kasAkhir;
             $row['kas_aktual_display'] = $kasAktual;
             $row['selisih'] = $kasAktual - $kasAkhir;
@@ -445,17 +614,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_GET['action'])) {
 
 $shiftAktif = get_shift_buka($pdo, $today, $userId);
 $shiftLast  = $shiftAktif ?: get_shift_terakhir($pdo, $today, $userId);
-$salesNow   = $shiftLast ? (($shiftLast['status'] === 'buka') ? hitung_penjualan_shift($pdo, $shiftLast['opened_at']) : [
-    'total_sales'    => $shiftLast['total_sales'],
-    'total_tunai'    => $shiftLast['total_tunai'],
-    'total_nontunai' => $shiftLast['total_nontunai'],
-    'total_struk'    => $shiftLast['total_struk'],
-    'margin'         => $shiftLast['margin'],
-    'fee_promosi'    => $shiftLast['fee_promosi']
-]) : ['total_sales' => 0, 'total_tunai' => 0, 'total_nontunai' => 0, 'total_struk' => 0, 'margin' => 0, 'fee_promosi' => 0];
+$salesNow = $shiftLast
+    ? hitung_penjualan_shift(
+        $pdo,
+        $shiftLast['opened_at'],
+        ($shiftLast['status'] === 'tutup' && !empty($shiftLast['closed_at'])) ? $shiftLast['closed_at'] : null,
+        (int)$shiftLast['user_id']
+    )
+    : ['total_sales' => 0, 'total_tunai' => 0, 'total_nontunai' => 0, 'total_struk' => 0, 'margin' => 0, 'fee_promosi' => 0];
 
-$kasAkhirNow  = $shiftLast ? (($shiftLast['status'] === 'buka') ? ((float)$shiftLast['kas_awal'] + (float)$salesNow['total_tunai']) : (float)$shiftLast['kas_akhir_sistem']) : 0;
-$kasAktualNow = $shiftLast && $shiftLast['kas_aktual'] !== null ? (float)$shiftLast['kas_aktual'] : $kasAkhirNow;
+$kasAkhirNow = $shiftLast ? ((float)$shiftLast['kas_awal'] + (float)$salesNow['total_sales']) : 0;
+$kasAktualNow = $kasAkhirNow;
 $selisihNow   = $kasAktualNow - $kasAkhirNow;
 $durasiShiftNow = $shiftAktif ? durasi_sesi_kas($shiftAktif['opened_at']) : '-';
 $shiftOverdue = $shiftAktif && date('Y-m-d', strtotime((string)$shiftAktif['opened_at'])) < $today;
@@ -534,6 +703,25 @@ try {
     $st->bindValue(':offset', $offset, PDO::PARAM_INT);
     $st->execute();
     $history = $st->fetchAll(PDO::FETCH_ASSOC);
+
+    // Hitung ulang seluruh sesi agar data lama mengikuti rumus yang benar.
+    foreach ($history as &$historyRow) {
+        $historySales = hitung_penjualan_shift(
+            $pdo,
+            $historyRow['opened_at'],
+            (($historyRow['status'] ?? '') === 'tutup' && !empty($historyRow['closed_at'])) ? $historyRow['closed_at'] : null,
+            (int)($historyRow['user_id'] ?? 0)
+        );
+        $historyRow['total_sales'] = $historySales['total_sales'];
+        $historyRow['total_tunai'] = $historySales['total_tunai'];
+        $historyRow['total_nontunai'] = $historySales['total_nontunai'];
+        $historyRow['total_struk'] = $historySales['total_struk'];
+        $historyRow['margin'] = $historySales['margin'];
+        $historyRow['fee_promosi'] = $historySales['fee_promosi'];
+        $historyRow['kas_akhir_sistem'] = (float)$historyRow['kas_awal'] + (float)$historySales['total_sales'];
+        $historyRow['kas_aktual'] = $historyRow['kas_akhir_sistem'];
+    }
+    unset($historyRow);
 } catch (Throwable $e) {
     $history = [];
     $totalHistory = 0;
@@ -1333,11 +1521,11 @@ $rightActionHtml = '
             </div>
             <div class="summary-card p-4 md:p-5">
                 <p class="text-[10px] font-bold text-gray-400 uppercase tracking-widest">Total Sales</p>
-                <p class="text-2xl font-bold text-blue-600"><?php echo rupiah($salesNow['total_sales']); ?></p>
+                <p id="live-summary-sales" class="text-2xl font-bold text-blue-600"><?php echo rupiah($salesNow['total_sales']); ?></p>
             </div>
             <div class="summary-card p-4 md:p-5">
                 <p class="text-[10px] font-bold text-gray-400 uppercase tracking-widest">Kas Akhir</p>
-                <p class="text-2xl font-bold"><?php echo rupiah($kasAkhirNow); ?></p>
+                <p id="live-summary-kas-akhir" class="text-2xl font-bold"><?php echo rupiah($kasAkhirNow); ?></p>
             </div>
         </div>
 
@@ -1355,15 +1543,15 @@ $rightActionHtml = '
                     <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
                         <div class="bg-gray-50 border border-subtle p-4">
                             <p class="text-[10px] font-bold uppercase tracking-widest text-gray-400">Kas Akhir Sistem</p>
-                            <p class="text-2xl font-black mt-1"><?php echo rupiah($kasAkhirNow); ?></p>
+                            <p id="live-action-kas-akhir" class="text-2xl font-black mt-1"><?php echo rupiah($kasAkhirNow); ?></p>
                         </div>
                         <div class="bg-gray-50 border border-subtle p-4">
                             <p class="text-[10px] font-bold uppercase tracking-widest text-gray-400">Tunai</p>
-                            <p class="text-2xl font-black mt-1"><?php echo rupiah($salesNow['total_tunai']); ?></p>
+                            <p id="live-action-tunai" class="text-2xl font-black mt-1"><?php echo rupiah($salesNow['total_tunai']); ?></p>
                         </div>
                     </div>
                     <label class="block text-[10px] font-bold uppercase tracking-widest text-gray-500 mb-1.5">Kas Aktual di Laci</label>
-                    <input type="text" id="kas-aktual" value="<?php echo number_format($kasAkhirNow, 0, ',', '.'); ?>" inputmode="numeric" class="w-full bg-gray-50 border border-gray-200 px-4 py-3 text-lg font-black">
+                    <input type="text" id="kas-aktual" value="<?php echo number_format($kasAkhirNow, 0, ',', '.'); ?>" inputmode="numeric" readonly class="w-full bg-gray-50 border border-gray-200 px-4 py-3 text-lg font-black">
                     <label class="block text-[10px] font-bold uppercase tracking-widest text-gray-500 mb-1.5 mt-4">Catatan</label>
                     <textarea id="catatan" rows="3" class="w-full bg-gray-50 border border-gray-200 px-4 py-3 text-sm" placeholder="Opsional"></textarea>
                     <button onclick="tutupKas()" class="btn mt-4 w-full py-3 bg-black text-white text-xs font-black uppercase tracking-widest">Tutup Kas & Print</button>
@@ -1443,12 +1631,12 @@ $rightActionHtml = '
                         </thead>
                         <tbody class="divide-y divide-[#f5f5f5]">
                             <?php foreach ($history as $h): ?>
-                                <tr class="row-clickable" onclick="bukaDetailKas(<?php echo (int)$h['id']; ?>)">
+                                <tr class="row-clickable" data-kas-row-id="<?php echo (int)$h['id']; ?>" onclick="bukaDetailKas(<?php echo (int)$h['id']; ?>)">
                                     <td class="px-4 py-3 text-xs font-bold"><?php echo e(date('d/m/Y', strtotime($h['tanggal']))); ?></td>
                                     <td class="px-4 py-3 text-xs"><?php echo e($h['operator']); ?></td>
                                     <td class="px-4 py-3 text-xs text-right"><?php echo rupiah($h['kas_awal']); ?></td>
-                                    <td class="px-4 py-3 text-xs text-right"><?php echo rupiah($h['total_sales']); ?></td>
-                                    <td class="px-4 py-3 text-xs text-right"><?php echo rupiah($h['kas_akhir_sistem']); ?></td>
+                                    <td class="px-4 py-3 text-xs text-right" data-live-sales><?php echo rupiah($h['total_sales']); ?></td>
+                                    <td class="px-4 py-3 text-xs text-right" data-live-kas-akhir><?php echo rupiah($h['kas_akhir_sistem']); ?></td>
                                     <td class="px-4 py-3 text-center"><?php $rowOverdue = (($h['status'] ?? '') === 'buka' && !empty($h['opened_at']) && date('Y-m-d', strtotime((string)$h['opened_at'])) < $today); ?>
                                         <span class="text-[9px] font-black uppercase px-2 py-1 <?php echo $rowOverdue ? 'bg-red-50 text-red-700' : (($h['status'] ?? '') === 'buka' ? 'bg-green-50 text-green-700' : 'bg-gray-100 text-gray-700'); ?>"><?php echo $rowOverdue ? 'Terlambat Tutup' : e($h['status']); ?></span>
                                     </td>
@@ -1471,7 +1659,7 @@ $rightActionHtml = '
                 <!-- Tablet & Mobile: card list agar tidak melebar -->
                 <div class="lg:hidden kas-mobile-list">
                     <?php foreach ($history as $h): ?>
-                        <div class="kas-history-card" onclick="bukaDetailKas(<?php echo (int)$h['id']; ?>)">
+                        <div class="kas-history-card" data-kas-card-id="<?php echo (int)$h['id']; ?>" onclick="bukaDetailKas(<?php echo (int)$h['id']; ?>)">
                             <div class="flex items-start justify-between gap-3 mb-2">
                                 <div class="min-w-0">
                                     <p class="text-sm font-black text-gray-900"><?php echo e(date('d/m/Y', strtotime($h['tanggal']))); ?></p>
@@ -1486,11 +1674,11 @@ $rightActionHtml = '
                             </div>
                             <div class="kas-history-row">
                                 <span class="kas-history-label">Sales</span>
-                                <span class="kas-history-value text-blue-600"><?php echo rupiah($h['total_sales']); ?></span>
+                                <span class="kas-history-value text-blue-600" data-live-sales><?php echo rupiah($h['total_sales']); ?></span>
                             </div>
                             <div class="kas-history-row">
                                 <span class="kas-history-label">Kas Akhir</span>
-                                <span class="kas-history-value"><?php echo rupiah($h['kas_akhir_sistem']); ?></span>
+                                <span class="kas-history-value" data-live-kas-akhir><?php echo rupiah($h['kas_akhir_sistem']); ?></span>
                             </div>
 
                             <div class="kas-history-actions">
@@ -1725,7 +1913,10 @@ $rightActionHtml = '
             });
         }
 
+        var currentDetailKasId = 0;
+
         function bukaDetailKas(id) {
+            currentDetailKasId = Number(id || 0);
             var overlay = document.getElementById('kasDetailOverlay');
             var body = document.getElementById('kasDetailBody');
             body.innerHTML = '<p class="text-xs text-gray-400 text-center py-6">Memuat...</p>';
@@ -1770,6 +1961,7 @@ $rightActionHtml = '
         }
 
         function tutupDetailKas() {
+            currentDetailKasId = 0;
             document.getElementById('kasDetailOverlay').classList.remove('open');
         }
     </script>
@@ -2020,6 +2212,122 @@ $rightActionHtml = '
                 });
         }
     </script>
+
+    <script>
+        // Auto-refresh real-time tanpa reload halaman.
+        (function() {
+            var timer = null;
+            var requestBerjalan = false;
+            var lastSignature = '';
+
+            function formatRupiahLive(value) {
+                return 'Rp ' + Math.round(Number(value || 0)).toLocaleString('id-ID');
+            }
+
+            function updateNodeText(selector, value) {
+                var el = document.querySelector(selector);
+                if (el) el.textContent = value;
+            }
+
+            function updateItem(item) {
+                var id = String(item.id || '');
+                if (!id) return;
+
+                document.querySelectorAll('[data-kas-row-id="' + id + '"], [data-kas-card-id="' + id + '"]').forEach(function(container) {
+                    var sales = container.querySelector('[data-live-sales]');
+                    var kasAkhir = container.querySelector('[data-live-kas-akhir]');
+                    if (sales) sales.textContent = formatRupiahLive(item.total_sales);
+                    if (kasAkhir) kasAkhir.textContent = formatRupiahLive(item.kas_akhir_sistem);
+                });
+            }
+
+            function refreshModalJikaTerbuka(items) {
+                if (!currentDetailKasId) return;
+                var overlay = document.getElementById('kasDetailOverlay');
+                if (!overlay || !overlay.classList.contains('open')) return;
+                var found = items.some(function(item) {
+                    return Number(item.id) === Number(currentDetailKasId);
+                });
+                if (found && typeof bukaDetailKas === 'function') bukaDetailKas(currentDetailKasId);
+            }
+
+            function ambilSnapshot() {
+                if (document.hidden || requestBerjalan) return;
+                requestBerjalan = true;
+                fetch(window.location.pathname + '?action=snapshot&_=' + Date.now(), {
+                        method: 'GET',
+                        credentials: 'same-origin',
+                        cache: 'no-store',
+                        headers: {
+                            'Accept': 'application/json',
+                            'X-Requested-With': 'XMLHttpRequest'
+                        }
+                    })
+                    .then(function(response) {
+                        if (!response.ok) throw new Error('HTTP ' + response.status);
+                        return response.json();
+                    })
+                    .then(function(payload) {
+                        if (!payload || payload.success !== true) throw new Error((payload && payload.message) || 'Respons tidak valid');
+                        var items = Array.isArray(payload.items) ? payload.items : [];
+                        items.forEach(updateItem);
+
+                        if (items.length > 0) {
+                            var utama = items[0];
+                            updateNodeText('#live-summary-sales', formatRupiahLive(utama.total_sales));
+                            updateNodeText('#live-summary-kas-akhir', formatRupiahLive(utama.kas_akhir_sistem));
+                            updateNodeText('#live-action-kas-akhir', formatRupiahLive(utama.kas_akhir_sistem));
+                            updateNodeText('#live-action-tunai', formatRupiahLive(utama.total_tunai));
+
+                            var kasAktual = document.getElementById('kas-aktual');
+                            if (kasAktual && document.activeElement !== kasAktual && !kasAktual.dataset.manualEdited) {
+                                kasAktual.value = Math.round(Number(utama.kas_akhir_sistem || 0)).toLocaleString('id-ID');
+                            }
+
+                            KAS_RECEIPT.total_sales = Math.round(Number(utama.total_sales || 0));
+                            KAS_RECEIPT.total_tunai = Math.round(Number(utama.total_tunai || 0));
+                            KAS_RECEIPT.total_nontunai = Math.round(Number(utama.total_nontunai || 0));
+                            KAS_RECEIPT.total_struk = Math.round(Number(utama.total_struk || 0));
+                            KAS_RECEIPT.margin = Math.round(Number(utama.margin || 0));
+                            KAS_RECEIPT.kas_akhir = Math.round(Number(utama.kas_akhir_sistem || 0));
+                        }
+
+                        var signature = JSON.stringify(items);
+                        if (signature !== lastSignature) {
+                            lastSignature = signature;
+                            refreshModalJikaTerbuka(items);
+                        }
+                    })
+                    .catch(function(error) {
+                        console.error('Auto-refresh kas gagal:', error);
+                        if (typeof kasSetStatus === 'function') kasSetStatus('Auto-refresh gagal: ' + error.message, 'error');
+                    })
+                    .finally(function() {
+                        requestBerjalan = false;
+                    });
+            }
+
+            var kasAktualInput = document.getElementById('kas-aktual');
+            if (kasAktualInput) {
+                kasAktualInput.addEventListener('input', function() {
+                    this.dataset.manualEdited = '1';
+                });
+            }
+
+            function mulai() {
+                ambilSnapshot();
+                if (timer) clearInterval(timer);
+                timer = setInterval(ambilSnapshot, 3000);
+            }
+
+            document.addEventListener('visibilitychange', function() {
+                if (!document.hidden) ambilSnapshot();
+            });
+            window.addEventListener('focus', ambilSnapshot);
+            mulai();
+        })();
+    </script>
+
 </body>
 
 </html>

@@ -20,6 +20,10 @@ if (!isset($activeMenu)) {
         'dashboard.php'            => 'dashboard',
         'index.php'                => 'dashboard',
         'pos.php'                  => 'pos',
+        'pos_cafe.php'             => 'pos_cafe',
+        'menu_cafe.php'            => 'menu_cafe',
+        'meja_cafe.php'            => 'meja_cafe',
+        'dapur.php'                => 'dapur',
         'produk.php'               => 'produk',
         'stok_opname.php'          => 'stok',
         'kas_harian.php'           => 'kas_harian',
@@ -75,7 +79,7 @@ if (!function_exists('sidebar_can_show')) {
         // Fallback khusus supaya menu kas tetap muncul untuk akun Kasir,
         // baik session berisi "kasir", "Kasir Utama", "staff kasir", atau variasinya.
         if ((string)$menu['key'] === 'kas_harian') {
-            if (in_array((string)$role, array('admin', 'kasir'), true)) {
+            if (in_array((string)$role, array('admin', 'kasir', 'cafe'), true)) {
                 return true;
             }
             if (strpos($roleRaw, 'kasir') !== false) {
@@ -140,11 +144,20 @@ $menuGroups = array(
     array(
         'title' => 'Operasional POS',
         'items' => array(
-            array('key' => 'pos',    'href' => 'pos.php',         'label' => 'Mesin Kasir'),
-            array('key' => 'produk', 'href' => 'produk.php',      'label' => 'Produk'),
-            array('key' => 'stok',       'href' => 'stok_opname.php', 'label' => 'Stok Opname'),
-            array('key' => 'diskon',     'href' => 'diskon.php',      'label' => 'Diskon'),
-            array('key' => 'kas_harian', 'href' => 'kas_harian.php',  'label' => 'Buka & Tutup Kas'),
+            array('key' => 'pos',         'href' => 'pos.php',          'label' => 'Mesin Kasir Toko'),
+            array('key' => 'produk',      'href' => 'produk.php',       'label' => 'Produk'),
+            array('key' => 'stok',        'href' => 'stok_opname.php',  'label' => 'Stok Opname'),
+            array('key' => 'diskon',      'href' => 'diskon.php',       'label' => 'Diskon'),
+            array('key' => 'kas_harian',  'href' => 'kas_harian.php',   'label' => 'Buka & Tutup Kas'),
+        ),
+    ),
+    array(
+        'title' => 'Operasional Cafe',
+        'items' => array(
+            array('key' => 'pos_cafe',   'href' => 'pos_cafe.php',   'label' => 'Mesin Kasir Cafe'),
+            array('key' => 'menu_cafe',  'href' => 'menu_cafe.php',  'label' => 'Menu Cafe'),
+            array('key' => 'meja_cafe',  'href' => 'meja_cafe.php',  'label' => 'Meja Cafe'),
+            array('key' => 'dapur',      'href' => 'dapur.php',      'label' => 'Dapur'),
         ),
     ),
     array(
@@ -167,8 +180,8 @@ $menuGroups = array(
     array(
         'title' => 'Laporan',
         'items' => array(
-            array('key' => 'laporan',          'href' => 'laporan.php',           'label' => 'Operasional'),
-            array('key' => 'laporan_keuangan', 'href' => 'laporan_keuangan.php',  'label' => 'Keuangan'),
+            array('key' => 'laporan',           'href' => 'laporan.php',            'label' => 'Operasional'),
+            array('key' => 'laporan_keuangan',  'href' => 'laporan_keuangan.php',   'label' => 'Keuangan'),
             array('key' => 'neraca',           'href' => 'neraca.php',            'label' => 'Neraca'),
             array('key' => 'laba_rugi',        'href' => 'laba_rugi.php',         'label' => 'Laba Rugi / SHU'),
         ),
@@ -186,6 +199,7 @@ $visibleGroups = sidebar_filter_groups($menuGroups, (string)$currentRole);
 $roleBadge = array(
     'admin'  => array('label' => 'Admin',  'color' => 'bg-black text-white'),
     'kasir'  => array('label' => 'Kasir',  'color' => 'bg-blue-100 text-blue-700'),
+    'cafe'   => array('label' => 'Cafe',   'color' => 'bg-amber-100 text-amber-700'),
     'rental' => array('label' => 'Rental', 'color' => 'bg-purple-100 text-purple-700'),
     'ksp'    => array('label' => 'KSP',    'color' => 'bg-green-100 text-green-700'),
 );

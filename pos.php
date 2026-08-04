@@ -229,6 +229,7 @@ if (!function_exists('pos_auto_jurnal_penjualan')) {
         int $transaksiId,
         string $invoice,
         float $total,
+        string $metodePembayaran = 'tunai',
         ?int $userId = null
     ): void {
         if ($transaksiId < 1 || $total <= 0) {
@@ -245,11 +246,12 @@ if (!function_exists('pos_auto_jurnal_penjualan')) {
                 $userId
             );
 
-            // Debit: Kas
+            // Debit sesuai metode pembayaran: Kas (tunai) atau Bank (non tunai).
+            $akunDebit = $metodePembayaran === 'tunai' ? '101' : '102';
             pos_tambah_jurnal_detail(
                 $pdo,
                 $jurnalId,
-                pos_coa_id($pdo, '101'),
+                pos_coa_id($pdo, $akunDebit),
                 $total,
                 0
             );
@@ -307,6 +309,25 @@ if (!function_exists('pos_ensure_expired_date_column')) {
 }
 
 pos_ensure_expired_date_column($pdo);
+
+if (!function_exists('pos_ensure_metode_pembayaran_column')) {
+    function pos_ensure_metode_pembayaran_column(PDO $pdo): void
+    {
+        static $done = false;
+        if ($done) return;
+        $done = true;
+        try {
+            $cols = $pdo->query("SHOW COLUMNS FROM transaksi")->fetchAll(PDO::FETCH_COLUMN);
+            if (!in_array('metode_pembayaran', $cols, true)) {
+                $pdo->exec("ALTER TABLE transaksi ADD COLUMN metode_pembayaran VARCHAR(20) NOT NULL DEFAULT 'tunai' AFTER kembalian");
+            }
+        } catch (Throwable $e) {
+            error_log('POS METODE PEMBAYARAN COLUMN ERROR: ' . $e->getMessage());
+        }
+    }
+}
+
+pos_ensure_metode_pembayaran_column($pdo);
 
 /*
 |--------------------------------------------------------------------------
@@ -589,6 +610,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_GET['action'])) {
             $invoice = generateInvoice();
             $items = $input['items'];
             $bayar = (int)($input['bayar'] ?? 0);
+            $metodePembayaran = strtolower(trim((string)($input['metode_pembayaran'] ?? 'tunai')));
+            if (!in_array($metodePembayaran, ['tunai', 'qris', 'edc', 'transfer', 'debit', 'kredit'], true)) {
+                $metodePembayaran = 'tunai';
+            }
             $memberId = !empty($input['member_id']) ? (int)$input['member_id'] : null;
             $produkIds = array_values(array_unique(array_column($items, 'id')));
             $placeholders = implode(',', array_fill(0, count($produkIds), '?'));
@@ -649,17 +674,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_GET['action'])) {
                 $hasTrxDiscount = transaksiHasDiscountColumns($pdo);
                 $hasTrxPointRedeem = transaksiHasPointRedeemColumns($pdo);
                 if ($hasTrxDiscount && $hasTrxPointRedeem) {
-                    $stmtTrans = $pdo->prepare("INSERT INTO transaksi (invoice,user_id,member_id,total,diskon,diskon_id,bayar,kembalian,point_dapat,point_pakai,nilai_point_pakai,catatan) VALUES (:invoice,:user_id,:member_id,:total,:diskon,:diskon_id,:bayar,:kembalian,:point_dapat,:point_pakai,:nilai_point_pakai,:catatan)");
-                    $stmtTrans->execute([':invoice' => $invoice, ':user_id' => $userId, ':member_id' => $memberId, ':total' => $total, ':diskon' => $diskon, ':diskon_id' => $diskonId, ':bayar' => $bayar, ':kembalian' => $kembalian, ':point_dapat' => $pointDapat, ':point_pakai' => $pointPakai, ':nilai_point_pakai' => $nilaiPointPakai, ':catatan' => $input['catatan'] ?? null]);
+                    $stmtTrans = $pdo->prepare("INSERT INTO transaksi (invoice,user_id,member_id,total,diskon,diskon_id,bayar,kembalian,metode_pembayaran,point_dapat,point_pakai,nilai_point_pakai,catatan) VALUES (:invoice,:user_id,:member_id,:total,:diskon,:diskon_id,:bayar,:kembalian,:metode_pembayaran,:point_dapat,:point_pakai,:nilai_point_pakai,:catatan)");
+                    $stmtTrans->execute([':invoice' => $invoice, ':user_id' => $userId, ':member_id' => $memberId, ':total' => $total, ':diskon' => $diskon, ':diskon_id' => $diskonId, ':bayar' => $bayar, ':kembalian' => $kembalian, ':metode_pembayaran' => $metodePembayaran, ':point_dapat' => $pointDapat, ':point_pakai' => $pointPakai, ':nilai_point_pakai' => $nilaiPointPakai, ':catatan' => $input['catatan'] ?? null]);
                 } elseif ($hasTrxDiscount) {
-                    $stmtTrans = $pdo->prepare("INSERT INTO transaksi (invoice,user_id,member_id,total,diskon,diskon_id,bayar,kembalian,point_dapat,catatan) VALUES (:invoice,:user_id,:member_id,:total,:diskon,:diskon_id,:bayar,:kembalian,:point_dapat,:catatan)");
-                    $stmtTrans->execute([':invoice' => $invoice, ':user_id' => $userId, ':member_id' => $memberId, ':total' => $total, ':diskon' => $diskon, ':diskon_id' => $diskonId, ':bayar' => $bayar, ':kembalian' => $kembalian, ':point_dapat' => $pointDapat, ':catatan' => $input['catatan'] ?? null]);
+                    $stmtTrans = $pdo->prepare("INSERT INTO transaksi (invoice,user_id,member_id,total,diskon,diskon_id,bayar,kembalian,metode_pembayaran,point_dapat,catatan) VALUES (:invoice,:user_id,:member_id,:total,:diskon,:diskon_id,:bayar,:kembalian,:metode_pembayaran,:point_dapat,:catatan)");
+                    $stmtTrans->execute([':invoice' => $invoice, ':user_id' => $userId, ':member_id' => $memberId, ':total' => $total, ':diskon' => $diskon, ':diskon_id' => $diskonId, ':bayar' => $bayar, ':kembalian' => $kembalian, ':metode_pembayaran' => $metodePembayaran, ':point_dapat' => $pointDapat, ':catatan' => $input['catatan'] ?? null]);
                 } elseif ($hasTrxPointRedeem) {
-                    $stmtTrans = $pdo->prepare("INSERT INTO transaksi (invoice,user_id,member_id,total,bayar,kembalian,point_dapat,point_pakai,nilai_point_pakai,catatan) VALUES (:invoice,:user_id,:member_id,:total,:bayar,:kembalian,:point_dapat,:point_pakai,:nilai_point_pakai,:catatan)");
-                    $stmtTrans->execute([':invoice' => $invoice, ':user_id' => $userId, ':member_id' => $memberId, ':total' => $total, ':bayar' => $bayar, ':kembalian' => $kembalian, ':point_dapat' => $pointDapat, ':point_pakai' => $pointPakai, ':nilai_point_pakai' => $nilaiPointPakai, ':catatan' => $input['catatan'] ?? null]);
+                    $stmtTrans = $pdo->prepare("INSERT INTO transaksi (invoice,user_id,member_id,total,bayar,kembalian,metode_pembayaran,point_dapat,point_pakai,nilai_point_pakai,catatan) VALUES (:invoice,:user_id,:member_id,:total,:bayar,:kembalian,:metode_pembayaran,:point_dapat,:point_pakai,:nilai_point_pakai,:catatan)");
+                    $stmtTrans->execute([':invoice' => $invoice, ':user_id' => $userId, ':member_id' => $memberId, ':total' => $total, ':bayar' => $bayar, ':kembalian' => $kembalian, ':metode_pembayaran' => $metodePembayaran, ':point_dapat' => $pointDapat, ':point_pakai' => $pointPakai, ':nilai_point_pakai' => $nilaiPointPakai, ':catatan' => $input['catatan'] ?? null]);
                 } else {
-                    $stmtTrans = $pdo->prepare("INSERT INTO transaksi (invoice,user_id,member_id,total,bayar,kembalian,point_dapat,catatan) VALUES (:invoice,:user_id,:member_id,:total,:bayar,:kembalian,:point_dapat,:catatan)");
-                    $stmtTrans->execute([':invoice' => $invoice, ':user_id' => $userId, ':member_id' => $memberId, ':total' => $total, ':bayar' => $bayar, ':kembalian' => $kembalian, ':point_dapat' => $pointDapat, ':catatan' => $input['catatan'] ?? null]);
+                    $stmtTrans = $pdo->prepare("INSERT INTO transaksi (invoice,user_id,member_id,total,bayar,kembalian,metode_pembayaran,point_dapat,catatan) VALUES (:invoice,:user_id,:member_id,:total,:bayar,:kembalian,:metode_pembayaran,:point_dapat,:catatan)");
+                    $stmtTrans->execute([':invoice' => $invoice, ':user_id' => $userId, ':member_id' => $memberId, ':total' => $total, ':bayar' => $bayar, ':kembalian' => $kembalian, ':metode_pembayaran' => $metodePembayaran, ':point_dapat' => $pointDapat, ':catatan' => $input['catatan'] ?? null]);
                 }
                 $transaksiId = $pdo->lastInsertId();
                 if (transaksiDetailHasDiscountColumns($pdo)) {
@@ -680,6 +705,56 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_GET['action'])) {
                 }
                 if ($memberId) $pdo->prepare("UPDATE member SET point=point-:pakai+:pt, total_belanja=total_belanja+:total, updated_at=NOW() WHERE id=:id")->execute([':pakai' => $pointPakai, ':pt' => $pointDapat, ':total' => $total, ':id' => $memberId]);
 
+                // Hitung margin transaksi: (harga jual - harga beli) x qty.
+                $marginTransaksi = 0.0;
+                try {
+                    $produkCols = $pdo->query("SHOW COLUMNS FROM produk")->fetchAll(PDO::FETCH_COLUMN);
+                    $hargaBeliCol = '';
+                    foreach (['harga_beli', 'harga_modal', 'harga_pokok', 'modal', 'hpp'] as $candidate) {
+                        if (in_array($candidate, $produkCols, true)) {
+                            $hargaBeliCol = $candidate;
+                            break;
+                        }
+                    }
+                    if ($hargaBeliCol !== '') {
+                        $stmtMargin = $pdo->prepare("SELECT COALESCE(SUM((COALESCE(d.harga,0)-COALESCE(p.`$hargaBeliCol`,0))*COALESCE(d.qty,0)),0) FROM transaksi_detail d LEFT JOIN produk p ON p.id=d.produk_id WHERE d.transaksi_id=:transaksi_id");
+                        $stmtMargin->execute([':transaksi_id' => $transaksiId]);
+                        $marginTransaksi = (float)$stmtMargin->fetchColumn();
+                    }
+                } catch (Throwable $ignoreMargin) {
+                    $marginTransaksi = 0.0;
+                }
+
+                // Sinkronkan transaksi ke sesi kas aktif dengan rumus operasional:
+                // Kas Akhir = Kas Awal + Total Sales, Kas Aktual = Kas Akhir.
+                $isTunaiKas = ($metodePembayaran === 'tunai');
+                $updateKas = $pdo->prepare("
+                    UPDATE kas_harian
+                    SET kas_akhir_sistem = COALESCE(kas_awal,0) + COALESCE(total_sales,0) + :nilai_transaksi,
+                        kas_aktual = COALESCE(kas_awal,0) + COALESCE(total_sales,0) + :nilai_transaksi_aktual,
+                        total_sales = COALESCE(total_sales,0) + :total_sales,
+                        total_tunai = COALESCE(total_tunai,0) + :total_tunai,
+                        total_nontunai = COALESCE(total_nontunai,0) + :total_nontunai,
+                        total_struk = COALESCE(total_struk,0) + 1,
+                        margin = COALESCE(margin,0) + :margin,
+                        updated_at = NOW()
+                    WHERE id=:kas_id AND user_id=:user_id AND status='buka'
+                    LIMIT 1
+                ");
+                $updateKas->execute([
+                    ':nilai_transaksi' => $total,
+                    ':nilai_transaksi_aktual' => $total,
+                    ':total_sales' => $total,
+                    ':total_tunai' => $isTunaiKas ? $total : 0,
+                    ':total_nontunai' => $isTunaiKas ? 0 : $total,
+                    ':margin' => $marginTransaksi,
+                    ':kas_id' => (int)$kasAktifTransaksi['id'],
+                    ':user_id' => $userId,
+                ]);
+                if ($updateKas->rowCount() < 1) {
+                    throw new Exception('Sesi kas aktif tidak berhasil diperbarui. Silakan buka ulang sesi kas.');
+                }
+
                 // Auto jurnal POS:
                 // Debit Kas (101), Kredit Pendapatan POS (401).
                 // Jika tabel jurnal/COA belum siap, transaksi POS tetap aman karena fungsi ini menangani error sendiri.
@@ -688,18 +763,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_GET['action'])) {
                     (int)$transaksiId,
                     (string)$invoice,
                     (float)$total,
+                    (string)$metodePembayaran,
                     (int)($userId ?? ($_SESSION['user']['id'] ?? 0))
                 );
 
                 $pdo->commit();
-                catat_aktivitas($pdo, 'create', 'Mesin Kasir', 'Menyimpan transaksi: ' . $invoice . ' total ' . $total);
+                catat_aktivitas($pdo, 'create', 'Mesin Kasir', 'Menyimpan transaksi: ' . $invoice . ' total ' . $total . ' metode ' . strtoupper($metodePembayaran));
                 $pointTotal = 0;
                 if ($memberId) {
                     $r = $pdo->prepare("SELECT point FROM member WHERE id=:id");
                     $r->execute([':id' => $memberId]);
                     $pointTotal = (int)$r->fetchColumn();
                 }
-                echo json_encode(['success' => true, 'invoice' => $invoice, 'subtotal' => $subtotal, 'diskon' => $diskon, 'diskon_id' => $diskonId, 'diskon_nama' => $diskonData['diskon_terpilih_nama'], 'diskon_item' => $diskonData['item_diskon'], 'diskon_transaksi' => $diskonData['transaksi_diskon'], 'total_sebelum_point' => $totalSebelumPoint, 'point_pakai' => $pointPakai, 'nilai_point_pakai' => $nilaiPointPakai, 'total' => $total, 'bayar' => $bayar, 'kembalian' => $kembalian, 'point_dapat' => $pointDapat, 'point_total' => $pointTotal, 'lines' => $diskonData['lines'], 'message' => 'Transaksi berhasil disimpan.']);
+                echo json_encode(['success' => true, 'invoice' => $invoice, 'subtotal' => $subtotal, 'diskon' => $diskon, 'diskon_id' => $diskonId, 'diskon_nama' => $diskonData['diskon_terpilih_nama'], 'diskon_item' => $diskonData['item_diskon'], 'diskon_transaksi' => $diskonData['transaksi_diskon'], 'total_sebelum_point' => $totalSebelumPoint, 'point_pakai' => $pointPakai, 'nilai_point_pakai' => $nilaiPointPakai, 'total' => $total, 'bayar' => $bayar, 'kembalian' => $kembalian, 'metode_pembayaran' => $metodePembayaran, 'point_dapat' => $pointDapat, 'point_total' => $pointTotal, 'lines' => $diskonData['lines'], 'message' => 'Transaksi berhasil disimpan.']);
             } catch (Throwable $e) {
                 if ($pdo->inTransaction()) $pdo->rollBack();
                 echo json_encode(['success' => false, 'message' => 'Gagal: ' . $e->getMessage()]);
@@ -1555,6 +1631,44 @@ catat_view_once($pdo, 'Mesin Kasir', 'Membuka halaman Mesin Kasir');
                 height: 104px !important;
             }
         }
+
+
+        /* === MOBILE/TABLET: DAFTAR BELANJA SELALU TERBUKA === */
+        @media (max-width: 1023px) {
+            #mobile-cart-sheet {
+                transform: translateY(0) !important;
+                max-height: 58vh !important;
+                height: 58vh;
+                border-radius: 14px 14px 0 0 !important;
+            }
+
+            #cart-overlay {
+                display: none !important;
+            }
+
+            #cart-handle {
+                cursor: default !important;
+            }
+
+            #cart-chevron {
+                display: none !important;
+            }
+
+            .pos-product-scroll-fixed {
+                padding-bottom: calc(58vh + 24px) !important;
+            }
+        }
+
+        @media (max-width: 640px) {
+            #mobile-cart-sheet {
+                max-height: 62vh !important;
+                height: 62vh;
+            }
+
+            .pos-product-scroll-fixed {
+                padding-bottom: calc(62vh + 20px) !important;
+            }
+        }
     </style>
 </head>
 
@@ -2074,23 +2188,24 @@ catat_view_once($pdo, 'Mesin Kasir', 'Membuka halaman Mesin Kasir');
         }
 
         // ── Mobile Cart Sheet ────────────────────────────────────────────────────────
-        function toggleMobileCart() {
+        function forceMobileCartOpen() {
+            if (window.innerWidth >= 1024) return;
             const sheet = document.getElementById('mobile-cart-sheet');
             const overlay = document.getElementById('cart-overlay');
             const chevron = document.getElementById('cart-chevron');
-            if (!sheet) return;
-            const expanded = sheet.classList.toggle('expanded');
-            if (overlay) overlay.classList.toggle('hidden', !expanded);
-            if (chevron) chevron.style.transform = expanded ? 'rotate(180deg)' : '';
+            if (sheet) sheet.classList.add('expanded');
+            if (overlay) overlay.classList.add('hidden');
+            if (chevron) chevron.style.transform = 'rotate(180deg)';
+        }
+
+        function toggleMobileCart() {
+            // Mobile dan tablet menggunakan daftar belanja yang selalu terbuka.
+            forceMobileCartOpen();
         }
 
         function closeMobileCart() {
-            const sheet = document.getElementById('mobile-cart-sheet');
-            const overlay = document.getElementById('cart-overlay');
-            const chevron = document.getElementById('cart-chevron');
-            if (sheet) sheet.classList.remove('expanded');
-            if (overlay) overlay.classList.add('hidden');
-            if (chevron) chevron.style.transform = '';
+            // Jangan menutup daftar belanja pada mobile/tablet.
+            forceMobileCartOpen();
         }
 
         // ── State ────────────────────────────────────────────────────────────────────
@@ -2113,6 +2228,94 @@ catat_view_once($pdo, 'Mesin Kasir', 'Membuka halaman Mesin Kasir');
         let memberSuggestIndex = -1;
         let memberSuggestData = [];
 
+        // Draft keranjang disimpan per operator agar tidak hilang saat pindah menu/refresh.
+        const POS_CART_STORAGE_KEY = 'sejahub_pos_cart_' + <?= json_encode((string)$posUserId) ?>;
+
+        function savePosDraft() {
+            try {
+                if (!Array.isArray(cart) || cart.length === 0) {
+                    localStorage.removeItem(POS_CART_STORAGE_KEY);
+                    return;
+                }
+                localStorage.setItem(POS_CART_STORAGE_KEY, JSON.stringify({
+                    version: 1,
+                    saved_at: Date.now(),
+                    cart: cart,
+                    activeMember: activeMember,
+                    pointRedeem: pointRedeem,
+                    selectedMethod: selectedMethod
+                }));
+            } catch (e) {
+                console.warn('Draft keranjang tidak dapat disimpan:', e);
+            }
+        }
+
+        function clearPosDraft() {
+            try {
+                localStorage.removeItem(POS_CART_STORAGE_KEY);
+            } catch (e) {}
+        }
+
+        function restorePosDraft() {
+            try {
+                const raw = localStorage.getItem(POS_CART_STORAGE_KEY);
+                if (!raw) return false;
+                const draft = JSON.parse(raw);
+                if (!draft || !Array.isArray(draft.cart) || draft.cart.length === 0) {
+                    clearPosDraft();
+                    return false;
+                }
+
+                const productMap = new Map(PRODUCTS.map(p => [Number(p.id), p]));
+                const restored = [];
+                draft.cart.forEach(item => {
+                    const product = productMap.get(Number(item.id));
+                    if (!product || String(product.status || 'aktif') === 'nonaktif') return;
+                    const stok = Number(product.stok || 0);
+                    const qty = Math.max(1, Math.min(Number(item.qty || 1), stok));
+                    if (stok <= 0 || qty <= 0) return;
+                    restored.push({
+                        ...item,
+                        id: Number(product.id),
+                        kode: product.kode,
+                        nama: product.nama,
+                        kategori: product.kategori,
+                        harga_jual: Number(product.harga_jual || item.harga_jual || 0),
+                        stok: stok,
+                        satuan: product.satuan,
+                        expired_date: product.expired_date || null,
+                        qty: qty
+                    });
+                });
+
+                cart = restored;
+                activeMember = draft.activeMember || null;
+                pointRedeem = Math.max(0, Number(draft.pointRedeem || 0));
+                selectedMethod = draft.selectedMethod || 'tunai';
+
+                if (activeMember) {
+                    const mi = document.getElementById('member-input');
+                    const mmi = document.getElementById('mobile-member-input');
+                    const label = activeMember.kode || activeMember.nama || activeMember.no_hp || '';
+                    if (mi) mi.value = label;
+                    if (mmi) mmi.value = label;
+                    const nama = document.getElementById('member-nama');
+                    const point = document.getElementById('member-point');
+                    const found = document.getElementById('member-found');
+                    if (nama) nama.innerText = activeMember.nama || '-';
+                    if (point) point.innerText = Number(activeMember.point || 0).toLocaleString('id-ID');
+                    if (found) found.style.display = 'flex';
+                }
+
+                if (cart.length === 0) clearPosDraft();
+                return cart.length > 0;
+            } catch (e) {
+                console.warn('Draft keranjang tidak dapat dipulihkan:', e);
+                clearPosDraft();
+                return false;
+            }
+        }
+
         // ── Init ─────────────────────────────────────────────────────────────────────
         async function init() {
             try {
@@ -2123,6 +2326,9 @@ catat_view_once($pdo, 'Mesin Kasir', 'Membuka halaman Mesin Kasir');
             }
 
             await loadProducts();
+            restorePosDraft();
+            updateUI();
+            forceMobileCartOpen();
         }
 
         async function loadProducts() {
@@ -2704,8 +2910,8 @@ catat_view_once($pdo, 'Mesin Kasir', 'Membuka halaman Mesin Kasir');
                 document.getElementById('member-notfound').style.display = 'none';
                 hideMemberSuggest();
             }
-            closeMobileCart();
             updateUI();
+            forceMobileCartOpen();
         }
 
         function getSubtotal() {
@@ -2979,6 +3185,7 @@ catat_view_once($pdo, 'Mesin Kasir', 'Membuka halaman Mesin Kasir');
         }
 
         function updateUI(refreshDiskon = true) {
+            savePosDraft();
             // Render cart in both desktop and mobile containers
             const cartHTML = buildCartHTML();
             const desktopCart = document.getElementById('cart-container');
@@ -3152,6 +3359,7 @@ catat_view_once($pdo, 'Mesin Kasir', 'Membuka halaman Mesin Kasir');
                             qty: parseInt(i.qty)
                         })),
                         bayar,
+                        metode_pembayaran: selectedMethod,
                         member_id: activeMember ? activeMember.id : null,
                         point_pakai: activeMember ? pointRedeem : 0
                     })
@@ -3175,7 +3383,7 @@ catat_view_once($pdo, 'Mesin Kasir', 'Membuka halaman Mesin Kasir');
                         info.innerText = current + `Tukar point: -${formatRp(d.nilai_point_pakai||0)} (${d.point_pakai} pt)`;
                         info.classList.remove('hidden');
                     }
-                    document.getElementById('success-kembalian').innerText = selectedMethod === 'tunai' ? 'Kembalian: ' + formatRp(d.kembalian) : 'QRIS – Lunas ✓';
+                    document.getElementById('success-kembalian').innerText = (d.metode_pembayaran || selectedMethod) === 'tunai' ? 'Kembalian: ' + formatRp(d.kembalian) : 'Non Tunai (' + String(d.metode_pembayaran || selectedMethod).toUpperCase() + ') – Lunas ✓';
                     const pw = document.getElementById('success-point-wrap');
                     if (activeMember && d.point_dapat > 0) {
                         document.getElementById('success-point-dapat').innerText = `+${d.point_dapat} point diperoleh transaksi ini`;
@@ -3191,6 +3399,8 @@ catat_view_once($pdo, 'Mesin Kasir', 'Membuka halaman Mesin Kasir');
                         btBar.innerText = '';
                     }
                     prepareReceiptData(d);
+                    // Transaksi sudah selesai: hapus draft agar tidak muncul kembali saat pindah halaman.
+                    clearPosDraft();
                     document.getElementById('link-struk-fallback').href = 'struk.php?invoice=' + encodeURIComponent(d.invoice) + '&print=1';
                     document.getElementById('success-modal').style.display = 'flex';
                     showThankYouDisplay(d);
@@ -3216,7 +3426,7 @@ catat_view_once($pdo, 'Mesin Kasir', 'Membuka halaman Mesin Kasir');
             const bi = document.getElementById('bayar-input');
             if (bi) bi.value = '';
             document.getElementById('success-modal').style.display = 'none';
-            closeMobileCart();
+            forceMobileCartOpen();
             setTimeout(() => document.getElementById('search-input')?.focus(), 100);
         }
 
@@ -3341,6 +3551,10 @@ catat_view_once($pdo, 'Mesin Kasir', 'Membuka halaman Mesin Kasir');
                 });
                 inp.focus();
             }
+            forceMobileCartOpen();
+            window.addEventListener('resize', forceMobileCartOpen);
+            window.addEventListener('beforeunload', savePosDraft);
+
             document.addEventListener('click', e => {
                 const mi = document.getElementById('member-input'),
                     ms = document.getElementById('member-suggest'),

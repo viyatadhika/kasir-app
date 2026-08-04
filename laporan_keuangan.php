@@ -148,6 +148,158 @@ if (!function_exists('ambil_saldo_coa_lk')) {
     }
 }
 
+
+
+if (!function_exists('table_columns_lk')) {
+    /** @return array<int,string> */
+    function table_columns_lk(PDO $pdo, string $table): array
+    {
+        static $cache = [];
+        if (isset($cache[$table])) {
+            return $cache[$table];
+        }
+
+        try {
+            $stmt = $pdo->query("SHOW COLUMNS FROM `" . str_replace('`', '', $table) . "`");
+            $cache[$table] = $stmt ? $stmt->fetchAll(PDO::FETCH_COLUMN) : [];
+        } catch (Throwable $e) {
+            $cache[$table] = [];
+        }
+
+        return $cache[$table];
+    }
+}
+
+if (!function_exists('rekonsiliasi_kas_bank_lk')) {
+    /**
+     * Menghitung penerimaan POS langsung dari tabel transaksi agar pembayaran
+     * QRIS/non-tunai tidak salah masuk ke Kas. Jurnal POS lama dikeluarkan dari
+     * perhitungan akun 101/102, lalu dibangun ulang berdasarkan metode bayar.
+     *
+     * @return array{kas:float,bank:float,rincian:array<string,float>}
+     */
+    function rekonsiliasi_kas_bank_lk(PDO $pdo, string $awal, string $akhir): array
+    {
+        $result = [
+            'kas' => 0.0,
+            'bank' => 0.0,
+            'rincian' => [],
+        ];
+
+        $cols = table_columns_lk($pdo, 'transaksi');
+        if (!$cols || !in_array('created_at', $cols, true) || !in_array('total', $cols, true)) {
+            return $result;
+        }
+
+        $methodCandidates = ['metode_pembayaran', 'payment_method', 'metode', 'jenis_pembayaran', 'tipe_pembayaran'];
+        $methodParts = [];
+        foreach ($methodCandidates as $candidate) {
+            if (in_array($candidate, $cols, true)) {
+                $methodParts[] = "NULLIF(TRIM(CAST(`{$candidate}` AS CHAR)), '')";
+            }
+        }
+
+        $methodExpr = $methodParts
+            ? 'COALESCE(' . implode(', ', $methodParts) . ", 'tunai')"
+            : "'tunai'";
+
+        $sql = "
+            SELECT
+                LOWER(REPLACE(REPLACE(REPLACE({$methodExpr}, '-', '_'), ' ', '_'), '/', '_')) AS metode,
+                COALESCE(SUM(total), 0) AS jumlah
+            FROM transaksi
+            WHERE DATE(created_at) BETWEEN :awal AND :akhir
+            GROUP BY LOWER(REPLACE(REPLACE(REPLACE({$methodExpr}, '-', '_'), ' ', '_'), '/', '_'))
+        ";
+
+        $stmt = $pdo->prepare($sql);
+        $stmt->execute([':awal' => $awal, ':akhir' => $akhir]);
+
+        $cashMethods = ['tunai', 'cash', 'uang_tunai'];
+        foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
+            $method = strtolower(trim((string)($row['metode'] ?? 'tunai')));
+            if ($method === '') {
+                $method = 'tunai';
+            }
+
+            $amount = (float)($row['jumlah'] ?? 0);
+            $result['rincian'][$method] = ($result['rincian'][$method] ?? 0) + $amount;
+
+            if (in_array($method, $cashMethods, true)) {
+                $result['kas'] += $amount;
+            } else {
+                // QRIS, transfer, debit, kredit, EDC, dan non_tunai masuk Bank.
+                $result['bank'] += $amount;
+            }
+        }
+
+        return $result;
+    }
+}
+
+if (!function_exists('saldo_non_pos_akun_lk')) {
+    /** @return array{debit:float,kredit:float} */
+    function saldo_non_pos_akun_lk(PDO $pdo, string $kodeAkun, string $awal, string $akhir): array
+    {
+        $stmt = $pdo->prepare("
+            SELECT
+                COALESCE(SUM(jd.debit), 0) AS debit,
+                COALESCE(SUM(jd.kredit), 0) AS kredit
+            FROM coa c
+            LEFT JOIN jurnal_detail jd ON jd.coa_id = c.id
+            LEFT JOIN jurnal_umum ju ON ju.id = jd.jurnal_id
+            WHERE c.kode = :kode
+              AND ju.tanggal BETWEEN :awal AND :akhir
+              AND (
+                    ju.ref_tabel IS NULL
+                    OR TRIM(ju.ref_tabel) = ''
+                    OR LOWER(ju.ref_tabel) NOT IN ('transaksi', 'transaksi_pos', 'pos', 'penjualan_pos')
+                  )
+        ");
+        $stmt->execute([':kode' => $kodeAkun, ':awal' => $awal, ':akhir' => $akhir]);
+        $row = $stmt->fetch(PDO::FETCH_ASSOC) ?: [];
+
+        return [
+            'debit' => (float)($row['debit'] ?? 0),
+            'kredit' => (float)($row['kredit'] ?? 0),
+        ];
+    }
+}
+
+if (!function_exists('terapkan_rekonsiliasi_kas_bank_lk')) {
+    /**
+     * @param array<int,array<string,mixed>> $rows
+     * @return array<int,array<string,mixed>>
+     */
+    function terapkan_rekonsiliasi_kas_bank_lk(PDO $pdo, array $rows, string $awal, string $akhir, array $pos): array
+    {
+        foreach ($rows as &$row) {
+            $kode = trim((string)($row['kode'] ?? ''));
+            if (!in_array($kode, ['101', '102'], true)) {
+                continue;
+            }
+
+            $nonPos = saldo_non_pos_akun_lk($pdo, $kode, $awal, $akhir);
+            $penerimaanPos = $kode === '101' ? (float)$pos['kas'] : (float)$pos['bank'];
+
+            $row['total_debit'] = $nonPos['debit'] + $penerimaanPos;
+            $row['total_kredit'] = $nonPos['kredit'];
+            $row['saldo'] = saldo_normal_lk(
+                (string)($row['kategori'] ?? 'aktiva'),
+                (float)$row['total_debit'],
+                (float)$row['total_kredit']
+            );
+            $row['rekonsiliasi_pos'] = $penerimaanPos;
+            $row['sumber_saldo'] = $kode === '101'
+                ? 'Transaksi tunai + jurnal non-POS'
+                : 'QRIS/non-tunai + jurnal non-POS';
+        }
+        unset($row);
+
+        return $rows;
+    }
+}
+
 if (!function_exists('sum_kategori_lk')) {
     /**
      * @param array<int,array<string,mixed>> $rows
@@ -174,9 +326,21 @@ $akhir = $periode['akhir'];
 
 $rows = [];
 $recentJurnal = [];
+$rekonsiliasiPembayaran = ['kas' => 0.0, 'bank' => 0.0, 'rincian' => []];
 
 try {
     $rows = ambil_saldo_coa_lk($pdo, $periode['where'], $periode['params']);
+
+    // Rekonsiliasi akun Kas (101) dan Bank (102) langsung dari metode pembayaran POS.
+    // Dengan ini QRIS/non-tunai tidak lagi ikut terhitung sebagai Kas.
+    $rekonsiliasiPembayaran = rekonsiliasi_kas_bank_lk($pdo, $awal, $akhir);
+    $rows = terapkan_rekonsiliasi_kas_bank_lk(
+        $pdo,
+        $rows,
+        $awal,
+        $akhir,
+        $rekonsiliasiPembayaran
+    );
 
     $stmtRecent = $pdo->prepare("
         SELECT
@@ -401,6 +565,35 @@ if (function_exists('catat_view_once')) {
                 </a>
             </div>
 
+            <section class="bg-white border border-subtle p-4 md:p-5">
+                <div class="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
+                    <div>
+                        <h2 class="text-[10px] font-black uppercase tracking-widest text-gray-400">Rekonsiliasi Pembayaran POS</h2>
+                        <p class="text-xs text-gray-400 mt-1">Kas berasal dari transaksi tunai. Bank berasal dari QRIS, transfer, debit, kredit, EDC, dan metode non-tunai lainnya.</p>
+                    </div>
+                    <div class="grid grid-cols-2 gap-3 min-w-full lg:min-w-[420px]">
+                        <div class="border border-subtle bg-gray-50 p-3">
+                            <p class="text-[9px] font-black uppercase tracking-widest text-gray-400">Kas POS (Tunai)</p>
+                            <p class="text-lg font-black mt-1"><?= rupiah_lk($rekonsiliasiPembayaran['kas'] ?? 0) ?></p>
+                        </div>
+                        <div class="border border-blue-100 bg-blue-50 p-3">
+                            <p class="text-[9px] font-black uppercase tracking-widest text-blue-500">Bank POS (Non-Tunai)</p>
+                            <p class="text-lg font-black text-blue-700 mt-1"><?= rupiah_lk($rekonsiliasiPembayaran['bank'] ?? 0) ?></p>
+                        </div>
+                    </div>
+                </div>
+                <?php if (!empty($rekonsiliasiPembayaran['rincian'])): ?>
+                    <div class="mt-4 flex flex-wrap gap-2">
+                        <?php foreach ($rekonsiliasiPembayaran['rincian'] as $metode => $nilai): ?>
+                            <span class="inline-flex items-center gap-2 border border-subtle bg-white px-3 py-2 text-[10px] font-bold uppercase tracking-wide">
+                                <?= h(str_replace('_', ' ', $metode)) ?>
+                                <strong><?= rupiah_lk($nilai) ?></strong>
+                            </span>
+                        <?php endforeach; ?>
+                    </div>
+                <?php endif; ?>
+            </section>
+
             <div class="grid grid-cols-1 xl:grid-cols-3 gap-5">
                 <section class="xl:col-span-2 bg-white border border-subtle overflow-hidden">
                     <div class="px-5 py-4 border-b border-subtle flex items-center justify-between">
@@ -432,6 +625,9 @@ if (function_exists('catat_view_once')) {
                                         <td class="px-5 py-3">
                                             <div class="text-sm font-bold"><?= h($r['nama']) ?></div>
                                             <div class="text-[10px] text-gray-400"><?= h($r['subkategori'] ?: '-') ?></div>
+                                            <?php if (!empty($r['sumber_saldo'])): ?>
+                                                <div class="text-[9px] text-blue-600 font-bold mt-1"><?= h($r['sumber_saldo']) ?></div>
+                                            <?php endif; ?>
                                         </td>
                                         <td class="px-5 py-3 text-xs font-bold uppercase text-gray-500"><?= h($r['kategori']) ?></td>
                                         <td class="px-5 py-3 text-right text-xs"><?= rupiah_lk($r['total_debit']) ?></td>

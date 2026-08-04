@@ -192,19 +192,30 @@ if ($_SERVER['REQUEST_METHOD'] === 'GET' && isset($_GET['action']) && in_array($
         $exportWhere[] = 'stok <= 0';
     }
     if ($exportExpiredFilter === 'expired') {
-        $exportWhere[] = "expired_date IS NOT NULL AND expired_date <> '0000-00-00' AND expired_date < CURDATE()";
+        $exportWhere[] = "expired_date IS NOT NULL AND YEAR(expired_date) >= 1000 AND expired_date < CURDATE()";
     } elseif ($exportExpiredFilter === '30_hari') {
-        $exportWhere[] = "expired_date IS NOT NULL AND expired_date <> '0000-00-00' AND expired_date >= CURDATE() AND expired_date <= DATE_ADD(CURDATE(), INTERVAL 30 DAY)";
+        $exportWhere[] = "expired_date IS NOT NULL AND YEAR(expired_date) >= 1000 AND expired_date >= CURDATE() AND expired_date <= DATE_ADD(CURDATE(), INTERVAL 30 DAY)";
     } elseif ($exportExpiredFilter === '90_hari') {
-        $exportWhere[] = "expired_date IS NOT NULL AND expired_date <> '0000-00-00' AND expired_date >= CURDATE() AND expired_date <= DATE_ADD(CURDATE(), INTERVAL 90 DAY)";
+        $exportWhere[] = "expired_date IS NOT NULL AND YEAR(expired_date) >= 1000 AND expired_date >= CURDATE() AND expired_date <= DATE_ADD(CURDATE(), INTERVAL 90 DAY)";
     } elseif ($exportExpiredFilter === 'tanpa_tanggal') {
-        $exportWhere[] = "(expired_date IS NULL OR expired_date = '0000-00-00')";
+        $exportWhere[] = "(expired_date IS NULL OR YEAR(expired_date) = 0)";
     }
 
     $exportWhereStr = implode(' AND ', $exportWhere);
-    $exportStmt = $pdo->prepare("SELECT * FROM produk WHERE {$exportWhereStr} ORDER BY kategori ASC, nama ASC");
-    $exportStmt->execute($exportParams);
-    $exportRows = $exportStmt->fetchAll(PDO::FETCH_ASSOC);
+    try {
+        $exportStmt = $pdo->prepare("SELECT * FROM produk WHERE {$exportWhereStr} ORDER BY kategori ASC, nama ASC");
+        $exportStmt->execute($exportParams);
+        $exportRows = $exportStmt->fetchAll(PDO::FETCH_ASSOC);
+    } catch (Throwable $e) {
+        error_log('EXPORT PRODUK ERROR: ' . $e->getMessage());
+        http_response_code(500);
+        echo '<!doctype html><html lang="id"><head><meta charset="utf-8"><title>Gagal Membuka Laporan</title></head><body style="font-family:Arial;padding:24px">';
+        echo '<h2>Gagal membuka laporan produk</h2>';
+        echo '<p>Periksa data tanggal kedaluwarsa dan struktur tabel produk.</p>';
+        echo '<p><a href="produk.php">Kembali ke halaman Produk</a></p>';
+        echo '</body></html>';
+        exit;
+    }
 
     $totalStok = 0;
     $totalNilaiBeli = 0;
@@ -755,13 +766,13 @@ if ($stokFilter === 'limit') {
 }
 
 if ($expiredFilter === 'expired') {
-    $where[] = "expired_date IS NOT NULL AND expired_date < CURDATE()";
+    $where[] = "expired_date IS NOT NULL AND YEAR(expired_date) >= 1000 AND expired_date < CURDATE()";
 } elseif ($expiredFilter === '30_hari') {
-    $where[] = "expired_date IS NOT NULL AND expired_date >= CURDATE() AND expired_date <= DATE_ADD(CURDATE(), INTERVAL 30 DAY)";
+    $where[] = "expired_date IS NOT NULL AND YEAR(expired_date) >= 1000 AND expired_date >= CURDATE() AND expired_date <= DATE_ADD(CURDATE(), INTERVAL 30 DAY)";
 } elseif ($expiredFilter === '90_hari') {
-    $where[] = "expired_date IS NOT NULL AND expired_date >= CURDATE() AND expired_date <= DATE_ADD(CURDATE(), INTERVAL 90 DAY)";
+    $where[] = "expired_date IS NOT NULL AND YEAR(expired_date) >= 1000 AND expired_date >= CURDATE() AND expired_date <= DATE_ADD(CURDATE(), INTERVAL 90 DAY)";
 } elseif ($expiredFilter === 'tanpa_tanggal') {
-    $where[] = "expired_date IS NULL";
+    $where[] = "(expired_date IS NULL OR YEAR(expired_date) = 0)";
 }
 
 $whereStr = implode(' AND ', $where);
@@ -812,8 +823,8 @@ $stmtSummary = $pdo->prepare("
         SUM(CASE WHEN status = 'aktif' THEN 1 ELSE 0 END) AS aktif,
         SUM(CASE WHEN stok <= stok_minimum THEN 1 ELSE 0 END) AS low_stock,
         SUM(CASE WHEN stok = 0 THEN 1 ELSE 0 END) AS habis,
-        SUM(CASE WHEN expired_date IS NOT NULL AND expired_date < CURDATE() THEN 1 ELSE 0 END) AS expired,
-        SUM(CASE WHEN expired_date IS NOT NULL AND expired_date >= CURDATE() AND expired_date <= DATE_ADD(CURDATE(), INTERVAL 30 DAY) THEN 1 ELSE 0 END) AS expired_soon,
+        SUM(CASE WHEN expired_date IS NOT NULL AND YEAR(expired_date) >= 1000 AND expired_date < CURDATE() THEN 1 ELSE 0 END) AS expired,
+        SUM(CASE WHEN expired_date IS NOT NULL AND YEAR(expired_date) >= 1000 AND expired_date >= CURDATE() AND expired_date <= DATE_ADD(CURDATE(), INTERVAL 30 DAY) THEN 1 ELSE 0 END) AS expired_soon,
         SUM(harga_jual * stok) AS nilai_stok
     FROM produk
     WHERE $summaryWhere
