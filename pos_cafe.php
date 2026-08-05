@@ -15,14 +15,15 @@ $backUrl    = 'dashboard.php';
 date_default_timezone_set('Asia/Jakarta');
 
 if (!function_exists('cafe_e')) {
-    function cafe_e($value)
+    /** @param mixed $value */
+    function cafe_e($value): string
     {
         return htmlspecialchars((string)($value === null ? '' : $value), ENT_QUOTES, 'UTF-8');
     }
 }
 
 if (!function_exists('cafe_current_user_id')) {
-    function cafe_current_user_id()
+    function cafe_current_user_id(): int
     {
         foreach (array('user_id', 'id_user', 'id', 'admin_id') as $key) {
             if (!empty($_SESSION[$key])) {
@@ -37,7 +38,7 @@ if (!function_exists('cafe_current_user_id')) {
 }
 
 if (!function_exists('cafe_current_user_name')) {
-    function cafe_current_user_name()
+    function cafe_current_user_name(): string
     {
         foreach (array('nama', 'name', 'username', 'user_name') as $key) {
             if (!empty($_SESSION[$key])) {
@@ -57,7 +58,11 @@ if (!function_exists('cafe_current_user_name')) {
     }
 }
 
-function cafe_has_column(PDO $pdo, $table, $column)
+/**
+ * @param string $table
+ * @param string $column
+ */
+function cafe_has_column(PDO $pdo, string $table, string $column): bool
 {
     try {
         $stmt = $pdo->prepare("SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = :table_name AND COLUMN_NAME = :column_name");
@@ -68,7 +73,7 @@ function cafe_has_column(PDO $pdo, $table, $column)
     }
 }
 
-function cafe_ensure_database(PDO $pdo)
+function cafe_ensure_database(PDO $pdo): void
 {
     // Struktur disamakan dengan meja_cafe.php dan dapur.php.
     $pdo->exec("CREATE TABLE IF NOT EXISTS cafe_meja (
@@ -164,7 +169,8 @@ cafe_ensure_database($pdo);
 $userId       = cafe_current_user_id();
 $operatorName = cafe_current_user_name();
 
-function cafe_get_open_cash(PDO $pdo, $userId)
+/** @return array<string,mixed>|null */
+function cafe_get_open_cash(PDO $pdo, int $userId): ?array
 {
     $stmt = $pdo->prepare("SELECT * FROM kas_harian WHERE user_id = :user_id AND status = 'buka' ORDER BY opened_at ASC, id ASC LIMIT 1");
     $stmt->execute(array(':user_id' => (int)$userId));
@@ -172,7 +178,8 @@ function cafe_get_open_cash(PDO $pdo, $userId)
     return $row ? $row : null;
 }
 
-function cafe_json($payload, $statusCode = 200)
+/** @param array<string,mixed> $payload */
+function cafe_json(array $payload, int $statusCode = 200): void
 {
     while (ob_get_level() > 0) {
         @ob_end_clean();
@@ -184,17 +191,18 @@ function cafe_json($payload, $statusCode = 200)
     exit;
 }
 
-function cafe_generate_invoice()
+function cafe_generate_invoice(): string
 {
     return 'CF-' . date('Ymd-His') . '-' . random_int(100, 999);
 }
 
-function cafe_generate_order_number()
+function cafe_generate_order_number(): string
 {
     return 'ORD-' . date('ymd-His') . '-' . random_int(10, 99);
 }
 
-function cafe_columns(PDO $pdo, $table)
+/** @return array<int,string> */
+function cafe_columns(PDO $pdo, string $table): array
 {
     try {
         return $pdo->query("SHOW COLUMNS FROM `" . str_replace('`', '', $table) . "`")->fetchAll(PDO::FETCH_COLUMN);
@@ -203,7 +211,7 @@ function cafe_columns(PDO $pdo, $table)
     }
 }
 
-function cafe_update_open_cash(PDO $pdo, $cashId, $total, $method, $margin)
+function cafe_update_open_cash(PDO $pdo, int $cashId, float $total, string $method, float $margin): void
 {
     $isCash = in_array(strtolower($method), array('tunai', 'cash'), true);
     $stmt = $pdo->prepare("UPDATE kas_harian SET
@@ -243,9 +251,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_GET['action'])) {
         if ($action === 'menu') {
             $produkCols = cafe_columns($pdo, 'produk');
             $hasType = in_array('tipe_produk', $produkCols, true);
+            // POS Cafe hanya menampilkan produk yang memang ditandai sebagai menu cafe.
+            // Produk toko/retail tidak ditampilkan meskipun nama kategorinya mengandung
+            // kata makanan, minuman, atau cafe.
             $whereType = $hasType
-                ? "AND (tipe_produk IN ('makanan','minuman','topping','cafe') OR kategori LIKE '%makanan%' OR kategori LIKE '%minuman%' OR kategori LIKE '%cafe%')"
-                : "AND (kategori LIKE '%makanan%' OR kategori LIKE '%minuman%' OR kategori LIKE '%cafe%')";
+                ? "AND LOWER(TRIM(tipe_produk)) = 'cafe'"
+                : "AND 1=0";
 
             $hargaBeliSelect = in_array('harga_beli', $produkCols, true) ? ', harga_beli' : ', 0 AS harga_beli';
             $satuanSelect = in_array('satuan', $produkCols, true) ? ', satuan' : ", 'pcs' AS satuan";
@@ -312,7 +323,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_GET['action'])) {
             $placeholders = implode(',', array_fill(0, count($ids), '?'));
             $produkColsSave = cafe_columns($pdo, 'produk');
             $hargaBeliSave = in_array('harga_beli', $produkColsSave, true) ? 'harga_beli' : '0 AS harga_beli';
-            $stmtProducts = $pdo->prepare("SELECT id, kode, nama, harga_jual, $hargaBeliSave, stok FROM produk WHERE id IN ($placeholders) AND status='aktif' FOR UPDATE");
+            $whereSaveType = in_array('tipe_produk', $produkColsSave, true)
+                ? " AND LOWER(TRIM(tipe_produk)) = 'cafe'"
+                : " AND 1=0";
+            $stmtProducts = $pdo->prepare("SELECT id, kode, nama, harga_jual, $hargaBeliSave, stok FROM produk WHERE id IN ($placeholders) AND status='aktif' $whereSaveType FOR UPDATE");
 
             $pdo->beginTransaction();
 
@@ -913,7 +927,7 @@ $cashOpen = cafe_get_open_cash($pdo, $userId);
             const q = (document.getElementById('search').value || '').toLowerCase();
             const rows = MENU.filter(p => (activeCategory === 'Semua' || p.kategori === activeCategory) && ((p.nama || '').toLowerCase().includes(q) || (p.kode || '').toLowerCase().includes(q)));
             const el = document.getElementById('menu-grid');
-            el.innerHTML = rows.length ? rows.map(p => `<article class="menu-card" onclick="addToCart(${Number(p.id)})"><div class="menu-image">${p.gambar?`<img src="${escapeHtml(p.gambar)}" alt="${escapeHtml(p.nama)}">`:'<span class="text-3xl">☕</span>'}</div><h3 class="text-xs font-black leading-snug min-h-[34px]">${escapeHtml(p.nama)}</h3><p class="text-sm font-black mt-2">${rupiah(p.harga_jual)}</p><p class="text-[9px] font-bold uppercase tracking-widest mt-1 ${Number(p.stok)>0?'text-green-600':'text-red-600'}">Stok ${Number(p.stok||0)} ${escapeHtml(p.satuan||'')}</p></article>`).join('') : '<div class="col-span-full py-20 text-center text-xs font-bold text-gray-400 uppercase">Belum ada menu cafe. Atur tipe produk menjadi makanan, minuman, topping, atau cafe.</div>'
+            el.innerHTML = rows.length ? rows.map(p => `<article class="menu-card" onclick="addToCart(${Number(p.id)})"><div class="menu-image">${p.gambar?`<img src="${escapeHtml(p.gambar)}" alt="${escapeHtml(p.nama)}">`:'<span class="text-3xl">☕</span>'}</div><h3 class="text-xs font-black leading-snug min-h-[34px]">${escapeHtml(p.nama)}</h3><p class="text-sm font-black mt-2">${rupiah(p.harga_jual)}</p><p class="text-[9px] font-bold uppercase tracking-widest mt-1 ${Number(p.stok)>0?'text-green-600':'text-red-600'}">Stok ${Number(p.stok||0)} ${escapeHtml(p.satuan||'')}</p></article>`).join('') : '<div class="col-span-full py-20 text-center text-xs font-bold text-gray-400 uppercase">Belum ada menu cafe. Atur tipe_produk menjadi cafe pada halaman Menu Cafe.</div>'
         }
 
         function renderCategories() {

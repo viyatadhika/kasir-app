@@ -283,6 +283,20 @@ $strukTerakhir      = [];
 $fastMoving         = [];
 $chartLabels        = [];
 $chartData          = [];
+
+// Dashboard khusus Cafe
+$cafeSummary = [
+    'total_sales' => 0,
+    'jumlah_struk' => 0,
+    'tunai' => 0,
+    'nontunai' => 0,
+    'avg_struk' => 0,
+];
+$cafeStatusPesanan = ['baru' => 0, 'diproses' => 0, 'siap' => 0, 'selesai' => 0];
+$cafeMeja = ['total' => 0, 'kosong' => 0, 'terisi' => 0, 'reservasi' => 0];
+$cafePesananTerakhir = [];
+$cafeMenuTerlaris = [];
+$cafeStokMenipis = [];
 $ringkasanRental    = ['total_order' => 0, 'total_pendapatan' => 0];
 $orderRentalTerbaru = [];
 $totalDriver        = 0;
@@ -611,7 +625,7 @@ if (has_role('admin', 'kasir', 'cafe')) {
 }
 
 // ── Data: Admin & Kasir ──────────────────────────────────────────────────────
-if (has_role('admin', 'kasir', 'cafe')) {
+if (has_role('admin', 'kasir')) {
 
     $stmtSales = $pdo->prepare("
         SELECT COALESCE(SUM(total), 0) AS total_sales, COUNT(*) AS jumlah_struk
@@ -720,6 +734,84 @@ if (has_role('admin', 'kasir', 'cafe')) {
             }
         }
         if (!$found) $chartData[] = 0;
+    }
+}
+
+// ── Data: Dashboard khusus Kasir Cafe ───────────────────────────────────────
+if (has_role('cafe')) {
+    try {
+        $sourceFilter = dashboard_has_column($pdo, 'transaksi', 'sumber_transaksi')
+            ? " AND LOWER(COALESCE(t.sumber_transaksi,'')) = 'cafe'"
+            : " AND 1=0";
+
+        $paymentCol = dashboard_first_column($pdo, 'transaksi', ['metode_pembayaran', 'payment_method', 'metode_bayar', 'jenis_bayar', 'pembayaran']);
+        $paymentExpr = $paymentCol !== '' ? "LOWER(TRIM(COALESCE(t.`$paymentCol`,'')))" : "'tunai'";
+
+        $stmtCafeSummary = $pdo->prepare("\n            SELECT\n                COALESCE(SUM(t.total),0) AS total_sales,\n                COUNT(*) AS jumlah_struk,\n                COALESCE(SUM(CASE WHEN $paymentExpr IN ('tunai','cash','uang tunai') THEN t.total ELSE 0 END),0) AS tunai,\n                COALESCE(SUM(CASE WHEN $paymentExpr NOT IN ('tunai','cash','uang tunai','') THEN t.total ELSE 0 END),0) AS nontunai\n            FROM transaksi t\n            WHERE DATE(t.created_at) = :today $sourceFilter\n        ");
+        $stmtCafeSummary->execute([':today' => $today]);
+        $cafeSummary = array_merge($cafeSummary, $stmtCafeSummary->fetch(PDO::FETCH_ASSOC) ?: []);
+        $cafeSummary['avg_struk'] = (int)$cafeSummary['jumlah_struk'] > 0
+            ? (float)$cafeSummary['total_sales'] / (int)$cafeSummary['jumlah_struk']
+            : 0;
+
+        if (dashboard_has_table($pdo, 'cafe_pesanan')) {
+            $stmtCafeStatus = $pdo->prepare("\n                SELECT status, COUNT(*) AS total\n                FROM cafe_pesanan\n                WHERE DATE(created_at) = :today\n                GROUP BY status\n            ");
+            $stmtCafeStatus->execute([':today' => $today]);
+            foreach ($stmtCafeStatus->fetchAll(PDO::FETCH_ASSOC) as $row) {
+                $st = strtolower((string)($row['status'] ?? ''));
+                if (array_key_exists($st, $cafeStatusPesanan)) {
+                    $cafeStatusPesanan[$st] = (int)$row['total'];
+                }
+            }
+        }
+
+        if (dashboard_has_table($pdo, 'cafe_meja')) {
+            $stmtCafeMeja = $pdo->query("\n                SELECT status, COUNT(*) AS total\n                FROM cafe_meja\n                WHERE status <> 'nonaktif'\n                GROUP BY status\n            ");
+            foreach ($stmtCafeMeja->fetchAll(PDO::FETCH_ASSOC) as $row) {
+                $st = strtolower((string)($row['status'] ?? ''));
+                $cafeMeja['total'] += (int)$row['total'];
+                if (array_key_exists($st, $cafeMeja)) $cafeMeja[$st] = (int)$row['total'];
+            }
+        }
+
+        $joinPesanan = dashboard_has_table($pdo, 'cafe_pesanan') ? " LEFT JOIN cafe_pesanan cp ON cp.transaksi_id = t.id " : '';
+        $joinMeja = dashboard_has_table($pdo, 'cafe_meja') && dashboard_has_table($pdo, 'cafe_pesanan') ? " LEFT JOIN cafe_meja cm ON cm.id = cp.meja_id " : '';
+        $selectPesanan = dashboard_has_table($pdo, 'cafe_pesanan')
+            ? "cp.nomor_pesanan, cp.tipe_pesanan, cp.status AS status_pesanan"
+            : "NULL AS nomor_pesanan, NULL AS tipe_pesanan, NULL AS status_pesanan";
+        $selectMeja = $joinMeja !== '' ? "cm.nomor_meja" : "NULL AS nomor_meja";
+
+        $stmtCafeLast = $pdo->prepare("\n            SELECT t.id, t.invoice, t.total, t.created_at, u.nama AS kasir,\n                   $selectPesanan, $selectMeja\n            FROM transaksi t\n            LEFT JOIN users u ON u.id = t.user_id\n            $joinPesanan\n            $joinMeja\n            WHERE DATE(t.created_at) = :today $sourceFilter\n            ORDER BY t.created_at DESC, t.id DESC\n            LIMIT 6\n        ");
+        $stmtCafeLast->execute([':today' => $today]);
+        $cafePesananTerakhir = $stmtCafeLast->fetchAll(PDO::FETCH_ASSOC);
+
+        $stmtCafeTop = $pdo->prepare("\n            SELECT td.nama, SUM(td.qty) AS total_qty, SUM(td.subtotal) AS omzet\n            FROM transaksi_detail td\n            JOIN transaksi t ON t.id = td.transaksi_id\n            WHERE DATE(t.created_at) = :today $sourceFilter\n            GROUP BY td.produk_id, td.nama\n            ORDER BY total_qty DESC, omzet DESC\n            LIMIT 6\n        ");
+        $stmtCafeTop->execute([':today' => $today]);
+        $cafeMenuTerlaris = $stmtCafeTop->fetchAll(PDO::FETCH_ASSOC);
+
+        if (dashboard_has_column($pdo, 'produk', 'tipe_produk')) {
+            $stmtCafeStok = $pdo->query("\n                SELECT id, nama, stok, stok_minimum, kategori\n                FROM produk\n                WHERE LOWER(COALESCE(tipe_produk,'')) = 'cafe'\n                  AND status = 'aktif'\n                  AND stok <= stok_minimum\n                ORDER BY stok ASC, nama ASC\n                LIMIT 6\n            ");
+            $cafeStokMenipis = $stmtCafeStok->fetchAll(PDO::FETCH_ASSOC);
+        }
+
+        $stmtCafeJam = $pdo->prepare("\n            SELECT HOUR(t.created_at) AS jam, COALESCE(SUM(t.total),0) AS sales\n            FROM transaksi t\n            WHERE DATE(t.created_at) = :today $sourceFilter\n            GROUP BY HOUR(t.created_at)\n            ORDER BY jam ASC\n        ");
+        $stmtCafeJam->execute([':today' => $today]);
+        $salesPerJam = $stmtCafeJam->fetchAll(PDO::FETCH_ASSOC);
+        $chartLabels = [];
+        $chartData = [];
+        for ($h = 6; $h <= 22; $h++) {
+            $chartLabels[] = str_pad((string)$h, 2, '0', STR_PAD_LEFT);
+            $nilai = 0;
+            foreach ($salesPerJam as $row) {
+                if ((int)$row['jam'] === $h) {
+                    $nilai = (float)$row['sales'];
+                    break;
+                }
+            }
+            $chartData[] = round($nilai / 1000000, 2);
+        }
+    } catch (Throwable $e) {
+        error_log('DASHBOARD CAFE ERROR: ' . $e->getMessage());
     }
 }
 
@@ -1305,7 +1397,9 @@ $title = 'Dashboard - ' . ($_SESSION['nama'] ?? 'SEJAHUB');
         <!-- ── Header ──────────────────────────────────────────────────────────── -->
         <header class="dashboard-header-main flex flex-col md:flex-row justify-between items-start md:items-end mb-8 md:mb-12 gap-4">
             <div>
-                <?php if (has_role('admin', 'kasir', 'cafe')): ?>
+                <?php if (has_role('cafe')): ?>
+                    <h1 class="text-xl md:text-2xl font-light tracking-tight">Operasional Cafe &ndash; <span class="font-semibold"><?php echo htmlspecialchars($_SESSION['nama'] ?? '', ENT_QUOTES, 'UTF-8'); ?></span></h1>
+                <?php elseif (has_role('admin', 'kasir')): ?>
                     <h1 class="text-xl md:text-2xl font-light tracking-tight">
                         Shift 01 &ndash; <span class="font-semibold"><?php echo htmlspecialchars($_SESSION['nama'] ?? '', ENT_QUOTES, 'UTF-8'); ?></span>
                     </h1>
@@ -1358,13 +1452,132 @@ $title = 'Dashboard - ' . ($_SESSION['nama'] ?? 'SEJAHUB');
         </header>
 
         <?php if (has_role('cafe')): ?>
-            <div class="mb-5 border border-amber-200 bg-amber-50 px-4 py-3">
-                <p class="text-[10px] font-black uppercase tracking-widest text-amber-700">Dashboard Operasional Cafe</p>
-                <p class="text-xs text-amber-700 mt-1">Gunakan Mesin Kasir Cafe untuk dine in, takeaway, meja, dan antrean dapur.</p>
-            </div>
+            <section class="dashboard-role-section cafe-dashboard">
+                <div class="grid grid-cols-2 md:grid-cols-4 xl:grid-cols-6 gap-3 mb-6">
+                    <div class="kas-monitor-card p-4 xl:col-span-2">
+                        <p class="text-[9px] font-black uppercase tracking-widest text-gray-400">Omzet Cafe Hari Ini</p>
+                        <p class="text-2xl md:text-3xl font-black text-amber-700 mt-2"><?php echo formatRp($cafeSummary['total_sales']); ?></p>
+                        <p class="text-[10px] text-gray-400 mt-1"><?php echo number_format((int)$cafeSummary['jumlah_struk']); ?> transaksi terbayar</p>
+                    </div>
+                    <div class="kas-monitor-card p-4">
+                        <p class="text-[9px] font-black uppercase tracking-widest text-gray-400">Rata-rata Order</p>
+                        <p class="text-xl font-black mt-2"><?php echo formatRp($cafeSummary['avg_struk']); ?></p>
+                        <p class="text-[10px] text-gray-400 mt-1">Per transaksi</p>
+                    </div>
+                    <div class="kas-monitor-card p-4">
+                        <p class="text-[9px] font-black uppercase tracking-widest text-gray-400">Meja Terisi</p>
+                        <p class="text-xl font-black text-red-600 mt-2"><?php echo number_format((int)$cafeMeja['terisi']); ?> / <?php echo number_format((int)$cafeMeja['total']); ?></p>
+                        <p class="text-[10px] text-gray-400 mt-1"><?php echo number_format((int)$cafeMeja['kosong']); ?> meja kosong</p>
+                    </div>
+                    <div class="kas-monitor-card p-4">
+                        <p class="text-[9px] font-black uppercase tracking-widest text-gray-400">Sedang Diproses</p>
+                        <p class="text-xl font-black text-blue-600 mt-2"><?php echo number_format((int)$cafeStatusPesanan['diproses']); ?></p>
+                        <p class="text-[10px] text-gray-400 mt-1"><?php echo number_format((int)$cafeStatusPesanan['baru']); ?> pesanan baru</p>
+                    </div>
+                    <div class="kas-monitor-card p-4">
+                        <p class="text-[9px] font-black uppercase tracking-widest text-gray-400">Siap Disajikan</p>
+                        <p class="text-xl font-black text-green-600 mt-2"><?php echo number_format((int)$cafeStatusPesanan['siap']); ?></p>
+                        <p class="text-[10px] text-gray-400 mt-1">Menunggu diantar</p>
+                    </div>
+                </div>
+
+                <div class="grid grid-cols-1 xl:grid-cols-3 gap-6 mb-8">
+                    <div class="xl:col-span-2 kas-monitor-card overflow-hidden">
+                        <div class="px-5 py-4 border-b border-gray-100 flex items-center justify-between">
+                            <div>
+                                <p class="text-[10px] font-black uppercase tracking-widest text-gray-400">Pesanan Cafe Terakhir</p>
+                                <p class="text-xs text-gray-400 mt-1">Dine in dan takeaway hari ini</p>
+                            </div>
+                            <a href="laporan.php" class="text-[9px] font-black uppercase tracking-widest underline">Lihat Laporan</a>
+                        </div>
+                        <div class="divide-y divide-gray-100">
+                            <?php if (empty($cafePesananTerakhir)): ?>
+                                <div class="p-10 text-center text-xs font-bold text-gray-400">Belum ada pesanan cafe hari ini.</div>
+                            <?php endif; ?>
+                            <?php foreach ($cafePesananTerakhir as $order): ?>
+                                <?php
+                                $tipe = ($order['tipe_pesanan'] ?? '') === 'takeaway' ? 'Takeaway' : 'Dine In';
+                                $statusOrder = strtolower((string)($order['status_pesanan'] ?? 'selesai'));
+                                $statusClass = $statusOrder === 'siap' ? 'bg-green-50 text-green-700 border-green-200' : ($statusOrder === 'diproses' ? 'bg-blue-50 text-blue-700 border-blue-200' : ($statusOrder === 'baru' ? 'bg-amber-50 text-amber-700 border-amber-200' : 'bg-gray-50 text-gray-700 border-gray-200'));
+                                ?>
+                                <div class="p-4 md:p-5 flex items-center justify-between gap-4">
+                                    <div class="flex items-center gap-3 min-w-0">
+                                        <div class="w-10 h-10 bg-amber-50 border border-amber-100 flex items-center justify-center shrink-0"><i data-lucide="coffee" class="w-5 h-5 text-amber-700"></i></div>
+                                        <div class="min-w-0">
+                                            <p class="text-sm font-black truncate"><?php echo htmlspecialchars((string)($order['nomor_pesanan'] ?: $order['invoice']), ENT_QUOTES, 'UTF-8'); ?></p>
+                                            <p class="text-[10px] text-gray-400 mt-1"><?php echo $tipe; ?><?php echo !empty($order['nomor_meja']) ? ' · Meja ' . htmlspecialchars((string)$order['nomor_meja'], ENT_QUOTES, 'UTF-8') : ''; ?> · <?php echo date('H:i', strtotime((string)$order['created_at'])); ?></p>
+                                        </div>
+                                    </div>
+                                    <div class="text-right shrink-0">
+                                        <p class="text-sm font-black"><?php echo formatRp($order['total']); ?></p>
+                                        <span class="inline-flex mt-1 px-2 py-1 border text-[8px] font-black uppercase tracking-widest <?php echo $statusClass; ?>"><?php echo htmlspecialchars($statusOrder ?: 'selesai', ENT_QUOTES, 'UTF-8'); ?></span>
+                                    </div>
+                                </div>
+                            <?php endforeach; ?>
+                        </div>
+                    </div>
+
+                    <div class="kas-monitor-card p-5">
+                        <div class="mb-4">
+                            <p class="text-[10px] font-black uppercase tracking-widest text-gray-400">Menu Cafe Terlaris</p>
+                            <p class="text-xs text-gray-400 mt-1">Berdasarkan jumlah terjual hari ini</p>
+                        </div>
+                        <div class="space-y-3">
+                            <?php if (empty($cafeMenuTerlaris)): ?><p class="py-8 text-center text-xs text-gray-400">Belum ada menu terjual.</p><?php endif; ?>
+                            <?php
+                            $maxQty = 1;
+                            if (!empty($cafeMenuTerlaris)) {
+                                $qtyList = array_map(function ($x) {
+                                    return (int)($x['total_qty'] ?? 0);
+                                }, $cafeMenuTerlaris);
+                                $maxQty = !empty($qtyList) ? max($qtyList) : 1;
+                            }
+                            ?>
+                            <?php foreach ($cafeMenuTerlaris as $i => $menu): ?>
+                                <div>
+                                    <div class="flex items-center justify-between gap-3">
+                                        <p class="text-xs font-bold truncate"><span class="text-gray-300 mr-2"><?php echo $i + 1; ?></span><?php echo htmlspecialchars((string)$menu['nama'], ENT_QUOTES, 'UTF-8'); ?></p><span class="text-xs font-black shrink-0"><?php echo number_format((int)$menu['total_qty']); ?>x</span>
+                                    </div>
+                                    <div class="h-1 bg-gray-100 mt-2">
+                                        <div class="h-1 bg-amber-600" style="width:<?php echo max(6, round(((int)$menu['total_qty'] / max(1, $maxQty)) * 100)); ?>%"></div>
+                                    </div>
+                                </div>
+                            <?php endforeach; ?>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="grid grid-cols-1 xl:grid-cols-3 gap-6">
+                    <div class="xl:col-span-2 kas-monitor-card p-5">
+                        <div class="mb-4">
+                            <p class="text-[10px] font-black uppercase tracking-widest text-gray-400">Omzet Cafe Per Jam</p>
+                            <p class="text-xs text-gray-400 mt-1">Grafik transaksi Cafe hari ini</p>
+                        </div>
+                        <div class="chart-container"><canvas id="salesChart"></canvas></div>
+                    </div>
+                    <div class="kas-monitor-card p-5">
+                        <div class="mb-4">
+                            <p class="text-[10px] font-black uppercase tracking-widest text-gray-400">Stok Menu Menipis</p>
+                            <p class="text-xs text-gray-400 mt-1">Hanya menu bertipe Cafe</p>
+                        </div>
+                        <div class="space-y-3">
+                            <?php if (empty($cafeStokMenipis)): ?><div class="bg-green-50 border border-green-100 p-4 text-center text-xs font-bold text-green-700">Semua stok menu Cafe aman.</div><?php endif; ?>
+                            <?php foreach ($cafeStokMenipis as $stok): ?>
+                                <div class="border border-red-100 bg-red-50 p-3 flex items-center justify-between gap-3">
+                                    <div class="min-w-0">
+                                        <p class="text-xs font-bold truncate"><?php echo htmlspecialchars((string)$stok['nama'], ENT_QUOTES, 'UTF-8'); ?></p>
+                                        <p class="text-[9px] text-gray-400 mt-1"><?php echo htmlspecialchars((string)($stok['kategori'] ?? '-'), ENT_QUOTES, 'UTF-8'); ?></p>
+                                    </div><span class="text-xs font-black text-red-600 shrink-0">Sisa <?php echo number_format((int)$stok['stok']); ?></span>
+                                </div>
+                            <?php endforeach; ?>
+                        </div>
+                        <a href="menu_cafe.php" class="mt-4 w-full min-h-[42px] inline-flex items-center justify-center bg-black text-white text-[10px] font-black uppercase tracking-widest">Kelola Menu Cafe</a>
+                    </div>
+                </div>
+            </section>
         <?php endif; ?>
 
-        <?php if (has_role('admin', 'kasir', 'cafe')): ?>
+        <?php if (has_role('admin', 'kasir')): ?>
             <!-- ════════════════════════════════════════════════════════════════════ -->
             <!-- KONTEN ADMIN & KASIR                                                -->
             <!-- ════════════════════════════════════════════════════════════════════ -->
