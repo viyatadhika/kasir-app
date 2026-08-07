@@ -388,6 +388,12 @@ if (!function_exists('api_insert_order')) {
                 continue;
             }
 
+            global $lokasiPilihan;
+
+            if (!in_array($lokasi, $lokasiPilihan, true)) {
+                throw new RuntimeException('Lokasi pengantaran tidak valid: ' . $lokasi);
+            }
+
             $product = api_find_product($pdo, $kodeProduk, $namaProduk);
             if (!$product) {
                 throw new RuntimeException(
@@ -471,6 +477,23 @@ try {
     $flash = 'Gagal menyiapkan halaman migrasi: ' . $e->getMessage();
     $flashType = 'error';
 }
+
+$lokasiPilihan = [
+    'Lobby Gedung Kantor',
+    'Candra 1',
+    'Candra 2',
+    'Sari',
+    'Kartika',
+    'Auditorium',
+    'Serba Guna',
+    'Cakra 1',
+    'Cakra 2',
+    'Cakra 3',
+    'Cakra 4',
+    'Cakra 5',
+    'Samping BSI Gedung Ahmad Yani',
+    'Mini Market Koperasi',
+];
 
 $produkList = [];
 try {
@@ -912,7 +935,7 @@ require_once 'navbar.php';
                 <div class="mt-6 flex items-center justify-between gap-3">
                     <div>
                         <p class="section-label">Rincian Produk & Lokasi</p>
-                        <p class="text-xs text-gray-400 mt-1">Tambahkan satu atau beberapa baris sesuai data lama.</p>
+                        <p class="text-xs text-gray-400 mt-1">Tambahkan satu atau beberapa baris sesuai data lama. Lokasi dipilih langsung dari daftar yang tersedia.</p>
                     </div>
                     <button type="button" onclick="addItemRow()" class="btn border border-gray-200 bg-white text-gray-700">
                         <i data-lucide="plus" class="w-4 h-4"></i>
@@ -993,7 +1016,14 @@ require_once 'navbar.php';
         <div class="item-row border border-gray-100 bg-gray-50 p-3" data-item-row>
             <div>
                 <label class="section-label block mb-2">Lokasi *</label>
-                <input type="text" class="field item-location" required placeholder="Contoh: Lobby Gedung Kantor">
+                <select class="field item-location" required>
+                    <option value="">Pilih lokasi pengantaran...</option>
+                    <?php foreach ($lokasiPilihan as $lokasi): ?>
+                        <option value="<?php echo api_h($lokasi); ?>">
+                            <?php echo api_h($lokasi); ?>
+                        </option>
+                    <?php endforeach; ?>
+                </select>
             </div>
             <div>
                 <label class="section-label block mb-2">Produk *</label>
