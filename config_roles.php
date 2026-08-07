@@ -62,6 +62,33 @@ define('ROLE_ACCESS', [
         ],
     ],
 
+    /*
+    |--------------------------------------------------------------------------
+    | Role Air Mineral
+    |--------------------------------------------------------------------------
+    | Digunakan petugas internal untuk melihat dan memproses pesanan yang
+    | masuk dari halaman publik pesan_air.php serta rekap ke vendor.
+    */
+    'air_mineral' => [
+        'pages' => [
+            'dashboard.php',
+            'air_pesanan.php',
+            'air_pesanan_import.php',
+            'air_rekap_vendor.php',
+            'air_kwitansi.php',
+            'air_produk.php',
+            'laporan.php',
+        ],
+        'menus' => [
+            'dashboard',
+            'air_pesanan',
+            'air_rekap_vendor',
+            'air_kwitansi',
+            'air_produk',
+            'laporan',
+        ],
+    ],
+
     'rental' => [
         'pages' => [
             'dashboard.php',
@@ -97,13 +124,25 @@ define('ROLE_ACCESS', [
     ],
 ]);
 
+/*
+|--------------------------------------------------------------------------
+| Halaman Publik
+|--------------------------------------------------------------------------
+| pesan_air.php dan lacak_air.php dapat dibuka tanpa login.
+*/
 define('PUBLIC_PAGES', [
     'index.php',
     'login.php',
     'logout.php',
+    'pesan_air.php',
+    'lacak_air.php',
 ]);
 
 if (!function_exists('normalizeRoleName')) {
+    /**
+     * @param mixed $role
+     * @return string
+     */
     function normalizeRoleName($role)
     {
         $role = strtolower(trim((string)$role));
@@ -111,26 +150,45 @@ if (!function_exists('normalizeRoleName')) {
         $role = preg_replace('/\s+/', ' ', $role);
 
         $map = [
-            'administrator'       => 'admin',
-            'super admin'         => 'admin',
-            'superadmin'          => 'admin',
-            'owner'               => 'admin',
-            'staff kasir'         => 'kasir',
-            'kasir toko'          => 'kasir',
-            'kasir utama'         => 'kasir',
-            'kasir cafe'          => 'cafe',
-            'cafe cashier'        => 'cafe',
-            'staff cafe'          => 'cafe',
-            'staff rental'        => 'rental',
-            'simpan pinjam'       => 'ksp',
-            'staff simpan pinjam' => 'ksp',
+            'administrator'          => 'admin',
+            'super admin'            => 'admin',
+            'superadmin'             => 'admin',
+            'owner'                  => 'admin',
+
+            'staff kasir'            => 'kasir',
+            'kasir toko'             => 'kasir',
+            'kasir utama'            => 'kasir',
+
+            'kasir cafe'             => 'cafe',
+            'cafe cashier'           => 'cafe',
+            'staff cafe'             => 'cafe',
+
+            'air mineral'            => 'air_mineral',
+            'petugas air'            => 'air_mineral',
+            'petugas air mineral'    => 'air_mineral',
+            'staff air'              => 'air_mineral',
+            'staff air mineral'      => 'air_mineral',
+            'operator air'           => 'air_mineral',
+            'operator air mineral'   => 'air_mineral',
+            'pemesanan air'          => 'air_mineral',
+            'pemesanan air mineral'  => 'air_mineral',
+            'admin air'              => 'air_mineral',
+            'admin air mineral'      => 'air_mineral',
+
+            'staff rental'           => 'rental',
+
+            'simpan pinjam'          => 'ksp',
+            'staff simpan pinjam'    => 'ksp',
         ];
 
-        return isset($map[$role]) ? $map[$role] : $role;
+        return isset($map[$role]) ? $map[$role] : str_replace(' ', '_', $role);
     }
 }
 
 if (!function_exists('getCurrentRole')) {
+    /**
+     * @return string
+     */
     function getCurrentRole()
     {
         if (session_status() === PHP_SESSION_NONE) {
@@ -150,6 +208,11 @@ if (!function_exists('getCurrentRole')) {
 }
 
 if (!function_exists('canAccessPage')) {
+    /**
+     * @param mixed $role
+     * @param mixed $page
+     * @return bool
+     */
     function canAccessPage($role, $page)
     {
         $roles = defined('ROLE_ACCESS') ? ROLE_ACCESS : [];
@@ -173,6 +236,11 @@ if (!function_exists('canAccessPage')) {
 }
 
 if (!function_exists('canSeeMenu')) {
+    /**
+     * @param mixed $role
+     * @param mixed $menuKey
+     * @return bool
+     */
     function canSeeMenu($role, $menuKey)
     {
         $roles = defined('ROLE_ACCESS') ? ROLE_ACCESS : [];
@@ -196,6 +264,10 @@ if (!function_exists('canSeeMenu')) {
 }
 
 if (!function_exists('requireAccess')) {
+    /**
+     * @param mixed $page
+     * @return void
+     */
     function requireAccess($page = '')
     {
         if (session_status() === PHP_SESSION_NONE) {

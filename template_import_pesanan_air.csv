@@ -1,0 +1,4 @@
+﻿nomor_pesanan,tanggal_pemesanan,nama_pemesan,no_wa,tanggal_kirim,lokasi,kode_produk,qty,status,catatan
+AIR-LAMA-001,2026-01-10,Contoh Pemesan,081234567890,2026-01-10,Lobby Gedung Kantor,REFILL-19L,10,selesai,Data migrasi
+AIR-LAMA-001,2026-01-10,Contoh Pemesan,081234567890,2026-01-10,Candra 1,AIR600-DUS,5,selesai,Data migrasi
+AIR-LAMA-002,2026-02-05,Contoh Pemesan 2,081298765432,2026-02-06,Sari,AIR330-DUS,3,selesai,Data migrasi

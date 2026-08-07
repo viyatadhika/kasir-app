@@ -15,11 +15,13 @@ $isKasirOnly   = has_role('kasir') && !$isAdmin;
 $isCafeOnly    = has_role('cafe') && !$isAdmin;
 $isMurniRental = has_role('rental') && !$isAdmin;
 $isMurniKsp    = has_role('ksp') && !$isAdmin;
+$isAirOnly      = has_role('air_mineral') && !$isAdmin;
 $showTabs      = $isAdmin; // admin melihat seluruh modul melalui tab
 $isKasir       = has_role('admin', 'kasir');   // admin + kasir toko
 $isCafe        = has_role('admin', 'cafe');    // admin + kasir cafe
 $isRental      = has_role('admin', 'rental');  // admin + rental
 $isKsp         = has_role('admin', 'ksp');     // admin + ksp
+$isAirMineral  = has_role('admin', 'air_mineral'); // admin + petugas air mineral
 
 // ── Helper functions ─────────────────────────────────────────────────────────
 if (!function_exists('rupiah')) {
@@ -110,6 +112,51 @@ function produk_col_exists(PDO $pdo, string $column): bool
     return in_array($column, $cols, true);
 }
 
+
+if (!function_exists('laporan_table_exists')) {
+    function laporan_table_exists(PDO $pdo, string $table): bool
+    {
+        try {
+            $stmt = $pdo->prepare("SHOW TABLES LIKE :table_name");
+            $stmt->execute([':table_name' => $table]);
+            return (bool)$stmt->fetchColumn();
+        } catch (Throwable $e) {
+            return false;
+        }
+    }
+}
+
+if (!function_exists('laporan_column_exists')) {
+    function laporan_column_exists(PDO $pdo, string $table, string $column): bool
+    {
+        static $cache = [];
+        $key = $table . '.' . $column;
+
+        if (array_key_exists($key, $cache)) {
+            return $cache[$key];
+        }
+
+        try {
+            $stmt = $pdo->prepare("
+                SELECT COUNT(*)
+                FROM INFORMATION_SCHEMA.COLUMNS
+                WHERE TABLE_SCHEMA = DATABASE()
+                  AND TABLE_NAME = :table_name
+                  AND COLUMN_NAME = :column_name
+            ");
+            $stmt->execute([
+                ':table_name' => $table,
+                ':column_name' => $column,
+            ]);
+            $cache[$key] = (int)$stmt->fetchColumn() > 0;
+        } catch (Throwable $e) {
+            $cache[$key] = false;
+        }
+
+        return $cache[$key];
+    }
+}
+
 // ── Rentang tanggal ──────────────────────────────────────────────────────────
 $today  = date('Y-m-d');
 $preset = $_GET['preset'] ?? 'hari_ini';
@@ -168,6 +215,28 @@ if (!function_exists('laporan_cafe_page_url')) {
         $query = $_GET;
         $query['cafe_page'] = max(1, $page);
         $query['cafe_limit'] = $limit;
+        return '?' . http_build_query($query);
+    }
+}
+
+
+// ── Pagination detail pesanan Air Mineral ───────────────────────────────────
+$airPage = max(1, (int)($_GET['air_page'] ?? 1));
+$airAllowedLimits = [10, 15, 25, 50, 100];
+$airPerPage = (int)($_GET['air_limit'] ?? 15);
+if (!in_array($airPerPage, $airAllowedLimits, true)) {
+    $airPerPage = 15;
+}
+$airOffset = ($airPage - 1) * $airPerPage;
+$airTotalRows = 0;
+$airTotalPages = 1;
+
+if (!function_exists('laporan_air_page_url')) {
+    function laporan_air_page_url(int $page, int $limit): string
+    {
+        $query = $_GET;
+        $query['air_page'] = max(1, $page);
+        $query['air_limit'] = $limit;
         return '?' . http_build_query($query);
     }
 }
@@ -240,6 +309,35 @@ $kspSummary = [
 $kspPengajuan = [];
 $kspPinjaman = [];
 $kspAngsuran = [];
+
+
+// Air Mineral
+$airSummary = [
+    'total_pesanan' => 0,
+    'status_baru' => 0,
+    'status_diproses' => 0,
+    'status_siap_dikirim' => 0,
+    'pesanan_selesai' => 0,
+    'pesanan_batal' => 0,
+    'data_migrasi' => 0,
+    'data_baru' => 0,
+    'total_lokasi' => 0,
+    'total_unit' => 0,
+    'rekap_vendor' => 0,
+    'unit_dipesan_vendor' => 0,
+    'unit_diterima_vendor' => 0,
+    'selisih_vendor' => 0,
+    'surat_jalan' => 0,
+    'total_kwitansi' => 0,
+    'nilai_tagihan' => 0,
+    'nilai_lunas' => 0,
+    'nilai_belum_bayar' => 0,
+];
+$airPesanan = [];
+$airProduk = [];
+$airLokasi = [];
+$airVendor = [];
+$airKwitansi = [];
 
 // ════════════════════════════════════════════════════════════════════════════
 // DATA: ADMIN & KASIR — Transaksi POS
@@ -768,7 +866,281 @@ if ($isKsp) {
     }
 }
 
-catat_view_once($pdo, 'Laporan Operasional', 'Membuka laporan POS Toko, Cafe, Rental, atau Simpan Pinjam');
+
+
+// ════════════════════════════════════════════════════════════════════════════
+// DATA: AIR MINERAL — Pesanan, lokasi, vendor, produk, surat jalan, penagihan
+// ════════════════════════════════════════════════════════════════════════════
+if ($isAirMineral) {
+    try {
+        if (laporan_table_exists($pdo, 'air_pesanan')) {
+            $hasAirHistorical = laporan_column_exists($pdo, 'air_pesanan', 'is_historical');
+            $hasAirSource = laporan_column_exists($pdo, 'air_pesanan', 'sumber_data');
+
+            $historicalExpr = $hasAirHistorical
+                ? "COALESCE(is_historical,0)=1"
+                : ($hasAirSource ? "LOWER(COALESCE(sumber_data,''))='migrasi'" : "1=0");
+
+            $stmt = $pdo->prepare("
+                SELECT
+                    SUM(CASE WHEN LOWER(COALESCE(status,'')) <> 'batal' THEN 1 ELSE 0 END) AS total_pesanan,
+                    SUM(CASE WHEN LOWER(COALESCE(status,'')) = 'baru' THEN 1 ELSE 0 END) AS status_baru,
+                    SUM(CASE WHEN LOWER(COALESCE(status,'')) = 'diproses' THEN 1 ELSE 0 END) AS status_diproses,
+                    SUM(CASE WHEN LOWER(COALESCE(status,'')) = 'siap_dikirim' THEN 1 ELSE 0 END) AS status_siap_dikirim,
+                    SUM(CASE WHEN LOWER(COALESCE(status,'')) = 'selesai' THEN 1 ELSE 0 END) AS pesanan_selesai,
+                    SUM(CASE WHEN LOWER(COALESCE(status,'')) = 'batal' THEN 1 ELSE 0 END) AS pesanan_batal,
+                    SUM(CASE WHEN LOWER(COALESCE(status,'')) <> 'batal' AND ({$historicalExpr}) THEN 1 ELSE 0 END) AS data_migrasi
+                FROM air_pesanan
+                WHERE DATE(COALESCE(tanggal_pemesanan, created_at)) BETWEEN :awal AND :akhir
+            ");
+            $stmt->execute([':awal' => $awal, ':akhir' => $akhir]);
+            $row = $stmt->fetch(PDO::FETCH_ASSOC) ?: [];
+
+            foreach (['total_pesanan', 'status_baru', 'status_diproses', 'status_siap_dikirim', 'pesanan_selesai', 'pesanan_batal', 'data_migrasi'] as $key) {
+                $airSummary[$key] = (int)($row[$key] ?? 0);
+            }
+            $airSummary['data_baru'] = max(0, $airSummary['total_pesanan'] - $airSummary['data_migrasi']);
+
+            if (laporan_table_exists($pdo, 'air_pesanan_lokasi')) {
+                $stmt = $pdo->prepare("
+                    SELECT COUNT(*)
+                    FROM air_pesanan_lokasi l
+                    JOIN air_pesanan p ON p.id = l.pesanan_id
+                    WHERE DATE(COALESCE(p.tanggal_pemesanan, p.created_at)) BETWEEN :awal AND :akhir
+                      AND LOWER(COALESCE(p.status,'')) <> 'batal'
+                ");
+                $stmt->execute([':awal' => $awal, ':akhir' => $akhir]);
+                $airSummary['total_lokasi'] = (int)$stmt->fetchColumn();
+            }
+
+            if (laporan_table_exists($pdo, 'air_pesanan_detail')) {
+                $stmt = $pdo->prepare("
+                    SELECT COALESCE(SUM(d.qty),0)
+                    FROM air_pesanan_detail d
+                    JOIN air_pesanan p ON p.id = d.pesanan_id
+                    WHERE DATE(COALESCE(p.tanggal_pemesanan, p.created_at)) BETWEEN :awal AND :akhir
+                      AND LOWER(COALESCE(p.status,'')) <> 'batal'
+                ");
+                $stmt->execute([':awal' => $awal, ':akhir' => $akhir]);
+                $airSummary['total_unit'] = (int)$stmt->fetchColumn();
+
+                $stmt = $pdo->prepare("
+                    SELECT
+                        d.nama_produk,
+                        COALESCE(pr.satuan, 'unit') AS satuan,
+                        SUM(d.qty) AS qty
+                    FROM air_pesanan_detail d
+                    JOIN air_pesanan p ON p.id = d.pesanan_id
+                    LEFT JOIN air_produk pr ON pr.id = d.produk_id
+                    WHERE DATE(COALESCE(p.tanggal_pemesanan, p.created_at)) BETWEEN :awal AND :akhir
+                      AND LOWER(COALESCE(p.status,'')) <> 'batal'
+                    GROUP BY d.produk_id, d.nama_produk, pr.satuan
+                    ORDER BY qty DESC, d.nama_produk ASC
+                    LIMIT 30
+                ");
+                $stmt->execute([':awal' => $awal, ':akhir' => $akhir]);
+                $airProduk = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+                if (laporan_table_exists($pdo, 'air_pesanan_lokasi')) {
+                    $stmt = $pdo->prepare("
+                        SELECT
+                            l.lokasi,
+                            COUNT(DISTINCT p.id) AS total_pesanan,
+                            COALESCE(SUM(d.qty),0) AS total_unit
+                        FROM air_pesanan_lokasi l
+                        JOIN air_pesanan p ON p.id = l.pesanan_id
+                        LEFT JOIN air_pesanan_detail d
+                          ON d.pesanan_id = p.id
+                         AND d.lokasi_id = l.id
+                        WHERE DATE(COALESCE(p.tanggal_pemesanan, p.created_at)) BETWEEN :awal AND :akhir
+                          AND LOWER(COALESCE(p.status,'')) <> 'batal'
+                        GROUP BY l.lokasi
+                        ORDER BY total_unit DESC, total_pesanan DESC, l.lokasi ASC
+                        LIMIT 50
+                    ");
+                    $stmt->execute([':awal' => $awal, ':akhir' => $akhir]);
+                    $airLokasi = $stmt->fetchAll(PDO::FETCH_ASSOC);
+                }
+            }
+
+            $stmtCountAir = $pdo->prepare("
+                SELECT COUNT(*)
+                FROM air_pesanan p
+                WHERE DATE(COALESCE(p.tanggal_pemesanan, p.created_at)) BETWEEN :awal AND :akhir
+            ");
+            $stmtCountAir->execute([':awal' => $awal, ':akhir' => $akhir]);
+            $airTotalRows = (int)$stmtCountAir->fetchColumn();
+            $airTotalPages = max(1, (int)ceil($airTotalRows / $airPerPage));
+            if ($airPage > $airTotalPages) {
+                $airPage = $airTotalPages;
+            }
+            $airOffset = ($airPage - 1) * $airPerPage;
+
+            $sourceSelect = $hasAirSource
+                ? "p.sumber_data"
+                : "'publik' AS sumber_data";
+            $historicalSelect = $hasAirHistorical
+                ? "p.is_historical"
+                : "0 AS is_historical";
+
+            $stmt = $pdo->prepare("
+                SELECT
+                    p.id,
+                    p.nomor_pesanan,
+                    p.tanggal_pemesanan,
+                    p.tanggal_kirim,
+                    p.status,
+                    p.created_at,
+                    {$sourceSelect},
+                    {$historicalSelect},
+                    c.nama AS nama_pemesan,
+                    c.no_hp,
+                    COALESCE((
+                        SELECT GROUP_CONCAT(DISTINCT l.lokasi ORDER BY l.urutan ASC SEPARATOR ', ')
+                        FROM air_pesanan_lokasi l
+                        WHERE l.pesanan_id = p.id
+                    ), '-') AS lokasi,
+                    COALESCE((
+                        SELECT SUM(d.qty)
+                        FROM air_pesanan_detail d
+                        WHERE d.pesanan_id = p.id
+                    ),0) AS total_unit
+                FROM air_pesanan p
+                JOIN air_pelanggan c ON c.id = p.pelanggan_id
+                WHERE DATE(COALESCE(p.tanggal_pemesanan, p.created_at)) BETWEEN :awal AND :akhir
+                ORDER BY COALESCE(p.tanggal_kirim, p.tanggal_pemesanan, p.created_at) DESC, p.id DESC
+                LIMIT {$airPerPage} OFFSET {$airOffset}
+            ");
+            $stmt->execute([':awal' => $awal, ':akhir' => $akhir]);
+            $airPesanan = $stmt->fetchAll(PDO::FETCH_ASSOC);
+        }
+    } catch (Throwable $e) {
+        $airPesanan = [];
+        $airProduk = [];
+        $airLokasi = [];
+        error_log('LAPORAN AIR PESANAN ERROR: ' . $e->getMessage());
+    }
+
+    try {
+        if (laporan_table_exists($pdo, 'air_vendor_order')) {
+            $stmt = $pdo->prepare("
+                SELECT COUNT(*)
+                FROM air_vendor_order
+                WHERE DATE(COALESCE(tanggal_kebutuhan, created_at)) BETWEEN :awal AND :akhir
+                  AND LOWER(COALESCE(status,'')) <> 'batal'
+            ");
+            $stmt->execute([':awal' => $awal, ':akhir' => $akhir]);
+            $airSummary['rekap_vendor'] = (int)$stmt->fetchColumn();
+
+            $hasNomorSurat = laporan_column_exists($pdo, 'air_vendor_order', 'nomor_surat_jalan');
+            $hasTanggalSurat = laporan_column_exists($pdo, 'air_vendor_order', 'tanggal_surat_jalan');
+            $hasFileSurat = laporan_column_exists($pdo, 'air_vendor_order', 'surat_jalan_file');
+            $hasPenerima = laporan_column_exists($pdo, 'air_vendor_order', 'nama_penerima');
+
+            if ($hasNomorSurat || $hasFileSurat) {
+                $suratCondition = [];
+                if ($hasNomorSurat) $suratCondition[] = "NULLIF(TRIM(nomor_surat_jalan),'') IS NOT NULL";
+                if ($hasFileSurat) $suratCondition[] = "NULLIF(TRIM(surat_jalan_file),'') IS NOT NULL";
+
+                $stmt = $pdo->prepare("
+                    SELECT COUNT(*)
+                    FROM air_vendor_order
+                    WHERE DATE(COALESCE(tanggal_kebutuhan, created_at)) BETWEEN :awal AND :akhir
+                      AND LOWER(COALESCE(status,'')) <> 'batal'
+                      AND (" . implode(' OR ', $suratCondition) . ")
+                ");
+                $stmt->execute([':awal' => $awal, ':akhir' => $akhir]);
+                $airSummary['surat_jalan'] = (int)$stmt->fetchColumn();
+            }
+
+            $selectNomorSurat = $hasNomorSurat ? "vo.nomor_surat_jalan" : "NULL AS nomor_surat_jalan";
+            $selectTanggalSurat = $hasTanggalSurat ? "vo.tanggal_surat_jalan" : "NULL AS tanggal_surat_jalan";
+            $selectFileSurat = $hasFileSurat ? "vo.surat_jalan_file" : "NULL AS surat_jalan_file";
+            $selectPenerima = $hasPenerima ? "vo.nama_penerima" : "NULL AS nama_penerima";
+
+            $stmt = $pdo->prepare("
+                SELECT
+                    vo.id,
+                    vo.nomor_vendor_order,
+                    vo.tanggal_rekap,
+                    vo.tanggal_kebutuhan,
+                    vo.vendor_nama,
+                    vo.vendor_wa,
+                    vo.status,
+                    {$selectNomorSurat},
+                    {$selectTanggalSurat},
+                    {$selectFileSurat},
+                    {$selectPenerima},
+                    COALESCE((SELECT COUNT(*) FROM air_vendor_order_source s WHERE s.vendor_order_id = vo.id),0) AS source_count,
+                    COALESCE((SELECT SUM(d.jumlah_dipesan) FROM air_vendor_order_detail d WHERE d.vendor_order_id = vo.id),0) AS total_dipesan,
+                    COALESCE((SELECT SUM(d.jumlah_diterima) FROM air_vendor_order_detail d WHERE d.vendor_order_id = vo.id),0) AS total_diterima
+                FROM air_vendor_order vo
+                WHERE DATE(COALESCE(vo.tanggal_kebutuhan, vo.created_at)) BETWEEN :awal AND :akhir
+                  AND LOWER(COALESCE(vo.status,'')) <> 'batal'
+                ORDER BY COALESCE(vo.tanggal_kebutuhan, vo.created_at) DESC, vo.id DESC
+                LIMIT 100
+            ");
+            $stmt->execute([':awal' => $awal, ':akhir' => $akhir]);
+            $airVendor = $stmt->fetchAll(PDO::FETCH_ASSOC);
+        }
+
+        if (laporan_table_exists($pdo, 'air_vendor_order_detail') && laporan_table_exists($pdo, 'air_vendor_order')) {
+            $stmt = $pdo->prepare("
+                SELECT
+                    COALESCE(SUM(d.jumlah_dipesan),0) AS dipesan,
+                    COALESCE(SUM(d.jumlah_diterima),0) AS diterima
+                FROM air_vendor_order_detail d
+                JOIN air_vendor_order v ON v.id = d.vendor_order_id
+                WHERE DATE(COALESCE(v.tanggal_kebutuhan, v.created_at)) BETWEEN :awal AND :akhir
+                  AND LOWER(COALESCE(v.status,'')) <> 'batal'
+            ");
+            $stmt->execute([':awal' => $awal, ':akhir' => $akhir]);
+            $row = $stmt->fetch(PDO::FETCH_ASSOC) ?: [];
+            $airSummary['unit_dipesan_vendor'] = (int)($row['dipesan'] ?? 0);
+            $airSummary['unit_diterima_vendor'] = (int)($row['diterima'] ?? 0);
+            $airSummary['selisih_vendor'] = max(0, $airSummary['unit_dipesan_vendor'] - $airSummary['unit_diterima_vendor']);
+        }
+    } catch (Throwable $e) {
+        $airVendor = [];
+        error_log('LAPORAN AIR VENDOR ERROR: ' . $e->getMessage());
+    }
+
+    try {
+        if (laporan_table_exists($pdo, 'air_kwitansi')) {
+            $stmt = $pdo->prepare("
+                SELECT
+                    COUNT(*) AS total_kwitansi,
+                    COALESCE(SUM(CASE WHEN status_pembayaran <> 'batal' THEN total_tagihan ELSE 0 END),0) AS nilai_tagihan,
+                    COALESCE(SUM(CASE WHEN status_pembayaran = 'lunas' THEN total_tagihan ELSE 0 END),0) AS nilai_lunas,
+                    COALESCE(SUM(CASE WHEN status_pembayaran = 'belum_bayar' THEN total_tagihan ELSE 0 END),0) AS nilai_belum_bayar
+                FROM air_kwitansi
+                WHERE tanggal_kwitansi BETWEEN :awal AND :akhir
+            ");
+            $stmt->execute([':awal' => $awal, ':akhir' => $akhir]);
+            $row = $stmt->fetch(PDO::FETCH_ASSOC) ?: [];
+            $airSummary['total_kwitansi'] = (int)($row['total_kwitansi'] ?? 0);
+            $airSummary['nilai_tagihan'] = (float)($row['nilai_tagihan'] ?? 0);
+            $airSummary['nilai_lunas'] = (float)($row['nilai_lunas'] ?? 0);
+            $airSummary['nilai_belum_bayar'] = (float)($row['nilai_belum_bayar'] ?? 0);
+
+            $stmt = $pdo->prepare("
+                SELECT id, nomor_kwitansi, tanggal_kwitansi, nama_instansi,
+                       total_tagihan, status_pembayaran, tanggal_bayar
+                FROM air_kwitansi
+                WHERE tanggal_kwitansi BETWEEN :awal AND :akhir
+                ORDER BY tanggal_kwitansi DESC, id DESC
+                LIMIT 100
+            ");
+            $stmt->execute([':awal' => $awal, ':akhir' => $akhir]);
+            $airKwitansi = $stmt->fetchAll(PDO::FETCH_ASSOC);
+        }
+    } catch (Throwable $e) {
+        $airKwitansi = [];
+        error_log('LAPORAN AIR KWITANSI ERROR: ' . $e->getMessage());
+    }
+}
+
+catat_view_once($pdo, 'Laporan Operasional', 'Membuka laporan POS Toko, Cafe, Rental, Simpan Pinjam, atau Air Mineral');
 ?>
 <!DOCTYPE html>
 <html lang="id">
@@ -991,6 +1363,54 @@ catat_view_once($pdo, 'Laporan Operasional', 'Membuka laporan POS Toko, Cafe, Re
             }
         }
 
+        .air-kpi-grid {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 12px;
+        }
+
+        .air-status-grid {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 10px;
+        }
+
+        .air-mini-card {
+            border: 1px solid #f0f0f0;
+            background: #fff;
+            padding: 14px;
+        }
+
+        .air-list-card {
+            border: 1px solid #f0f0f0;
+            background: #fff;
+            padding: 14px;
+        }
+
+        .air-list-card+.air-list-card {
+            margin-top: 8px;
+        }
+
+        @media (min-width:768px) {
+            .air-kpi-grid {
+                grid-template-columns: repeat(4, minmax(0, 1fr));
+            }
+
+            .air-status-grid {
+                grid-template-columns: repeat(3, minmax(0, 1fr));
+            }
+        }
+
+        @media (min-width:1280px) {
+            .air-kpi-grid {
+                grid-template-columns: repeat(6, minmax(0, 1fr));
+            }
+
+            .air-status-grid {
+                grid-template-columns: repeat(6, minmax(0, 1fr));
+            }
+        }
+
         .print-report-header {
             display: none;
         }
@@ -1082,7 +1502,8 @@ catat_view_once($pdo, 'Laporan Operasional', 'Membuka laporan POS Toko, Cafe, Re
             #panel-kasir,
             #panel-cafe,
             #panel-rental,
-            #panel-ksp {
+            #panel-ksp,
+            #panel-air {
                 display: block !important;
             }
 
@@ -1259,7 +1680,7 @@ catat_view_once($pdo, 'Laporan Operasional', 'Membuka laporan POS Toko, Cafe, Re
                 <div>
                     <h2 class="text-lg font-bold tracking-tight">Laporan Operasional</h2>
                     <p class="text-[10px] text-gray-400 uppercase tracking-widest mt-0.5">
-                        Monitoring seluruh aktivitas operasional koperasi meliputi POS Toko, POS Cafe, Rental Bandara, dan Simpan Pinjam.
+                        Monitoring seluruh aktivitas operasional koperasi meliputi POS Toko, POS Cafe, Rental Bandara, Simpan Pinjam, dan Air Mineral.
                     </p>
                 </div>
                 <div class="no-print flex flex-wrap gap-2">
@@ -1285,6 +1706,10 @@ catat_view_once($pdo, 'Laporan Operasional', 'Membuka laporan POS Toko, Cafe, Re
                     <button id="tab-ksp" onclick="switchTab('ksp')"
                         class="tab-btn px-5 py-3 text-[10px] font-black uppercase tracking-widest border-b-2 transition-all">
                         Simpan Pinjam
+                    </button>
+                    <button id="tab-air" onclick="switchTab('air')"
+                        class="tab-btn px-5 py-3 text-[10px] font-black uppercase tracking-widest border-b-2 transition-all">
+                        Air Mineral
                     </button>
                     <!-- ke depan: tambah tab baru di sini -->
                 </div>
@@ -2283,12 +2708,340 @@ catat_view_once($pdo, 'Laporan Operasional', 'Membuka laporan POS Toko, Cafe, Re
             <?php endif; // end isKsp 
             ?>
 
+            <?php if ($isAirMineral): ?>
+                <!-- ══════════════════════════════════════════════════════════════════ -->
+                <!-- KONTEN AIR MINERAL                                                  -->
+                <!-- ══════════════════════════════════════════════════════════════════ -->
+                <div id="panel-air" class="flex flex-col gap-5 md:gap-6">
+                    <!-- KPI Utama -->
+                    <div class="air-kpi-grid">
+                        <div class="bg-white border border-subtle p-4 md:p-5">
+                            <p class="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1">Total Pesanan</p>
+                            <p class="text-2xl font-bold text-blue-600"><?= angka($airSummary['total_pesanan']) ?></p>
+                            <p class="text-[10px] text-gray-400 mt-1">Batal <?= angka($airSummary['pesanan_batal']) ?></p>
+                        </div>
+                        <div class="bg-white border border-subtle p-4 md:p-5">
+                            <p class="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1">Total Produk</p>
+                            <p class="text-2xl font-bold"><?= angka($airSummary['total_unit']) ?></p>
+                            <p class="text-[10px] text-gray-400 mt-1"><?= angka($airSummary['total_lokasi']) ?> titik lokasi</p>
+                        </div>
+                        <div class="bg-white border border-subtle p-4 md:p-5">
+                            <p class="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1">Rekap Vendor</p>
+                            <p class="text-2xl font-bold text-purple-600"><?= angka($airSummary['rekap_vendor']) ?></p>
+                            <p class="text-[10px] text-gray-400 mt-1">Dipesan <?= angka($airSummary['unit_dipesan_vendor']) ?></p>
+                        </div>
+                        <div class="bg-white border <?= $airSummary['selisih_vendor'] > 0 ? 'border-red-200' : 'border-subtle' ?> p-4 md:p-5">
+                            <p class="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1">Selisih Vendor</p>
+                            <p class="text-2xl font-bold <?= $airSummary['selisih_vendor'] > 0 ? 'text-red-600' : 'text-green-600' ?>"><?= angka($airSummary['selisih_vendor']) ?></p>
+                            <p class="text-[10px] text-gray-400 mt-1">Diterima <?= angka($airSummary['unit_diterima_vendor']) ?></p>
+                        </div>
+                        <div class="bg-white border border-subtle p-4 md:p-5">
+                            <p class="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1">Nilai Tagihan</p>
+                            <p class="text-lg font-bold text-amber-600"><?= rupiah($airSummary['nilai_tagihan']) ?></p>
+                            <p class="text-[10px] text-gray-400 mt-1"><?= angka($airSummary['total_kwitansi']) ?> kwitansi</p>
+                        </div>
+                        <div class="bg-white border <?= $airSummary['nilai_belum_bayar'] > 0 ? 'border-amber-200' : 'border-subtle' ?> p-4 md:p-5">
+                            <p class="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1">Belum Dibayar</p>
+                            <p class="text-lg font-bold <?= $airSummary['nilai_belum_bayar'] > 0 ? 'text-amber-600' : 'text-green-600' ?>"><?= rupiah($airSummary['nilai_belum_bayar']) ?></p>
+                            <p class="text-[10px] text-gray-400 mt-1">Lunas <?= rupiah($airSummary['nilai_lunas']) ?></p>
+                        </div>
+                    </div>
+
+                    <!-- Status & Sumber Data -->
+                    <section class="bg-white border border-subtle p-4 md:p-5">
+                        <div class="flex flex-col md:flex-row md:items-center md:justify-between gap-2 mb-4">
+                            <div>
+                                <h2 class="text-[10px] font-bold uppercase tracking-widest text-gray-400">Status & Sumber Pesanan</h2>
+                                <p class="text-xs text-gray-400 mt-0.5">Ringkasan progres operasional dan pemisahan data baru dengan data migrasi.</p>
+                            </div>
+                            <p class="text-[10px] text-gray-400">Periode <?= e(tgl($awal)) ?> – <?= e(tgl($akhir)) ?></p>
+                        </div>
+                        <div class="air-status-grid">
+                            <div class="air-mini-card">
+                                <p class="text-[9px] font-black uppercase tracking-widest text-gray-400">Baru</p>
+                                <p class="text-xl font-black text-blue-600 mt-1"><?= angka($airSummary['status_baru']) ?></p>
+                            </div>
+                            <div class="air-mini-card">
+                                <p class="text-[9px] font-black uppercase tracking-widest text-gray-400">Diproses</p>
+                                <p class="text-xl font-black text-amber-600 mt-1"><?= angka($airSummary['status_diproses']) ?></p>
+                            </div>
+                            <div class="air-mini-card">
+                                <p class="text-[9px] font-black uppercase tracking-widest text-gray-400">Siap Dikirim</p>
+                                <p class="text-xl font-black text-purple-600 mt-1"><?= angka($airSummary['status_siap_dikirim']) ?></p>
+                            </div>
+                            <div class="air-mini-card">
+                                <p class="text-[9px] font-black uppercase tracking-widest text-gray-400">Selesai</p>
+                                <p class="text-xl font-black text-green-600 mt-1"><?= angka($airSummary['pesanan_selesai']) ?></p>
+                            </div>
+                            <div class="air-mini-card">
+                                <p class="text-[9px] font-black uppercase tracking-widest text-gray-400">Pesanan Baru</p>
+                                <p class="text-xl font-black mt-1"><?= angka($airSummary['data_baru']) ?></p>
+                                <p class="text-[9px] text-gray-400 mt-1">Bukan migrasi</p>
+                            </div>
+                            <div class="air-mini-card">
+                                <p class="text-[9px] font-black uppercase tracking-widest text-gray-400">Data Lama</p>
+                                <p class="text-xl font-black text-orange-600 mt-1"><?= angka($airSummary['data_migrasi']) ?></p>
+                                <p class="text-[9px] text-gray-400 mt-1">Hasil migrasi</p>
+                            </div>
+                        </div>
+                    </section>
+
+                    <!-- Detail Pesanan -->
+                    <section class="bg-white border border-subtle overflow-hidden">
+                        <div class="px-5 py-4 border-b border-subtle flex items-center justify-between gap-3">
+                            <div>
+                                <h2 class="text-[10px] font-bold uppercase tracking-widest text-gray-400">Detail Pesanan Air Mineral</h2>
+                                <p class="text-xs text-gray-400 mt-0.5"><?= angka($airTotalRows) ?> pesanan ditemukan · halaman <?= angka($airPage) ?> dari <?= angka($airTotalPages) ?></p>
+                            </div>
+                            <a href="air_pesanan.php" class="text-[10px] font-black uppercase tracking-widest underline no-print">Kelola</a>
+                        </div>
+                        <div class="tbl-desktop overflow-x-auto no-scrollbar">
+                            <table class="w-full text-left" style="min-width:1080px">
+                                <thead class="border-b border-subtle bg-gray-50">
+                                    <tr>
+                                        <th class="px-5 py-4 text-[10px] font-bold uppercase tracking-widest text-gray-400">Tanggal</th>
+                                        <th class="px-5 py-4 text-[10px] font-bold uppercase tracking-widest text-gray-400">Nomor</th>
+                                        <th class="px-5 py-4 text-[10px] font-bold uppercase tracking-widest text-gray-400">Pemesan</th>
+                                        <th class="px-5 py-4 text-[10px] font-bold uppercase tracking-widest text-gray-400">Lokasi</th>
+                                        <th class="px-5 py-4 text-[10px] font-bold uppercase tracking-widest text-gray-400 text-right">Jumlah</th>
+                                        <th class="px-5 py-4 text-[10px] font-bold uppercase tracking-widest text-gray-400 text-center">Sumber</th>
+                                        <th class="px-5 py-4 text-[10px] font-bold uppercase tracking-widest text-gray-400 text-center">Status</th>
+                                    </tr>
+                                </thead>
+                                <tbody class="divide-y divide-[#f5f5f5]">
+                                    <?php if (!$airPesanan): ?><tr>
+                                            <td colspan="7" class="py-16 text-center text-[10px] font-bold uppercase tracking-widest text-gray-300">Belum ada pesanan air</td>
+                                        </tr><?php endif; ?>
+                                    <?php foreach ($airPesanan as $ap): ?>
+                                        <?php
+                                        $airStatus = strtolower((string)($ap['status'] ?? 'baru'));
+                                        $airBadge = $airStatus === 'selesai' ? 'badge-selesai' : ($airStatus === 'batal' ? 'badge-batal' : 'badge-proses');
+                                        $isHistoricalAir = !empty($ap['is_historical']) || strtolower((string)($ap['sumber_data'] ?? '')) === 'migrasi';
+                                        ?>
+                                        <tr>
+                                            <td class="px-5 py-4 text-xs text-gray-500 whitespace-nowrap"><?= e(tgl($ap['tanggal_pemesanan'] ?? $ap['created_at'] ?? null)) ?></td>
+                                            <td class="px-5 py-4 text-sm font-bold"><?= e($ap['nomor_pesanan'] ?? '-') ?></td>
+                                            <td class="px-5 py-4">
+                                                <div class="font-semibold text-sm"><?= e($ap['nama_pemesan'] ?? '-') ?></div>
+                                                <div class="text-[10px] text-gray-400"><?= e($ap['no_hp'] ?? '-') ?></div>
+                                            </td>
+                                            <td class="px-5 py-4 text-sm text-gray-600"><?= e($ap['lokasi'] ?? '-') ?></td>
+                                            <td class="px-5 py-4 text-right text-sm font-bold"><?= angka($ap['total_unit'] ?? 0) ?></td>
+                                            <td class="px-5 py-4 text-center"><span class="<?= $isHistoricalAir ? 'badge-barang' : 'badge-blue' ?> text-[9px] font-bold uppercase px-2 py-1 rounded-full"><?= $isHistoricalAir ? 'Data Lama' : 'Pesanan Baru' ?></span></td>
+                                            <td class="px-5 py-4 text-center"><span class="<?= $airBadge ?> text-[9px] font-bold uppercase px-2 py-1 rounded-full"><?= e(str_replace('_', ' ', $airStatus)) ?></span></td>
+                                        </tr>
+                                    <?php endforeach; ?>
+                                </tbody>
+                            </table>
+                        </div>
+                        <div class="card-list">
+                            <?php if (!$airPesanan): ?><div class="col-span-full py-12 text-center text-[10px] font-bold uppercase tracking-widest text-gray-400">Belum ada pesanan air</div><?php endif; ?>
+                            <?php foreach ($airPesanan as $ap): ?>
+                                <?php $isHistoricalAir = !empty($ap['is_historical']) || strtolower((string)($ap['sumber_data'] ?? '')) === 'migrasi'; ?>
+                                <div class="bg-white border border-subtle p-4 flex flex-col gap-3">
+                                    <div class="flex items-start justify-between gap-2">
+                                        <div class="min-w-0">
+                                            <p class="text-sm font-bold truncate"><?= e($ap['nomor_pesanan'] ?? '-') ?></p>
+                                            <p class="text-[10px] text-gray-400 mt-0.5"><?= e(tgl($ap['tanggal_pemesanan'] ?? $ap['created_at'] ?? null)) ?></p>
+                                        </div>
+                                        <p class="text-sm font-bold text-blue-600"><?= angka($ap['total_unit'] ?? 0) ?> unit</p>
+                                    </div>
+                                    <div class="flex justify-between text-xs"><span class="text-gray-400">Pemesan</span><span class="font-semibold text-right"><?= e($ap['nama_pemesan'] ?? '-') ?></span></div>
+                                    <div class="flex justify-between text-xs gap-3"><span class="text-gray-400">Lokasi</span><span class="font-semibold text-right"><?= e($ap['lokasi'] ?? '-') ?></span></div>
+                                    <div class="flex justify-between text-xs"><span class="text-gray-400">Sumber</span><span class="font-bold <?= $isHistoricalAir ? 'text-orange-600' : 'text-blue-600' ?>"><?= $isHistoricalAir ? 'Data Lama' : 'Pesanan Baru' ?></span></div>
+                                    <div class="flex justify-between text-xs"><span class="text-gray-400">Status</span><span class="font-bold uppercase"><?= e(str_replace('_', ' ', (string)($ap['status'] ?? '-'))) ?></span></div>
+                                </div>
+                            <?php endforeach; ?>
+                        </div>
+
+                        <?php if ($airTotalPages > 1): ?>
+                            <div class="no-print px-4 md:px-5 py-4 border-t border-subtle bg-gray-50 flex flex-col md:flex-row gap-3 md:items-center md:justify-between">
+                                <div class="text-xs text-gray-500">Menampilkan <?= angka($airOffset + 1) ?>–<?= angka(min($airOffset + $airPerPage, $airTotalRows)) ?> dari <?= angka($airTotalRows) ?> pesanan</div>
+                                <div class="flex flex-col sm:flex-row gap-2 sm:items-center">
+                                    <form method="GET" class="flex items-center gap-2">
+                                        <?php foreach ($_GET as $key => $value): ?>
+                                            <?php if (!in_array($key, ['air_page', 'air_limit'], true) && !is_array($value)): ?><input type="hidden" name="<?= e($key) ?>" value="<?= e($value) ?>"><?php endif; ?>
+                                        <?php endforeach; ?>
+                                        <input type="hidden" name="air_page" value="1">
+                                        <select name="air_limit" onchange="this.form.submit()" class="border border-gray-200 bg-white px-3 py-2 text-xs font-bold">
+                                            <?php foreach ($airAllowedLimits as $limitOption): ?><option value="<?= $limitOption ?>" <?= $airPerPage === $limitOption ? 'selected' : '' ?>><?= $limitOption ?> / halaman</option><?php endforeach; ?>
+                                        </select>
+                                    </form>
+                                    <div class="flex items-center gap-1 overflow-x-auto no-scrollbar">
+                                        <?php if ($airPage > 1): ?><a href="<?= e(laporan_air_page_url($airPage - 1, $airPerPage)) ?>" class="px-3 py-2 border border-gray-200 bg-white text-xs font-bold">&larr;</a><?php endif; ?>
+                                        <?php for ($pg = max(1, $airPage - 2); $pg <= min($airTotalPages, $airPage + 2); $pg++): ?><a href="<?= e(laporan_air_page_url($pg, $airPerPage)) ?>" class="px-3 py-2 text-xs font-bold <?= $pg === $airPage ? 'bg-black text-white' : 'border border-gray-200 bg-white text-gray-700' ?>"><?= $pg ?></a><?php endfor; ?>
+                                        <?php if ($airPage < $airTotalPages): ?><a href="<?= e(laporan_air_page_url($airPage + 1, $airPerPage)) ?>" class="px-3 py-2 border border-gray-200 bg-white text-xs font-bold">&rarr;</a><?php endif; ?>
+                                    </div>
+                                </div>
+                            </div>
+                        <?php endif; ?>
+                    </section>
+
+                    <!-- Produk + Lokasi -->
+                    <div class="grid grid-cols-1 xl:grid-cols-2 gap-5 md:gap-6">
+                        <section class="bg-white border border-subtle overflow-hidden">
+                            <div class="px-5 py-4 border-b border-subtle">
+                                <h2 class="text-[10px] font-bold uppercase tracking-widest text-gray-400">Produk Air Mineral</h2>
+                                <p class="text-xs text-gray-400 mt-0.5">Rekap jumlah per jenis produk</p>
+                            </div>
+                            <div class="grid grid-cols-1 md:grid-cols-2 gap-3 p-4">
+                                <?php if (!$airProduk): ?><div class="md:col-span-2 py-12 text-center text-[10px] font-bold uppercase tracking-widest text-gray-300">Belum ada produk</div><?php endif; ?>
+                                <?php foreach ($airProduk as $i => $prod): ?><div class="border border-subtle p-4 flex items-center justify-between gap-3">
+                                        <div class="min-w-0 flex items-center gap-3"><span class="rank-circle"><?= $i + 1 ?></span>
+                                            <p class="text-sm font-bold"><?= e($prod['nama_produk'] ?? '-') ?></p>
+                                        </div>
+                                        <div class="text-right shrink-0">
+                                            <p class="text-sm font-bold"><?= angka($prod['qty'] ?? 0) ?></p>
+                                            <p class="text-[10px] text-gray-400"><?= e($prod['satuan'] ?? 'unit') ?></p>
+                                        </div>
+                                    </div><?php endforeach; ?>
+                            </div>
+                        </section>
+
+                        <section class="bg-white border border-subtle overflow-hidden">
+                            <div class="px-5 py-4 border-b border-subtle">
+                                <h2 class="text-[10px] font-bold uppercase tracking-widest text-gray-400">Rekap Lokasi Pengantaran</h2>
+                                <p class="text-xs text-gray-400 mt-0.5">Kebutuhan air berdasarkan titik pengantaran</p>
+                            </div>
+                            <div class="p-4">
+                                <?php if (!$airLokasi): ?><div class="py-12 text-center text-[10px] font-bold uppercase tracking-widest text-gray-300">Belum ada data lokasi</div><?php endif; ?>
+                                <?php foreach ($airLokasi as $i => $loc): ?><div class="air-list-card flex items-center justify-between gap-4">
+                                        <div class="min-w-0">
+                                            <div class="flex items-center gap-2"><span class="rank-circle"><?= $i + 1 ?></span>
+                                                <p class="text-sm font-bold"><?= e($loc['lokasi'] ?? '-') ?></p>
+                                            </div>
+                                            <p class="text-[10px] text-gray-400 mt-1 ml-8"><?= angka($loc['total_pesanan'] ?? 0) ?> pesanan</p>
+                                        </div>
+                                        <div class="text-right shrink-0">
+                                            <p class="text-base font-black text-blue-600"><?= angka($loc['total_unit'] ?? 0) ?></p>
+                                            <p class="text-[9px] text-gray-400 uppercase">unit</p>
+                                        </div>
+                                    </div><?php endforeach; ?>
+                            </div>
+                        </section>
+                    </div>
+
+                    <!-- Vendor & Surat Jalan -->
+                    <section class="bg-white border border-subtle overflow-hidden">
+                        <div class="px-5 py-4 border-b border-subtle flex items-center justify-between gap-3">
+                            <div>
+                                <h2 class="text-[10px] font-bold uppercase tracking-widest text-gray-400">Rekap Vendor & Surat Jalan</h2>
+                                <p class="text-xs text-gray-400 mt-0.5"><?= angka(count($airVendor)) ?> rekap ditampilkan · <?= angka($airSummary['surat_jalan']) ?> memiliki arsip surat jalan</p>
+                            </div><a href="air_rekap_vendor.php" class="text-[10px] font-black uppercase tracking-widest underline no-print">Kelola</a>
+                        </div>
+                        <div class="tbl-desktop overflow-x-auto no-scrollbar">
+                            <table class="w-full text-left" style="min-width:1080px">
+                                <thead class="border-b border-subtle bg-gray-50">
+                                    <tr>
+                                        <th class="px-5 py-4 text-[10px] font-bold uppercase tracking-widest text-gray-400">Kebutuhan</th>
+                                        <th class="px-5 py-4 text-[10px] font-bold uppercase tracking-widest text-gray-400">Rekap</th>
+                                        <th class="px-5 py-4 text-[10px] font-bold uppercase tracking-widest text-gray-400">Vendor</th>
+                                        <th class="px-5 py-4 text-[10px] font-bold uppercase tracking-widest text-gray-400 text-center">Pesanan</th>
+                                        <th class="px-5 py-4 text-[10px] font-bold uppercase tracking-widest text-gray-400 text-right">Dipesan</th>
+                                        <th class="px-5 py-4 text-[10px] font-bold uppercase tracking-widest text-gray-400 text-right">Diterima</th>
+                                        <th class="px-5 py-4 text-[10px] font-bold uppercase tracking-widest text-gray-400">Surat Jalan</th>
+                                        <th class="px-5 py-4 text-[10px] font-bold uppercase tracking-widest text-gray-400 text-center">Status</th>
+                                    </tr>
+                                </thead>
+                                <tbody class="divide-y divide-[#f5f5f5]">
+                                    <?php if (!$airVendor): ?><tr>
+                                            <td colspan="8" class="py-16 text-center text-[10px] font-bold uppercase tracking-widest text-gray-300">Belum ada rekap vendor</td>
+                                        </tr><?php endif; ?>
+                                    <?php foreach ($airVendor as $av): ?><tr>
+                                            <td class="px-5 py-4 text-xs text-gray-500 whitespace-nowrap"><?= e(tgl($av['tanggal_kebutuhan'] ?? null)) ?></td>
+                                            <td class="px-5 py-4">
+                                                <div class="text-sm font-bold"><?= e($av['nomor_vendor_order'] ?? '-') ?></div>
+                                                <div class="text-[10px] text-gray-400"><?= e(tgl($av['tanggal_rekap'] ?? null)) ?></div>
+                                            </td>
+                                            <td class="px-5 py-4">
+                                                <div class="text-sm font-semibold"><?= e($av['vendor_nama'] ?? '-') ?></div>
+                                                <div class="text-[10px] text-gray-400"><?= e($av['vendor_wa'] ?? '-') ?></div>
+                                            </td>
+                                            <td class="px-5 py-4 text-center text-sm font-bold"><?= angka($av['source_count'] ?? 0) ?></td>
+                                            <td class="px-5 py-4 text-right text-sm font-bold"><?= angka($av['total_dipesan'] ?? 0) ?></td>
+                                            <td class="px-5 py-4 text-right text-sm font-bold text-green-600"><?= angka($av['total_diterima'] ?? 0) ?></td>
+                                            <td class="px-5 py-4">
+                                                <div class="text-xs font-semibold"><?= e($av['nomor_surat_jalan'] ?? '-') ?></div><?php if (!empty($av['tanggal_surat_jalan'])): ?><div class="text-[10px] text-gray-400 mt-0.5"><?= e(tgl($av['tanggal_surat_jalan'])) ?></div><?php endif; ?><?php if (!empty($av['surat_jalan_file'])): ?><a href="<?= e($av['surat_jalan_file']) ?>" target="_blank" class="text-[9px] font-black text-blue-600 underline no-print">Lihat Arsip</a><?php endif; ?>
+                                            </td>
+                                            <td class="px-5 py-4 text-center"><span class="badge-gray text-[9px] font-bold uppercase px-2 py-1 rounded-full"><?= e(str_replace('_', ' ', (string)($av['status'] ?? '-'))) ?></span></td>
+                                        </tr><?php endforeach; ?>
+                                </tbody>
+                            </table>
+                        </div>
+                        <div class="card-list">
+                            <?php if (!$airVendor): ?><div class="col-span-full py-12 text-center text-[10px] font-bold uppercase tracking-widest text-gray-400">Belum ada rekap vendor</div><?php endif; ?>
+                            <?php foreach ($airVendor as $av): ?><div class="bg-white border border-subtle p-4 flex flex-col gap-3">
+                                    <div class="flex items-start justify-between gap-2">
+                                        <div class="min-w-0">
+                                            <p class="text-sm font-bold truncate"><?= e($av['nomor_vendor_order'] ?? '-') ?></p>
+                                            <p class="text-[10px] text-gray-400 mt-0.5"><?= e($av['vendor_nama'] ?? '-') ?> · <?= e(tgl($av['tanggal_kebutuhan'] ?? null)) ?></p>
+                                        </div><span class="badge-gray text-[9px] font-bold uppercase px-2 py-1 rounded-full"><?= e(str_replace('_', ' ', (string)($av['status'] ?? '-'))) ?></span>
+                                    </div>
+                                    <div class="grid grid-cols-2 gap-2 text-xs pt-2 border-t border-subtle">
+                                        <div><span class="text-gray-400 block">Dipesan</span><strong><?= angka($av['total_dipesan'] ?? 0) ?></strong></div>
+                                        <div class="text-right"><span class="text-gray-400 block">Diterima</span><strong class="text-green-600"><?= angka($av['total_diterima'] ?? 0) ?></strong></div>
+                                        <div><span class="text-gray-400 block">Pesanan Pelanggan</span><strong><?= angka($av['source_count'] ?? 0) ?></strong></div>
+                                        <div class="text-right"><span class="text-gray-400 block">Surat Jalan</span><strong><?= e($av['nomor_surat_jalan'] ?? '-') ?></strong></div>
+                                    </div>
+                                </div><?php endforeach; ?>
+                        </div>
+                    </section>
+
+                    <!-- Kwitansi -->
+                    <section class="bg-white border border-subtle overflow-hidden">
+                        <div class="px-5 py-4 border-b border-subtle flex items-center justify-between gap-3">
+                            <div>
+                                <h2 class="text-[10px] font-bold uppercase tracking-widest text-gray-400">Kwitansi Penagihan</h2>
+                                <p class="text-xs text-gray-400 mt-0.5"><?= angka(count($airKwitansi)) ?> dokumen ditemukan</p>
+                            </div><a href="air_kwitansi.php" class="text-[10px] font-black uppercase tracking-widest underline no-print">Kelola</a>
+                        </div>
+                        <div class="tbl-desktop overflow-x-auto no-scrollbar">
+                            <table class="w-full text-left" style="min-width:620px">
+                                <thead class="border-b border-subtle bg-gray-50">
+                                    <tr>
+                                        <th class="px-5 py-4 text-[10px] font-bold uppercase tracking-widest text-gray-400">Tanggal</th>
+                                        <th class="px-5 py-4 text-[10px] font-bold uppercase tracking-widest text-gray-400">Kwitansi</th>
+                                        <th class="px-5 py-4 text-[10px] font-bold uppercase tracking-widest text-gray-400">Instansi</th>
+                                        <th class="px-5 py-4 text-[10px] font-bold uppercase tracking-widest text-gray-400 text-right">Total</th>
+                                        <th class="px-5 py-4 text-[10px] font-bold uppercase tracking-widest text-gray-400 text-center">Status</th>
+                                    </tr>
+                                </thead>
+                                <tbody class="divide-y divide-[#f5f5f5]">
+                                    <?php if (!$airKwitansi): ?><tr>
+                                            <td colspan="5" class="py-16 text-center text-[10px] font-bold uppercase tracking-widest text-gray-300">Belum ada kwitansi</td>
+                                        </tr><?php endif; ?>
+                                    <?php foreach ($airKwitansi as $kw): ?><tr>
+                                            <td class="px-5 py-4 text-xs text-gray-500"><?= e(tgl($kw['tanggal_kwitansi'] ?? null)) ?></td>
+                                            <td class="px-5 py-4 text-sm font-bold"><?= e($kw['nomor_kwitansi'] ?? '-') ?></td>
+                                            <td class="px-5 py-4 text-sm"><?= e($kw['nama_instansi'] ?? '-') ?></td>
+                                            <td class="px-5 py-4 text-right text-sm font-bold text-blue-600"><?= rupiah($kw['total_tagihan'] ?? 0) ?></td>
+                                            <td class="px-5 py-4 text-center"><span class="badge-gray text-[9px] font-bold uppercase px-2 py-1 rounded-full"><?= e(str_replace('_', ' ', $kw['status_pembayaran'] ?? '-')) ?></span></td>
+                                        </tr><?php endforeach; ?>
+                                </tbody>
+                            </table>
+                        </div>
+                        <div class="card-list"><?php if (!$airKwitansi): ?><div class="col-span-full py-12 text-center text-[10px] font-bold uppercase tracking-widest text-gray-400">Belum ada kwitansi</div><?php endif; ?><?php foreach ($airKwitansi as $kw): ?><div class="bg-white border border-subtle p-4 flex flex-col gap-3">
+                                    <div class="flex items-start justify-between gap-2">
+                                        <div>
+                                            <p class="text-sm font-bold"><?= e($kw['nomor_kwitansi'] ?? '-') ?></p>
+                                            <p class="text-[10px] text-gray-400"><?= e(tgl($kw['tanggal_kwitansi'] ?? null)) ?></p>
+                                        </div>
+                                        <p class="text-sm font-bold text-blue-600"><?= rupiah($kw['total_tagihan'] ?? 0) ?></p>
+                                    </div>
+                                    <div class="flex justify-between text-xs"><span class="text-gray-400">Instansi</span><span class="font-semibold"><?= e($kw['nama_instansi'] ?? '-') ?></span></div>
+                                    <div class="flex justify-between text-xs"><span class="text-gray-400">Status</span><span class="font-bold uppercase"><?= e(str_replace('_', ' ', $kw['status_pembayaran'] ?? '-')) ?></span></div>
+                                </div><?php endforeach; ?></div>
+                    </section>
+                </div><!-- end panel-air -->
+            <?php endif; // end isAirMineral 
+            ?>
+
         </main>
     </div>
 
     <script>
         // ── Tab switching (admin only) ────────────────────────────────────────────
-        var activeTab = '<?php echo $isAdmin ? "kasir" : ($isCafeOnly ? "cafe" : ($isMurniRental ? "rental" : ($isMurniKsp ? "ksp" : "kasir"))); ?>';
+        var activeTab = '<?php echo $isAdmin ? "kasir" : ($isCafeOnly ? "cafe" : ($isMurniRental ? "rental" : ($isMurniKsp ? "ksp" : ($isAirOnly ? "air" : "kasir")))); ?>';
 
         function switchTab(tab) {
             activeTab = tab;
@@ -2298,10 +3051,12 @@ catat_view_once($pdo, 'Laporan Operasional', 'Membuka laporan POS Toko, Cafe, Re
             var panelCafe = document.getElementById('panel-cafe');
             var panelRental = document.getElementById('panel-rental');
             var panelKsp = document.getElementById('panel-ksp');
+            var panelAir = document.getElementById('panel-air');
             if (panelKasir) panelKasir.style.display = tab === 'kasir' ? '' : 'none';
             if (panelCafe) panelCafe.style.display = tab === 'cafe' ? '' : 'none';
             if (panelRental) panelRental.style.display = tab === 'rental' ? '' : 'none';
             if (panelKsp) panelKsp.style.display = tab === 'ksp' ? '' : 'none';
+            if (panelAir) panelAir.style.display = tab === 'air' ? '' : 'none';
 
             // Tab button style
             document.querySelectorAll('.tab-btn').forEach(function(btn) {
@@ -2325,11 +3080,13 @@ catat_view_once($pdo, 'Laporan Operasional', 'Membuka laporan POS Toko, Cafe, Re
                 var panelCafe = document.getElementById('panel-cafe');
                 var panelRental = document.getElementById('panel-rental');
                 var panelKsp = document.getElementById('panel-ksp');
+                var panelAir = document.getElementById('panel-air');
 
                 if (panelKasir) panelKasir.style.display = 'none';
                 if (panelCafe) panelCafe.style.display = 'none';
                 if (panelRental) panelRental.style.display = 'none';
                 if (panelKsp) panelKsp.style.display = 'none';
+                if (panelAir) panelAir.style.display = 'none';
 
                 <?php if ($isCafeOnly): ?>
                     if (panelCafe) panelCafe.style.display = '';
@@ -2337,6 +3094,8 @@ catat_view_once($pdo, 'Laporan Operasional', 'Membuka laporan POS Toko, Cafe, Re
                     if (panelRental) panelRental.style.display = '';
                 <?php elseif ($isMurniKsp): ?>
                     if (panelKsp) panelKsp.style.display = '';
+                <?php elseif ($isAirOnly): ?>
+                    if (panelAir) panelAir.style.display = '';
                 <?php else: ?>
                     if (panelKasir) panelKasir.style.display = '';
                 <?php endif; ?>
@@ -2387,8 +3146,8 @@ catat_view_once($pdo, 'Laporan Operasional', 'Membuka laporan POS Toko, Cafe, Re
 
             function initSectionPagination(section, index) {
                 var title = sectionTitle(section);
-                // Detail Transaksi sudah memiliki pagination server sendiri.
-                if (title.indexOf('detail transaksi') !== -1) return;
+                // Detail Transaksi POS/Cafe dan Detail Pesanan Air sudah memiliki pagination server sendiri.
+                if (title.indexOf('detail transaksi') !== -1 || title.indexOf('detail pesanan air mineral') !== -1) return;
 
                 var items = collectItems(section);
                 var total = Math.max(items.rows.length, items.cards.length);

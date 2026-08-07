@@ -24,6 +24,10 @@ if (!isset($activeMenu)) {
         'menu_cafe.php'            => 'menu_cafe',
         'meja_cafe.php'            => 'meja_cafe',
         'dapur.php'                => 'dapur',
+        'air_pesanan.php'          => 'air_pesanan',
+        'air_rekap_vendor.php'     => 'air_rekap_vendor',
+        'air_kwitansi.php'         => 'air_kwitansi',
+        'air_produk.php'           => 'air_produk',
         'produk.php'               => 'produk',
         'stok_opname.php'          => 'stok',
         'kas_harian.php'           => 'kas_harian',
@@ -161,6 +165,15 @@ $menuGroups = array(
         ),
     ),
     array(
+        'title' => 'Air Mineral',
+        'items' => array(
+            array('key' => 'air_pesanan',      'href' => 'air_pesanan.php',      'label' => 'Pemesanan Air'),
+            array('key' => 'air_rekap_vendor', 'href' => 'air_rekap_vendor.php', 'label' => 'Rekap Vendor'),
+            array('key' => 'air_kwitansi',     'href' => 'air_kwitansi.php',     'label' => 'Kwitansi Penagihan'),
+            array('key' => 'air_produk',       'href' => 'air_produk.php',       'label' => 'Master Produk'),
+        ),
+    ),
+    array(
         'title' => 'Koperasi',
         'items' => array(
             array('key' => 'anggota',             'href' => 'anggota.php',             'label' => 'Anggota'),
@@ -199,8 +212,9 @@ $visibleGroups = sidebar_filter_groups($menuGroups, (string)$currentRole);
 $roleBadge = array(
     'admin'  => array('label' => 'Admin',  'color' => 'bg-black text-white'),
     'kasir'  => array('label' => 'Kasir',  'color' => 'bg-blue-100 text-blue-700'),
-    'cafe'   => array('label' => 'Cafe',   'color' => 'bg-amber-100 text-amber-700'),
-    'rental' => array('label' => 'Rental', 'color' => 'bg-purple-100 text-purple-700'),
+    'cafe'        => array('label' => 'Cafe',        'color' => 'bg-amber-100 text-amber-700'),
+    'air_mineral' => array('label' => 'Air Mineral', 'color' => 'bg-cyan-100 text-cyan-700'),
+    'rental'      => array('label' => 'Rental',      'color' => 'bg-purple-100 text-purple-700'),
     'ksp'    => array('label' => 'KSP',    'color' => 'bg-green-100 text-green-700'),
 );
 
@@ -324,7 +338,8 @@ $badge = isset($roleBadge[$currentRole])
         .laporan-header,
         .laporan-main-wrap,
         .penarikan-simpanan-main,
-        .penarikan-main {
+        .penarikan-main,
+        .air-main {
             margin-left: var(--sidebar-w);
         }
     }
@@ -347,7 +362,8 @@ $badge = isset($roleBadge[$currentRole])
         .laporan-header,
         .laporan-main-wrap,
         .penarikan-simpanan-main,
-        .penarikan-main {
+        .penarikan-main,
+        .air-main {
             margin-left: 0 !important;
         }
     }

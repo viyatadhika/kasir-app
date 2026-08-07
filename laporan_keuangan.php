@@ -170,6 +170,243 @@ if (!function_exists('table_columns_lk')) {
     }
 }
 
+
+if (!function_exists('table_exists_lk')) {
+    function table_exists_lk(PDO $pdo, string $table): bool
+    {
+        return table_columns_lk($pdo, $table) !== [];
+    }
+}
+
+if (!function_exists('first_column_lk')) {
+    /** @param array<int,string> $candidates */
+    function first_column_lk(array $columns, array $candidates): string
+    {
+        foreach ($candidates as $candidate) {
+            if (in_array($candidate, $columns, true)) {
+                return $candidate;
+            }
+        }
+
+        return '';
+    }
+}
+
+if (!function_exists('ringkasan_unit_usaha_lk')) {
+    /**
+     * Ringkasan ini bersifat operasional dan tidak mengganti pencatatan jurnal.
+     * Nilai laporan resmi tetap berasal dari jurnal_umum dan jurnal_detail.
+     *
+     * @return array<string,mixed>
+     */
+    function ringkasan_unit_usaha_lk(PDO $pdo, string $awal, string $akhir): array
+    {
+        $result = [
+            'pos_toko' => 0.0,
+            'cafe' => 0.0,
+            'air_tagihan' => 0.0,
+            'air_lunas' => 0.0,
+            'air_piutang' => 0.0,
+            'air_batal' => 0.0,
+            'air_estimasi_vendor' => 0.0,
+            'air_biaya_vendor' => 0.0,
+            'air_margin_operasional' => 0.0,
+            'cafe_terdeteksi' => false,
+            'sumber_cafe' => '',
+            'rincian_pos' => [],
+        ];
+
+        /*
+         * POS dan Cafe.
+         * Jika tabel transaksi mempunyai kolom unit/modul/outlet, transaksi Cafe
+         * dipisahkan otomatis. Jika tidak, seluruh transaksi dianggap POS Toko.
+         */
+        $transactionColumns = table_columns_lk($pdo, 'transaksi');
+        if ($transactionColumns && in_array('created_at', $transactionColumns, true) && in_array('total', $transactionColumns, true)) {
+            $sourceCandidates = [
+                'sumber_transaksi',
+                'unit_usaha',
+                'unit',
+                'modul',
+                'sumber',
+                'source',
+                'outlet',
+                'channel',
+                'jenis_transaksi',
+                'tipe_transaksi',
+                'kategori'
+            ];
+            $sourceColumn = first_column_lk($transactionColumns, $sourceCandidates);
+            $statusColumn = first_column_lk($transactionColumns, ['status_transaksi', 'status']);
+            $whereStatusTransaksi = $statusColumn !== ''
+                ? " AND LOWER(COALESCE(`{$statusColumn}`,'')) NOT IN ('batal','cancel','cancelled','void')"
+                : '';
+
+            if ($sourceColumn !== '') {
+                $sql = "
+                    SELECT
+                        LOWER(TRIM(CAST(`{$sourceColumn}` AS CHAR))) AS sumber,
+                        COALESCE(SUM(total), 0) AS jumlah
+                    FROM transaksi
+                    WHERE DATE(created_at) BETWEEN :awal AND :akhir
+                    {$whereStatusTransaksi}
+                    GROUP BY LOWER(TRIM(CAST(`{$sourceColumn}` AS CHAR)))
+                ";
+                $stmt = $pdo->prepare($sql);
+                $stmt->execute([':awal' => $awal, ':akhir' => $akhir]);
+
+                foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
+                    $source = strtolower(trim((string)($row['sumber'] ?? '')));
+                    $amount = (float)($row['jumlah'] ?? 0);
+                    $result['rincian_pos'][$source !== '' ? $source : 'tanpa_kategori'] = $amount;
+
+                    if (strpos($source, 'cafe') !== false || strpos($source, 'kafe') !== false) {
+                        $result['cafe'] += $amount;
+                        $result['cafe_terdeteksi'] = true;
+                        $result['sumber_cafe'] = 'transaksi.' . $sourceColumn;
+                    } else {
+                        $result['pos_toko'] += $amount;
+                    }
+                }
+            } else {
+                $stmt = $pdo->prepare("
+                    SELECT COALESCE(SUM(total), 0)
+                    FROM transaksi
+                    WHERE DATE(created_at) BETWEEN :awal AND :akhir
+                    {$whereStatusTransaksi}
+                ");
+                $stmt->execute([':awal' => $awal, ':akhir' => $akhir]);
+                $result['pos_toko'] = (float)$stmt->fetchColumn();
+            }
+        }
+
+        // Fallback untuk instalasi yang menyimpan transaksi Cafe pada tabel tersendiri.
+        if (!$result['cafe_terdeteksi']) {
+            foreach (['transaksi_cafe', 'cafe_transaksi', 'pos_cafe_transaksi'] as $table) {
+                $cols = table_columns_lk($pdo, $table);
+                if (!$cols) {
+                    continue;
+                }
+
+                $dateColumn = first_column_lk($cols, ['created_at', 'tanggal', 'tanggal_transaksi', 'waktu']);
+                $totalColumn = first_column_lk($cols, ['total', 'grand_total', 'total_bayar', 'total_transaksi']);
+
+                if ($dateColumn === '' || $totalColumn === '') {
+                    continue;
+                }
+
+                $dateExpr = $dateColumn === 'tanggal' ? "`{$dateColumn}`" : "DATE(`{$dateColumn}`)";
+                $stmt = $pdo->prepare("
+                    SELECT COALESCE(SUM(`{$totalColumn}`), 0)
+                    FROM `{$table}`
+                    WHERE {$dateExpr} BETWEEN :awal AND :akhir
+                ");
+                $stmt->execute([':awal' => $awal, ':akhir' => $akhir]);
+                $result['cafe'] = (float)$stmt->fetchColumn();
+                $result['cafe_terdeteksi'] = true;
+                $result['sumber_cafe'] = $table;
+                break;
+            }
+        }
+
+        // Air Mineral berdasarkan kwitansi penagihan.
+        $kwitansiColumns = table_columns_lk($pdo, 'air_kwitansi');
+        if ($kwitansiColumns && in_array('total_tagihan', $kwitansiColumns, true)) {
+            $dateColumn = first_column_lk($kwitansiColumns, ['tanggal_kwitansi', 'created_at', 'tanggal']);
+            $statusColumn = first_column_lk($kwitansiColumns, ['status_pembayaran', 'status']);
+
+            if ($dateColumn !== '') {
+                $dateExpr = $dateColumn === 'created_at' ? "DATE(`{$dateColumn}`)" : "`{$dateColumn}`";
+                $statusExpr = $statusColumn !== ''
+                    ? "LOWER(REPLACE(TRIM(CAST(`{$statusColumn}` AS CHAR)), ' ', '_'))"
+                    : "'belum_bayar'";
+
+                $stmt = $pdo->prepare("
+                    SELECT
+                        {$statusExpr} AS status_bayar,
+                        COALESCE(SUM(total_tagihan), 0) AS jumlah
+                    FROM air_kwitansi
+                    WHERE {$dateExpr} BETWEEN :awal AND :akhir
+                    GROUP BY {$statusExpr}
+                ");
+                $stmt->execute([':awal' => $awal, ':akhir' => $akhir]);
+
+                foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
+                    $status = strtolower(trim((string)($row['status_bayar'] ?? 'belum_bayar')));
+                    $amount = (float)($row['jumlah'] ?? 0);
+
+                    if ($status === 'batal' || $status === 'dibatalkan') {
+                        $result['air_batal'] += $amount;
+                        continue;
+                    }
+
+                    $result['air_tagihan'] += $amount;
+                    if (in_array($status, ['lunas', 'dibayar', 'paid', 'selesai'], true)) {
+                        $result['air_lunas'] += $amount;
+                    } else {
+                        $result['air_piutang'] += $amount;
+                    }
+                }
+            }
+        }
+
+        /*
+         * Biaya vendor Air Mineral.
+         * - estimasi_vendor memakai jumlah_dipesan x harga_vendor;
+         * - biaya_vendor memakai jumlah_diterima x harga_vendor sehingga lebih dekat
+         *   ke biaya barang yang benar-benar diterima pada periode tersebut.
+         * Ringkasan ini tetap bersifat operasional; laporan resmi tetap mengikuti jurnal.
+         */
+        $vendorOrderCols = table_columns_lk($pdo, 'air_vendor_order');
+        $vendorDetailCols = table_columns_lk($pdo, 'air_vendor_order_detail');
+        $airProductCols = table_columns_lk($pdo, 'air_produk');
+
+        if (
+            $vendorOrderCols
+            && $vendorDetailCols
+            && $airProductCols
+            && in_array('id', $vendorOrderCols, true)
+            && in_array('vendor_order_id', $vendorDetailCols, true)
+            && in_array('produk_id', $vendorDetailCols, true)
+            && in_array('harga_vendor', $airProductCols, true)
+        ) {
+            $vendorDateColumn = first_column_lk($vendorOrderCols, ['tanggal_kebutuhan', 'tanggal_rekap', 'created_at']);
+            $vendorStatusColumn = first_column_lk($vendorOrderCols, ['status']);
+            $orderedColumn = first_column_lk($vendorDetailCols, ['jumlah_dipesan', 'jumlah_diminta']);
+            $receivedColumn = first_column_lk($vendorDetailCols, ['jumlah_diterima', 'jumlah_dikonfirmasi', 'jumlah_dipesan']);
+
+            if ($vendorDateColumn !== '' && $orderedColumn !== '' && $receivedColumn !== '') {
+                $vendorDateExpr = $vendorDateColumn === 'created_at'
+                    ? "DATE(vo.`{$vendorDateColumn}`)"
+                    : "vo.`{$vendorDateColumn}`";
+                $vendorStatusWhere = $vendorStatusColumn !== ''
+                    ? " AND LOWER(COALESCE(vo.`{$vendorStatusColumn}`,'')) <> 'batal'"
+                    : '';
+
+                $stmt = $pdo->prepare("
+                    SELECT
+                        COALESCE(SUM(COALESCE(vd.`{$orderedColumn}`,0) * COALESCE(ap.harga_vendor,0)),0) AS estimasi_vendor,
+                        COALESCE(SUM(COALESCE(vd.`{$receivedColumn}`,0) * COALESCE(ap.harga_vendor,0)),0) AS biaya_vendor
+                    FROM air_vendor_order_detail vd
+                    JOIN air_vendor_order vo ON vo.id = vd.vendor_order_id
+                    LEFT JOIN air_produk ap ON ap.id = vd.produk_id
+                    WHERE {$vendorDateExpr} BETWEEN :awal AND :akhir
+                    {$vendorStatusWhere}
+                ");
+                $stmt->execute([':awal' => $awal, ':akhir' => $akhir]);
+                $vendorRow = $stmt->fetch(PDO::FETCH_ASSOC) ?: [];
+                $result['air_estimasi_vendor'] = (float)($vendorRow['estimasi_vendor'] ?? 0);
+                $result['air_biaya_vendor'] = (float)($vendorRow['biaya_vendor'] ?? 0);
+            }
+        }
+
+        $result['air_margin_operasional'] =
+            (float)$result['air_tagihan'] - (float)$result['air_biaya_vendor'];
+
+        return $result;
+    }
+}
+
 if (!function_exists('rekonsiliasi_kas_bank_lk')) {
     /**
      * Menghitung penerimaan POS langsung dari tabel transaksi agar pembayaran
@@ -195,7 +432,7 @@ if (!function_exists('rekonsiliasi_kas_bank_lk')) {
         $methodParts = [];
         foreach ($methodCandidates as $candidate) {
             if (in_array($candidate, $cols, true)) {
-                $methodParts[] = "NULLIF(TRIM(CAST(`{$candidate}` AS CHAR)), '')";
+                $methodParts[] = "NULLIF(TRIM(CAST(t.`{$candidate}` AS CHAR)), '')";
             }
         }
 
@@ -203,12 +440,41 @@ if (!function_exists('rekonsiliasi_kas_bank_lk')) {
             ? 'COALESCE(' . implode(', ', $methodParts) . ", 'tunai')"
             : "'tunai'";
 
+        $statusColumn = first_column_lk($cols, ['status_transaksi', 'status']);
+        $whereStatus = $statusColumn !== ''
+            ? " AND LOWER(COALESCE(t.`{$statusColumn}`,'')) NOT IN ('batal','cancel','cancelled','void')"
+            : '';
+
+        $whereKasSession = '';
+        if (
+            table_exists_lk($pdo, 'kas_harian')
+            && in_array('user_id', $cols, true)
+            && in_array('created_at', $cols, true)
+        ) {
+            $kasCols = table_columns_lk($pdo, 'kas_harian');
+            if (
+                in_array('user_id', $kasCols, true)
+                && in_array('opened_at', $kasCols, true)
+                && in_array('closed_at', $kasCols, true)
+            ) {
+                $whereKasSession = " AND EXISTS (
+                    SELECT 1
+                    FROM kas_harian kh
+                    WHERE kh.user_id = t.user_id
+                      AND t.created_at >= kh.opened_at
+                      AND t.created_at <= COALESCE(kh.closed_at, NOW())
+                )";
+            }
+        }
+
         $sql = "
             SELECT
                 LOWER(REPLACE(REPLACE(REPLACE({$methodExpr}, '-', '_'), ' ', '_'), '/', '_')) AS metode,
                 COALESCE(SUM(total), 0) AS jumlah
-            FROM transaksi
-            WHERE DATE(created_at) BETWEEN :awal AND :akhir
+            FROM transaksi t
+            WHERE DATE(t.created_at) BETWEEN :awal AND :akhir
+            {$whereStatus}
+            {$whereKasSession}
             GROUP BY LOWER(REPLACE(REPLACE(REPLACE({$methodExpr}, '-', '_'), ' ', '_'), '/', '_'))
         ";
 
@@ -327,6 +593,20 @@ $akhir = $periode['akhir'];
 $rows = [];
 $recentJurnal = [];
 $rekonsiliasiPembayaran = ['kas' => 0.0, 'bank' => 0.0, 'rincian' => []];
+$ringkasanUnitUsaha = [
+    'pos_toko' => 0.0,
+    'cafe' => 0.0,
+    'air_tagihan' => 0.0,
+    'air_lunas' => 0.0,
+    'air_piutang' => 0.0,
+    'air_batal' => 0.0,
+    'air_estimasi_vendor' => 0.0,
+    'air_biaya_vendor' => 0.0,
+    'air_margin_operasional' => 0.0,
+    'cafe_terdeteksi' => false,
+    'sumber_cafe' => '',
+    'rincian_pos' => [],
+];
 
 try {
     $rows = ambil_saldo_coa_lk($pdo, $periode['where'], $periode['params']);
@@ -341,6 +621,9 @@ try {
         $akhir,
         $rekonsiliasiPembayaran
     );
+
+    // Ringkasan unit usaha Cafe dan Air Mineral untuk monitoring manajemen.
+    $ringkasanUnitUsaha = ringkasan_unit_usaha_lk($pdo, $awal, $akhir);
 
     $stmtRecent = $pdo->prepare("
         SELECT
@@ -549,7 +832,7 @@ if (function_exists('catat_view_once')) {
                 <a href="laba_rugi.php?awal=<?= h($awal) ?>&akhir=<?= h($akhir) ?>" class="bg-white border border-subtle p-4 md:p-5 hover:border-black transition-all">
                     <p class="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1">Pendapatan</p>
                     <p class="text-xl font-black text-green-600"><?= rupiah_lk($totalPendapatan) ?></p>
-                    <p class="text-[10px] text-gray-400 mt-1">POS, rental, bunga</p>
+                    <p class="text-[10px] text-gray-400 mt-1">POS/Toko, Cafe, Air Mineral, rental, bunga</p>
                 </a>
 
                 <a href="laba_rugi.php?awal=<?= h($awal) ?>&akhir=<?= h($akhir) ?>" class="bg-white border border-subtle p-4 md:p-5 hover:border-black transition-all">
@@ -565,19 +848,96 @@ if (function_exists('catat_view_once')) {
                 </a>
             </div>
 
+            <section class="bg-white border border-subtle p-4 md:p-5 print-card">
+                <div class="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-4 mb-4">
+                    <div>
+                        <h2 class="text-[10px] font-black uppercase tracking-widest text-gray-400">Ringkasan Unit Usaha</h2>
+                        <p class="text-xs text-gray-400 mt-1">
+                            Monitoring operasional Cafe dan Air Mineral. Nilai laporan keuangan resmi tetap mengikuti jurnal umum.
+                        </p>
+                    </div>
+                    <span class="inline-flex self-start border border-blue-100 bg-blue-50 px-3 py-2 text-[9px] font-black uppercase tracking-widest text-blue-700">
+                        Periode <?= h(tanggal_lk($awal)) ?> — <?= h(tanggal_lk($akhir)) ?>
+                    </span>
+                </div>
+
+                <div class="grid grid-cols-2 md:grid-cols-4 xl:grid-cols-8 gap-3">
+                    <div class="border border-subtle bg-gray-50 p-4">
+                        <p class="text-[9px] font-black uppercase tracking-widest text-gray-400">Penjualan POS/Toko</p>
+                        <p class="text-lg font-black mt-2"><?= rupiah_lk($ringkasanUnitUsaha['pos_toko'] ?? 0) ?></p>
+                        <p class="text-[9px] text-gray-400 mt-1">Transaksi selain Cafe</p>
+                    </div>
+
+                    <div class="border border-amber-100 bg-amber-50 p-4">
+                        <p class="text-[9px] font-black uppercase tracking-widest text-amber-600">Penjualan Cafe</p>
+                        <p class="text-lg font-black text-amber-700 mt-2"><?= rupiah_lk($ringkasanUnitUsaha['cafe'] ?? 0) ?></p>
+                        <p class="text-[9px] text-amber-600 mt-1">
+                            <?= !empty($ringkasanUnitUsaha['cafe_terdeteksi']) ? 'Sumber: ' . h($ringkasanUnitUsaha['sumber_cafe']) : 'Belum ada sumber Cafe terdeteksi' ?>
+                        </p>
+                    </div>
+
+                    <div class="border border-cyan-100 bg-cyan-50 p-4">
+                        <p class="text-[9px] font-black uppercase tracking-widest text-cyan-700">Tagihan Air Mineral</p>
+                        <p class="text-lg font-black text-cyan-800 mt-2"><?= rupiah_lk($ringkasanUnitUsaha['air_tagihan'] ?? 0) ?></p>
+                        <p class="text-[9px] text-cyan-600 mt-1">Kwitansi selain batal</p>
+                    </div>
+
+                    <div class="border border-green-100 bg-green-50 p-4">
+                        <p class="text-[9px] font-black uppercase tracking-widest text-green-700">Air Mineral Lunas</p>
+                        <p class="text-lg font-black text-green-700 mt-2"><?= rupiah_lk($ringkasanUnitUsaha['air_lunas'] ?? 0) ?></p>
+                        <p class="text-[9px] text-green-600 mt-1">Pembayaran diterima</p>
+                    </div>
+
+                    <div class="border border-amber-100 bg-white p-4">
+                        <p class="text-[9px] font-black uppercase tracking-widest text-amber-600">Piutang Air Mineral</p>
+                        <p class="text-lg font-black text-amber-700 mt-2"><?= rupiah_lk($ringkasanUnitUsaha['air_piutang'] ?? 0) ?></p>
+                        <p class="text-[9px] text-gray-400 mt-1">Tagihan belum lunas</p>
+                    </div>
+
+                    <div class="border border-red-100 bg-red-50 p-4">
+                        <p class="text-[9px] font-black uppercase tracking-widest text-red-600">Biaya Vendor Air</p>
+                        <p class="text-lg font-black text-red-700 mt-2"><?= rupiah_lk($ringkasanUnitUsaha['air_biaya_vendor'] ?? 0) ?></p>
+                        <p class="text-[9px] text-red-500 mt-1">Barang diterima × harga vendor</p>
+                    </div>
+
+                    <div class="border <?= ($ringkasanUnitUsaha['air_margin_operasional'] ?? 0) >= 0 ? 'border-green-100 bg-green-50' : 'border-red-200 bg-red-50' ?> p-4">
+                        <p class="text-[9px] font-black uppercase tracking-widest <?= ($ringkasanUnitUsaha['air_margin_operasional'] ?? 0) >= 0 ? 'text-green-700' : 'text-red-700' ?>">Margin Air Mineral</p>
+                        <p class="text-lg font-black mt-2 <?= ($ringkasanUnitUsaha['air_margin_operasional'] ?? 0) >= 0 ? 'text-green-700' : 'text-red-700' ?>">
+                            <?= rupiah_lk($ringkasanUnitUsaha['air_margin_operasional'] ?? 0) ?>
+                        </p>
+                        <p class="text-[9px] text-gray-500 mt-1">Tagihan − biaya vendor diterima</p>
+                    </div>
+                </div>
+
+                <?php if ((float)($ringkasanUnitUsaha['air_estimasi_vendor'] ?? 0) > 0): ?>
+                    <div class="mt-4 border border-blue-100 bg-blue-50 px-4 py-3 text-xs text-blue-700">
+                        Estimasi nilai pesanan ke vendor pada periode ini:
+                        <strong><?= rupiah_lk($ringkasanUnitUsaha['air_estimasi_vendor'] ?? 0) ?></strong>.
+                        Biaya vendor pada kartu di atas memakai jumlah yang benar-benar diterima, bukan sekadar jumlah yang dipesan.
+                    </div>
+                <?php endif; ?>
+
+                <?php if (empty($ringkasanUnitUsaha['cafe_terdeteksi'])): ?>
+                    <div class="mt-4 border border-amber-100 bg-amber-50 px-4 py-3 text-xs text-amber-700">
+                        Sistem belum menemukan kolom penanda unit Cafe pada tabel transaksi maupun tabel transaksi Cafe terpisah.
+                        Nilai Cafe akan tampil setelah transaksi Cafe menyimpan sumber/unit usaha yang dapat dibedakan.
+                    </div>
+                <?php endif; ?>
+            </section>
+
             <section class="bg-white border border-subtle p-4 md:p-5">
                 <div class="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
                     <div>
-                        <h2 class="text-[10px] font-black uppercase tracking-widest text-gray-400">Rekonsiliasi Pembayaran POS</h2>
-                        <p class="text-xs text-gray-400 mt-1">Kas berasal dari transaksi tunai. Bank berasal dari QRIS, transfer, debit, kredit, EDC, dan metode non-tunai lainnya.</p>
+                        <h2 class="text-[10px] font-black uppercase tracking-widest text-gray-400">Rekonsiliasi Pembayaran POS & Cafe</h2>
+                        <p class="text-xs text-gray-400 mt-1">Kas berasal dari transaksi tunai POS/Cafe. Bank berasal dari QRIS, transfer, debit, kredit, EDC, dan metode non-tunai lainnya. Transaksi batal/void dikeluarkan dan, bila tabel kas_harian tersedia, hanya transaksi dalam sesi kas yang dihitung. Air Mineral yang belum lunas tetap menjadi piutang operasional sampai dijurnal.</p>
                     </div>
                     <div class="grid grid-cols-2 gap-3 min-w-full lg:min-w-[420px]">
                         <div class="border border-subtle bg-gray-50 p-3">
-                            <p class="text-[9px] font-black uppercase tracking-widest text-gray-400">Kas POS (Tunai)</p>
+                            <p class="text-[9px] font-black uppercase tracking-widest text-gray-400">Kas POS/Cafe (Tunai)</p>
                             <p class="text-lg font-black mt-1"><?= rupiah_lk($rekonsiliasiPembayaran['kas'] ?? 0) ?></p>
                         </div>
                         <div class="border border-blue-100 bg-blue-50 p-3">
-                            <p class="text-[9px] font-black uppercase tracking-widest text-blue-500">Bank POS (Non-Tunai)</p>
+                            <p class="text-[9px] font-black uppercase tracking-widest text-blue-500">Bank POS/Cafe (Non-Tunai)</p>
                             <p class="text-lg font-black text-blue-700 mt-1"><?= rupiah_lk($rekonsiliasiPembayaran['bank'] ?? 0) ?></p>
                         </div>
                     </div>

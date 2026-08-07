@@ -82,6 +82,59 @@ if (!function_exists('is_admin_kas_safe')) {
         return in_array($role, ['admin', 'administrator', 'superadmin', 'owner'], true);
     }
 }
+
+
+if (!function_exists('normalize_unit_kas')) {
+    /**
+     * @param mixed $unit
+     * @return string
+     */
+    function normalize_unit_kas($unit)
+    {
+        $unit = strtolower(trim((string)$unit));
+
+        $map = [
+            'toko' => 'toko',
+            'pos' => 'toko',
+            'kasir' => 'toko',
+            'retail' => 'toko',
+            'cafe' => 'cafe',
+            'kafe' => 'cafe',
+            'kasir cafe' => 'cafe',
+        ];
+
+        return isset($map[$unit]) ? $map[$unit] : 'toko';
+    }
+}
+
+if (!function_exists('current_kas_unit_safe')) {
+    function current_kas_unit_safe()
+    {
+        $role = current_user_role_safe();
+
+        if (in_array($role, ['cafe', 'kasir cafe', 'staff cafe', 'cafe cashier'], true)) {
+            return 'cafe';
+        }
+
+        $requestUnit = isset($_GET['unit']) ? (string)$_GET['unit'] : '';
+        if (is_admin_kas_safe() && $requestUnit !== '') {
+            return normalize_unit_kas($requestUnit);
+        }
+
+        return 'toko';
+    }
+}
+
+if (!function_exists('label_unit_kas')) {
+    /**
+     * @param mixed $unit
+     * @return string
+     */
+    function label_unit_kas($unit)
+    {
+        return normalize_unit_kas($unit) === 'cafe' ? 'Cafe' : 'Toko';
+    }
+}
 if (!function_exists('has_table')) {
     /**
      * Cek tabel menggunakan INFORMATION_SCHEMA agar stabil pada PDO MySQL/MariaDB.
@@ -140,6 +193,7 @@ if (!function_exists('ensure_kas_harian_table')) {
             tanggal DATE NOT NULL,
             user_id INT NULL,
             operator VARCHAR(150) NULL,
+            unit VARCHAR(20) NOT NULL DEFAULT 'toko',
             kas_awal DECIMAL(15,2) NOT NULL DEFAULT 0,
             kas_akhir_sistem DECIMAL(15,2) NOT NULL DEFAULT 0,
             kas_aktual DECIMAL(15,2) NULL,
@@ -157,7 +211,8 @@ if (!function_exists('ensure_kas_harian_table')) {
             updated_at DATETIME NULL,
             INDEX idx_tanggal (tanggal),
             INDEX idx_user_tanggal (user_id, tanggal),
-            INDEX idx_status (status)
+            INDEX idx_status (status),
+            INDEX idx_unit_status (unit, status)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
     }
 }
@@ -165,6 +220,9 @@ ensure_kas_harian_table($pdo);
 
 // Tambahan struktur audit dan indeks untuk menjaga satu sesi kas aktif per operator.
 try {
+    if (!has_column($pdo, 'kas_harian', 'unit')) {
+        $pdo->exec("ALTER TABLE kas_harian ADD COLUMN unit VARCHAR(20) NOT NULL DEFAULT 'toko' AFTER operator");
+    }
     if (!has_column($pdo, 'kas_harian', 'closed_by_user_id')) {
         $pdo->exec("ALTER TABLE kas_harian ADD COLUMN closed_by_user_id INT NULL AFTER closed_at");
     }
@@ -184,6 +242,9 @@ try {
     if (!in_array('idx_user_status', $indexNames, true)) {
         $pdo->exec("ALTER TABLE kas_harian ADD INDEX idx_user_status (user_id, status)");
     }
+    if (!in_array('idx_unit_status', $indexNames, true)) {
+        $pdo->exec("ALTER TABLE kas_harian ADD INDEX idx_unit_status (unit, status)");
+    }
 } catch (Throwable $e) {
     // Struktur lama tetap dapat digunakan jika akun database tidak memiliki izin ALTER.
 }
@@ -192,6 +253,8 @@ $userId        = current_user_id_safe();
 $operatorName  = current_user_name_safe();
 $today         = date('Y-m-d');
 $isAdminKas   = is_admin_kas_safe();
+$currentKasUnit = current_kas_unit_safe();
+$currentKasUnitLabel = label_unit_kas($currentKasUnit);
 
 /**
  * @param PDO $pdo
@@ -199,12 +262,12 @@ $isAdminKas   = is_admin_kas_safe();
  * @param int $userId
  * @return array|null
  */
-function get_shift_buka(PDO $pdo, $tanggal, $userId)
+function get_shift_buka(PDO $pdo, $tanggal, $userId, $unit = 'toko')
 {
     // Satu operator hanya boleh memiliki satu sesi berstatus buka, tanpa membatasi tanggal.
     // Parameter $tanggal dipertahankan agar kompatibel dengan pemanggilan lama.
-    $st = $pdo->prepare("SELECT * FROM kas_harian WHERE user_id=:user_id AND status='buka' ORDER BY opened_at ASC, id ASC LIMIT 1");
-    $st->execute([':user_id' => $userId]);
+    $st = $pdo->prepare("SELECT * FROM kas_harian WHERE user_id=:user_id AND unit=:unit AND status='buka' ORDER BY opened_at ASC, id ASC LIMIT 1");
+    $st->execute([':user_id' => $userId, ':unit' => normalize_unit_kas($unit)]);
     $row = $st->fetch(PDO::FETCH_ASSOC);
     return $row ?: null;
 }
@@ -215,11 +278,11 @@ function get_shift_buka(PDO $pdo, $tanggal, $userId)
  * @param int $userId
  * @return array|null
  */
-function get_shift_terakhir(PDO $pdo, $tanggal, $userId)
+function get_shift_terakhir(PDO $pdo, $tanggal, $userId, $unit = 'toko')
 {
     // Ambil sesi terakhir operator tanpa membatasi tanggal agar sesi lama tetap terlihat.
-    $st = $pdo->prepare("SELECT * FROM kas_harian WHERE user_id=:user_id ORDER BY opened_at DESC, id DESC LIMIT 1");
-    $st->execute([':user_id' => $userId]);
+    $st = $pdo->prepare("SELECT * FROM kas_harian WHERE user_id=:user_id AND unit=:unit ORDER BY opened_at DESC, id DESC LIMIT 1");
+    $st->execute([':user_id' => $userId, ':unit' => normalize_unit_kas($unit)]);
     $row = $st->fetch(PDO::FETCH_ASSOC);
     return $row ?: null;
 }
@@ -230,7 +293,7 @@ function get_shift_terakhir(PDO $pdo, $tanggal, $userId)
  * @param string|null $closedAt
  * @return array
  */
-function hitung_penjualan_shift(PDO $pdo, $openedAt, $closedAt = null, $operatorUserId = 0)
+function hitung_penjualan_shift(PDO $pdo, $openedAt, $closedAt = null, $operatorUserId = 0, $unit = 'toko')
 {
     $data = [
         'total_sales'    => 0,
@@ -241,8 +304,12 @@ function hitung_penjualan_shift(PDO $pdo, $openedAt, $closedAt = null, $operator
         'fee_promosi'    => 0,
         'debug_start'    => '',
         'debug_end'      => '',
-        'debug_error'    => ''
+        'debug_error'    => '',
+        'unit'           => normalize_unit_kas($unit),
+        'source_info'    => ''
     ];
+
+    $unit = normalize_unit_kas($unit);
 
     try {
         if (!has_table($pdo, 'transaksi')) {
@@ -256,6 +323,7 @@ function hitung_penjualan_shift(PDO $pdo, $openedAt, $closedAt = null, $operator
         $statusCol = first_existing_column($pdo, 'transaksi', ['status_transaksi', 'status'], '');
         $userCol   = first_existing_column($pdo, 'transaksi', ['user_id', 'kasir_id', 'operator_id', 'created_by'], '');
         $promoCol  = first_existing_column($pdo, 'transaksi', ['fee_promosi', 'biaya_promosi', 'promo_fee'], '');
+        $unitCol   = first_existing_column($pdo, 'transaksi', ['unit', 'modul', 'sumber', 'outlet', 'jenis_transaksi', 'channel'], '');
 
         if ($dateCol === '' || $totalCol === '') {
             $data['debug_error'] = 'Kolom tanggal atau total transaksi tidak ditemukan.';
@@ -271,6 +339,22 @@ function hitung_penjualan_shift(PDO $pdo, $openedAt, $closedAt = null, $operator
 
         $where = ["`$dateCol` >= :start", "`$dateCol` <= :end"];
         $params = [':start' => $queryStart, ':end' => $queryEnd];
+
+        // Pisahkan transaksi Toko dan Cafe bila tabel transaksi memiliki penanda unit/modul.
+        if ($unitCol !== '') {
+            if ($unit === 'cafe') {
+                $where[] = "LOWER(TRIM(COALESCE(`$unitCol`,''))) IN ('cafe','kafe','pos_cafe','kasir_cafe')";
+            } else {
+                $where[] = "(LOWER(TRIM(COALESCE(`$unitCol`,''))) NOT IN ('cafe','kafe','pos_cafe','kasir_cafe') OR TRIM(COALESCE(`$unitCol`,''))='')";
+            }
+            $data['source_info'] = 'transaksi.' . $unitCol;
+        } elseif ($unit === 'cafe') {
+            // Tanpa kolom penanda unit, transaksi Cafe tidak boleh dicampur dengan Toko.
+            $data['debug_error'] = 'Transaksi Cafe belum memiliki kolom unit/modul pada tabel transaksi.';
+            return $data;
+        } else {
+            $data['source_info'] = 'transaksi';
+        }
 
         // Satu sesi kas hanya menghitung transaksi operator yang membuka kas.
         if ($operatorUserId > 0 && $userCol !== '') {
@@ -327,6 +411,13 @@ function hitung_penjualan_shift(PDO $pdo, $openedAt, $closedAt = null, $operator
 
                 if ($detailTransCol && $detailQtyCol && $detailHargaCol && $idCol) {
                     $whereMargin = ["t.`$dateCol` >= :start", "t.`$dateCol` <= :end"];
+                    if ($unitCol !== '') {
+                        if ($unit === 'cafe') {
+                            $whereMargin[] = "LOWER(TRIM(COALESCE(t.`$unitCol`,''))) IN ('cafe','kafe','pos_cafe','kasir_cafe')";
+                        } else {
+                            $whereMargin[] = "(LOWER(TRIM(COALESCE(t.`$unitCol`,''))) NOT IN ('cafe','kafe','pos_cafe','kasir_cafe') OR TRIM(COALESCE(t.`$unitCol`,''))='')";
+                        }
+                    }
                     if ($operatorUserId > 0 && $userCol !== '') $whereMargin[] = "t.`$userCol` = :operator_user_id";
                     if ($statusCol !== '') $whereMargin[] = "LOWER(COALESCE(t.`$statusCol`,'')) NOT IN ('batal','cancel','cancelled','void')";
 
@@ -434,10 +525,11 @@ if (isset($_GET['action']) && $_GET['action'] === 'snapshot') {
 
     try {
         if ($isAdminKas) {
-            $stSnapshot = $pdo->query("SELECT * FROM kas_harian WHERE status='buka' ORDER BY opened_at DESC, id DESC");
+            $stSnapshot = $pdo->prepare("SELECT * FROM kas_harian WHERE status='buka' AND unit=:unit ORDER BY opened_at DESC, id DESC");
+            $stSnapshot->execute([':unit' => $currentKasUnit]);
         } else {
-            $stSnapshot = $pdo->prepare("SELECT * FROM kas_harian WHERE status='buka' AND user_id=:user_id ORDER BY opened_at DESC, id DESC");
-            $stSnapshot->execute([':user_id' => $userId]);
+            $stSnapshot = $pdo->prepare("SELECT * FROM kas_harian WHERE status='buka' AND user_id=:user_id AND unit=:unit ORDER BY opened_at DESC, id DESC");
+            $stSnapshot->execute([':user_id' => $userId, ':unit' => $currentKasUnit]);
         }
 
         $items = [];
@@ -446,7 +538,8 @@ if (isset($_GET['action']) && $_GET['action'] === 'snapshot') {
                 $pdo,
                 $rowSnapshot['opened_at'],
                 null,
-                (int)($rowSnapshot['user_id'] ?? 0)
+                (int)($rowSnapshot['user_id'] ?? 0),
+                (string)($rowSnapshot['unit'] ?? 'toko')
             );
             $items[] = [
                 'id' => (int)$rowSnapshot['id'],
@@ -491,14 +584,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_GET['action'])) {
             }
 
             try {
-                $aktif = get_shift_buka($pdo, $today, $userId);
+                $aktif = get_shift_buka($pdo, $today, $userId, $currentKasUnit);
                 if ($aktif) {
                     $pesan = 'Masih ada sesi kas yang belum ditutup sejak ' . tanggal_id($aktif['opened_at']) . ' (' . durasi_sesi_kas($aktif['opened_at']) . '). Tutup sesi tersebut terlebih dahulu.';
                     $pdo->prepare("SELECT RELEASE_LOCK(:lock_name)")->execute([':lock_name' => $lockName]);
                     json_response(['success' => false, 'message' => $pesan, 'open_shift_id' => (int)$aktif['id']]);
                 }
-                $st = $pdo->prepare("INSERT INTO kas_harian (tanggal,user_id,operator,kas_awal,status,opened_at) VALUES (:tanggal,:user_id,:operator,:kas_awal,'buka',NOW())");
-                $st->execute([':tanggal' => $today, ':user_id' => $userId, ':operator' => $operatorName, ':kas_awal' => $kasAwal]);
+                $st = $pdo->prepare("INSERT INTO kas_harian (tanggal,user_id,operator,unit,kas_awal,status,opened_at) VALUES (:tanggal,:user_id,:operator,:unit,:kas_awal,'buka',NOW())");
+                $st->execute([
+                    ':tanggal' => $today,
+                    ':user_id' => $userId,
+                    ':operator' => $operatorName,
+                    ':unit' => $currentKasUnit,
+                    ':kas_awal' => $kasAwal
+                ]);
                 $newId = (int)$pdo->lastInsertId();
                 $pdo->prepare("SELECT RELEASE_LOCK(:lock_name)")->execute([':lock_name' => $lockName]);
                 json_response(['success' => true, 'message' => 'Kas berhasil dibuka.', 'id' => $newId]);
@@ -512,11 +611,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_GET['action'])) {
         }
 
         if ($_GET['action'] === 'tutup') {
-            $aktif = get_shift_buka($pdo, $today, $userId);
+            $aktif = get_shift_buka($pdo, $today, $userId, $currentKasUnit);
             if (!$aktif) json_response(['success' => false, 'message' => 'Tidak ada sesi kas yang sedang terbuka.']);
             $kasAktual = (float)preg_replace('/[^0-9]/', '', (string)($input['kas_aktual'] ?? 0));
             $catatan   = trim((string)($input['catatan'] ?? ''));
-            $sales     = hitung_penjualan_shift($pdo, $aktif['opened_at'], date('Y-m-d H:i:s'), (int)$aktif['user_id']);
+            $sales     = hitung_penjualan_shift($pdo, $aktif['opened_at'], date('Y-m-d H:i:s'), (int)$aktif['user_id'], (string)($aktif['unit'] ?? $currentKasUnit));
             $kasAkhir  = (float)$aktif['kas_awal'] + (float)$sales['total_sales'];
             // Sesuai aturan operasional: kas aktual disamakan dengan kas akhir sistem.
             $kasAktual = $kasAkhir;
@@ -549,14 +648,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_GET['action'])) {
         }
 
         if ($_GET['action'] === 'ringkasan') {
-            $aktif = get_shift_buka($pdo, $today, $userId);
-            $last  = $aktif ?: get_shift_terakhir($pdo, $today, $userId);
+            $aktif = get_shift_buka($pdo, $today, $userId, $currentKasUnit);
+            $last  = $aktif ?: get_shift_terakhir($pdo, $today, $userId, $currentKasUnit);
             if (!$last) json_response(['success' => true, 'data' => null]);
             $sales = hitung_penjualan_shift(
                 $pdo,
                 $last['opened_at'],
                 (($last['status'] ?? '') === 'tutup' && !empty($last['closed_at'])) ? $last['closed_at'] : null,
-                (int)($last['user_id'] ?? 0)
+                (int)($last['user_id'] ?? 0),
+                (string)($last['unit'] ?? $currentKasUnit)
             );
             $last['kas_akhir_sistem'] = (float)$last['kas_awal'] + (float)$sales['total_sales'];
             $last['kas_aktual'] = $last['kas_akhir_sistem'];
@@ -580,7 +680,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_GET['action'])) {
                 $pdo,
                 $row['opened_at'],
                 (($row['status'] ?? '') === 'tutup' && !empty($row['closed_at'])) ? $row['closed_at'] : null,
-                (int)($row['user_id'] ?? 0)
+                (int)($row['user_id'] ?? 0),
+                (string)($row['unit'] ?? $currentKasUnit)
             );
             $kasAkhir = (float)$row['kas_awal'] + (float)$sales['total_sales'];
 
@@ -612,14 +713,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_GET['action'])) {
     }
 }
 
-$shiftAktif = get_shift_buka($pdo, $today, $userId);
-$shiftLast  = $shiftAktif ?: get_shift_terakhir($pdo, $today, $userId);
+$shiftAktif = get_shift_buka($pdo, $today, $userId, $currentKasUnit);
+$shiftLast  = $shiftAktif ?: get_shift_terakhir($pdo, $today, $userId, $currentKasUnit);
 $salesNow = $shiftLast
     ? hitung_penjualan_shift(
         $pdo,
         $shiftLast['opened_at'],
         ($shiftLast['status'] === 'tutup' && !empty($shiftLast['closed_at'])) ? $shiftLast['closed_at'] : null,
-        (int)$shiftLast['user_id']
+        (int)$shiftLast['user_id'],
+        (string)($shiftLast['unit'] ?? $currentKasUnit)
     )
     : ['total_sales' => 0, 'total_tunai' => 0, 'total_nontunai' => 0, 'total_struk' => 0, 'margin' => 0, 'fee_promosi' => 0];
 
@@ -647,7 +749,9 @@ if (!in_array($filterStatus, ['buka', 'tutup'], true)) $filterStatus = '';
 $operatorFilterList = [];
 if ($isAdminKas) {
     try {
-        $operatorFilterList = $pdo->query("SELECT user_id, COALESCE(NULLIF(operator,''), CONCAT('User #', user_id)) AS operator FROM kas_harian GROUP BY user_id, operator ORDER BY operator ASC")->fetchAll(PDO::FETCH_ASSOC);
+        $stOperator = $pdo->prepare("SELECT user_id, COALESCE(NULLIF(operator,''), CONCAT('User #', user_id)) AS operator FROM kas_harian WHERE unit=:unit GROUP BY user_id, operator ORDER BY operator ASC");
+        $stOperator->execute([':unit' => $currentKasUnit]);
+        $operatorFilterList = $stOperator->fetchAll(PDO::FETCH_ASSOC);
     } catch (Throwable $e) {
         $operatorFilterList = [];
     }
@@ -660,8 +764,12 @@ try {
     $where = [];
     $params = [];
 
+    // Riwayat selalu dipisahkan berdasarkan unit kas yang sedang dibuka.
+    $where[] = "unit = :unit";
+    $params[':unit'] = $currentKasUnit;
+
     if ($isAdminKas) {
-        // Admin melihat semua riwayat buka/tutup kas dari seluruh operator.
+        // Admin melihat semua riwayat buka/tutup kas dari seluruh operator pada unit aktif.
         if ($filterUserId > 0) {
             $where[] = "user_id = :filter_user_id";
             $params[':filter_user_id'] = $filterUserId;
@@ -710,7 +818,8 @@ try {
             $pdo,
             $historyRow['opened_at'],
             (($historyRow['status'] ?? '') === 'tutup' && !empty($historyRow['closed_at'])) ? $historyRow['closed_at'] : null,
-            (int)($historyRow['user_id'] ?? 0)
+            (int)($historyRow['user_id'] ?? 0),
+            (string)($historyRow['unit'] ?? 'toko')
         );
         $historyRow['total_sales'] = $historySales['total_sales'];
         $historyRow['total_tunai'] = $historySales['total_tunai'];
@@ -737,6 +846,7 @@ $historyEndNo = min($offset + count($history), $totalHistory);
 
 // ── Data untuk cetak Bluetooth (format sama dengan struk.php) ──────────────
 $kasReceiptData = [
+    'unit'           => strtoupper((string)($shiftLast['unit'] ?? $currentKasUnit)),
     'operator'       => strtoupper((string)($shiftLast['operator'] ?? $operatorName)),
     'tanggal'        => tanggal_id(($shiftLast['closed_at'] ?? '') ?: date('Y-m-d H:i:s')),
     'status'         => $shiftAktif ? 'KAS BUKA' : strtoupper((string)($shiftLast['status'] ?? '-')),
@@ -765,7 +875,7 @@ $rightActionHtml = '
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Buka & Tutup Kas</title>
+    <title>Buka & Tutup Kas <?php echo e($currentKasUnitLabel); ?></title>
     <link rel="icon" type="image/png" href="assets/sejahub_icon.png">
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800;900&display=swap" rel="stylesheet">
@@ -1506,6 +1616,26 @@ $rightActionHtml = '
             </div>
         <?php endif; ?>
 
+        <div class="no-print mb-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 border border-subtle bg-white p-4">
+            <div>
+                <p class="text-[9px] font-black uppercase tracking-widest text-gray-400">Unit Kas Aktif</p>
+                <p class="text-lg font-black mt-1"><?php echo e($currentKasUnitLabel); ?></p>
+            </div>
+
+            <?php if ($isAdminKas): ?>
+                <div class="grid grid-cols-2 gap-2">
+                    <a href="kas_harian.php?unit=toko"
+                        class="kas-action-btn <?php echo $currentKasUnit === 'toko' ? 'bg-black text-white' : 'border border-subtle bg-white text-gray-600'; ?>">
+                        Kas Toko
+                    </a>
+                    <a href="kas_harian.php?unit=cafe"
+                        class="kas-action-btn <?php echo $currentKasUnit === 'cafe' ? 'bg-black text-white' : 'border border-subtle bg-white text-gray-600'; ?>">
+                        Kas Cafe
+                    </a>
+                </div>
+            <?php endif; ?>
+        </div>
+
         <div class="no-print grid grid-cols-2 md:grid-cols-5 gap-3 md:gap-4 mb-6 md:mb-8">
             <div class="summary-card p-4 md:p-5">
                 <p class="text-[10px] font-bold text-gray-400 uppercase tracking-widest">Status</p>
@@ -1532,14 +1662,14 @@ $rightActionHtml = '
         <div class="no-print space-y-6">
             <?php if (!$shiftAktif): ?>
                 <div class="kas-action-card p-5 md:p-7">
-                    <h2 class="text-sm font-black uppercase tracking-widest mb-5">Buka Kas Hari Ini</h2>
+                    <h2 class="text-sm font-black uppercase tracking-widest mb-5">Buka Kas <?php echo e($currentKasUnitLabel); ?> Hari Ini</h2>
                     <label class="block text-[10px] font-bold uppercase tracking-widest text-gray-500 mb-1.5">Kas Awal</label>
                     <input type="text" id="kas-awal" placeholder="Contoh: 431000" inputmode="numeric" class="w-full bg-gray-50 border border-gray-200 px-4 py-3 text-lg font-black">
                     <button onclick="bukaKas()" class="btn mt-4 w-full py-3 bg-black text-white text-xs font-black uppercase tracking-widest">Buka Kas</button>
                 </div>
             <?php else: ?>
                 <div class="kas-action-card p-5 md:p-7">
-                    <h2 class="text-sm font-black uppercase tracking-widest mb-5">Tutup Kas Hari Ini</h2>
+                    <h2 class="text-sm font-black uppercase tracking-widest mb-5">Tutup Kas <?php echo e($currentKasUnitLabel); ?> Hari Ini</h2>
                     <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
                         <div class="bg-gray-50 border border-subtle p-4">
                             <p class="text-[10px] font-bold uppercase tracking-widest text-gray-400">Kas Akhir Sistem</p>
@@ -1570,6 +1700,7 @@ $rightActionHtml = '
                 </div>
 
                 <form method="get" class="filter-card p-4 sm:p-5 border-b border-subtle bg-white no-print">
+                    <input type="hidden" name="unit" value="<?php echo e($currentKasUnit); ?>">
                     <div class="kas-filter-grid">
                         <div>
                             <label class="kas-filter-label">Tanggal Awal</label>
@@ -1610,7 +1741,7 @@ $rightActionHtml = '
                     </div>
                     <div class="kas-filter-actions">
                         <button type="submit" class="kas-action-btn bg-black text-white hover:bg-gray-800 transition-all">Terapkan</button>
-                        <a href="kas_harian.php" class="kas-action-btn border border-subtle bg-white text-gray-600 hover:bg-gray-50 transition-all">Reset</a>
+                        <a href="kas_harian.php?unit=<?php echo e($currentKasUnit); ?>" class="kas-action-btn border border-subtle bg-white text-gray-600 hover:bg-gray-50 transition-all">Reset</a>
                         <span class="kas-result-count hidden sm:block"><?php echo number_format($totalHistory); ?> data ditemukan</span>
                     </div>
                 </form>
@@ -1622,6 +1753,7 @@ $rightActionHtml = '
                             <tr>
                                 <th class="px-4 py-3 text-[10px] font-black uppercase tracking-widest text-gray-400">Tanggal</th>
                                 <th class="px-4 py-3 text-[10px] font-black uppercase tracking-widest text-gray-400">Operator</th>
+                                <th class="px-4 py-3 text-[10px] font-black uppercase tracking-widest text-gray-400">Unit</th>
                                 <th class="px-4 py-3 text-[10px] font-black uppercase tracking-widest text-gray-400 text-right">Kas Awal</th>
                                 <th class="px-4 py-3 text-[10px] font-black uppercase tracking-widest text-gray-400 text-right">Sales</th>
                                 <th class="px-4 py-3 text-[10px] font-black uppercase tracking-widest text-gray-400 text-right">Kas Akhir</th>
@@ -1634,6 +1766,7 @@ $rightActionHtml = '
                                 <tr class="row-clickable" data-kas-row-id="<?php echo (int)$h['id']; ?>" onclick="bukaDetailKas(<?php echo (int)$h['id']; ?>)">
                                     <td class="px-4 py-3 text-xs font-bold"><?php echo e(date('d/m/Y', strtotime($h['tanggal']))); ?></td>
                                     <td class="px-4 py-3 text-xs"><?php echo e($h['operator']); ?></td>
+                                    <td class="px-4 py-3 text-xs font-bold uppercase"><?php echo e(label_unit_kas($h['unit'] ?? 'toko')); ?></td>
                                     <td class="px-4 py-3 text-xs text-right"><?php echo rupiah($h['kas_awal']); ?></td>
                                     <td class="px-4 py-3 text-xs text-right" data-live-sales><?php echo rupiah($h['total_sales']); ?></td>
                                     <td class="px-4 py-3 text-xs text-right" data-live-kas-akhir><?php echo rupiah($h['kas_akhir_sistem']); ?></td>
@@ -1649,7 +1782,7 @@ $rightActionHtml = '
                             <?php endforeach;
                             if (empty($history)): ?>
                                 <tr>
-                                    <td colspan="7" class="px-4 py-10 text-center text-xs text-gray-400 font-bold uppercase tracking-widest">Belum ada riwayat</td>
+                                    <td colspan="8" class="px-4 py-10 text-center text-xs text-gray-400 font-bold uppercase tracking-widest">Belum ada riwayat</td>
                                 </tr>
                             <?php endif; ?>
                         </tbody>
@@ -1663,7 +1796,7 @@ $rightActionHtml = '
                             <div class="flex items-start justify-between gap-3 mb-2">
                                 <div class="min-w-0">
                                     <p class="text-sm font-black text-gray-900"><?php echo e(date('d/m/Y', strtotime($h['tanggal']))); ?></p>
-                                    <p class="text-[10px] font-bold text-gray-400 uppercase tracking-widest mt-0.5 truncate"><?php echo e($h['operator']); ?></p>
+                                    <p class="text-[10px] font-bold text-gray-400 uppercase tracking-widest mt-0.5 truncate"><?php echo e($h['operator']); ?> · <?php echo e(label_unit_kas($h['unit'] ?? 'toko')); ?></p>
                                 </div>
                                 <span class="shrink-0 text-[9px] font-black uppercase px-2 py-1 <?php echo $h['status'] === 'buka' ? 'bg-green-50 text-green-700' : 'bg-gray-100 text-gray-700'; ?>"><?php echo e($h['status']); ?></span>
                             </div>
@@ -1780,7 +1913,7 @@ $rightActionHtml = '
         });
 
         function postAction(action, body) {
-            return fetch('kas_harian.php?action=' + action, {
+            return fetch('kas_harian.php?unit=<?php echo rawurlencode($currentKasUnit); ?>&action=' + action, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json'
@@ -1882,6 +2015,7 @@ $rightActionHtml = '
             var r = detail.data,
                 s = detail.sales || {};
             KAS_RECEIPT = {
+                unit: String(r.unit || 'toko').toUpperCase(),
                 operator: String(r.operator || '').toUpperCase(),
                 tanggal: tglIdJs(r.closed_at || r.opened_at),
                 status: String(r.status || '').toUpperCase(),
@@ -1935,6 +2069,7 @@ $rightActionHtml = '
                 var rows = [
                     ['Tanggal', tglIdJs(r.tanggal + ' 00:00:00').split(' ').slice(0, 4).join(' ')],
                     ['Operator', r.operator || '-'],
+                    ['Unit', String(r.unit || 'toko').toUpperCase()],
                     ['Status', (r.status || '-').toUpperCase()],
                     ['Dibuka', tglIdJs(r.opened_at)],
                     ['Ditutup', r.closed_at ? tglIdJs(r.closed_at) : '-'],
@@ -2069,6 +2204,7 @@ $rightActionHtml = '
             line(kasDash() + '\n');
             line(kasLr('Tanggal', d.tanggal) + '\n');
             line(kasLr('Operator', String(d.operator).substring(0, 18)) + '\n');
+            line(kasLr('Unit', String(d.unit || 'TOKO')) + '\n');
             line(kasLr('Status', d.status) + '\n');
             line(kasDash() + '\n');
 
@@ -2254,7 +2390,7 @@ $rightActionHtml = '
             function ambilSnapshot() {
                 if (document.hidden || requestBerjalan) return;
                 requestBerjalan = true;
-                fetch(window.location.pathname + '?action=snapshot&_=' + Date.now(), {
+                fetch(window.location.pathname + '?unit=<?php echo rawurlencode($currentKasUnit); ?>&action=snapshot&_=' + Date.now(), {
                         method: 'GET',
                         credentials: 'same-origin',
                         cache: 'no-store',

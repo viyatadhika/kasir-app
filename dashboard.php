@@ -72,6 +72,36 @@ if (!function_exists('dashboard_pinjaman_status_class')) {
 }
 
 
+if (!function_exists('air_status_label')) {
+    function air_status_label(string $status): string
+    {
+        $map = [
+            'baru' => 'Baru',
+            'diproses' => 'Diproses',
+            'siap_dikirim' => 'Siap Dikirim',
+            'dalam_pengiriman' => 'Dalam Pengiriman',
+            'selesai' => 'Selesai',
+            'batal' => 'Batal',
+        ];
+        return $map[$status] ?? ucfirst(str_replace('_', ' ', $status));
+    }
+}
+
+if (!function_exists('air_status_class')) {
+    function air_status_class(string $status): string
+    {
+        $map = [
+            'baru' => 'bg-blue-50 text-blue-700 border-blue-200',
+            'diproses' => 'bg-amber-50 text-amber-700 border-amber-200',
+            'siap_dikirim' => 'bg-purple-50 text-purple-700 border-purple-200',
+            'dalam_pengiriman' => 'bg-cyan-50 text-cyan-700 border-cyan-200',
+            'selesai' => 'bg-green-50 text-green-700 border-green-200',
+            'batal' => 'bg-red-50 text-red-700 border-red-200',
+        ];
+        return $map[$status] ?? 'bg-gray-50 text-gray-700 border-gray-200';
+    }
+}
+
 if (!function_exists('dashboard_current_user_id_safe')) {
     function dashboard_current_user_id_safe(): int
     {
@@ -239,7 +269,7 @@ if (!function_exists('dashboard_hitung_penjualan_shift')) {
 $activeMenu  = 'dashboard';
 $pageTitle   = 'Dashboard';
 $backUrl     = '';
-$currentRole = getCurrentRole(); // 'admin' | 'kasir' | 'cafe' | 'rental' | 'ksp'
+$currentRole = getCurrentRole(); // 'admin' | 'kasir' | 'cafe' | 'air_mineral' | 'rental' | 'ksp'
 $today       = date('Y-m-d');
 $userId      = dashboard_current_user_id_safe();
 $isCafeRole  = has_role('cafe');
@@ -297,6 +327,24 @@ $cafeMeja = ['total' => 0, 'kosong' => 0, 'terisi' => 0, 'reservasi' => 0];
 $cafePesananTerakhir = [];
 $cafeMenuTerlaris = [];
 $cafeStokMenipis = [];
+
+// Dashboard khusus Air Mineral
+$airSummary = [
+    'total' => 0,
+    'baru' => 0,
+    'diproses' => 0,
+    'siap_dikirim' => 0,
+    'dalam_pengiriman' => 0,
+    'selesai' => 0,
+    'batal' => 0,
+    'total_unit' => 0,
+    'total_lokasi' => 0,
+];
+$airPesananTerbaru = [];
+$airRekapProduk = [];
+$airRekapLokasi = [];
+$airDashboardError = '';
+
 $ringkasanRental    = ['total_order' => 0, 'total_pendapatan' => 0];
 $orderRentalTerbaru = [];
 $totalDriver        = 0;
@@ -812,6 +860,40 @@ if (has_role('cafe')) {
         }
     } catch (Throwable $e) {
         error_log('DASHBOARD CAFE ERROR: ' . $e->getMessage());
+    }
+}
+
+// ── Data: Dashboard Air Mineral ──────────────────────────────────────────────
+if (has_role('air_mineral', 'admin')) {
+    try {
+        if (dashboard_has_table($pdo, 'air_pesanan')) {
+            $tanggalPesanExpr = dashboard_has_column($pdo, 'air_pesanan', 'tanggal_pemesanan')
+                ? "COALESCE(p.tanggal_pemesanan, DATE(p.created_at))"
+                : "DATE(p.created_at)";
+
+            $stmtAirSummary = $pdo->prepare("\n                SELECT\n                    COUNT(*) AS total,\n                    COALESCE(SUM(CASE WHEN p.status = 'baru' THEN 1 ELSE 0 END),0) AS baru,\n                    COALESCE(SUM(CASE WHEN p.status = 'diproses' THEN 1 ELSE 0 END),0) AS diproses,\n                    COALESCE(SUM(CASE WHEN p.status = 'siap_dikirim' THEN 1 ELSE 0 END),0) AS siap_dikirim,\n                    COALESCE(SUM(CASE WHEN p.status = 'dalam_pengiriman' THEN 1 ELSE 0 END),0) AS dalam_pengiriman,\n                    COALESCE(SUM(CASE WHEN p.status = 'selesai' THEN 1 ELSE 0 END),0) AS selesai,\n                    COALESCE(SUM(CASE WHEN p.status = 'batal' THEN 1 ELSE 0 END),0) AS batal,\n                    COALESCE(SUM((SELECT COALESCE(SUM(d.qty),0) FROM air_pesanan_detail d WHERE d.pesanan_id = p.id)),0) AS total_unit,\n                    COALESCE(SUM((SELECT COUNT(*) FROM air_pesanan_lokasi l WHERE l.pesanan_id = p.id)),0) AS total_lokasi\n                FROM air_pesanan p\n                WHERE $tanggalPesanExpr = :today\n            ");
+            $stmtAirSummary->execute([':today' => $today]);
+            $airSummary = array_merge($airSummary, $stmtAirSummary->fetch(PDO::FETCH_ASSOC) ?: []);
+
+            $stmtAirLatest = $pdo->prepare("\n                SELECT p.id, p.nomor_pesanan, p.status, p.tanggal_pemesanan, p.tanggal_kirim, p.created_at,\n                       c.nama AS nama_pemesan, c.no_hp,\n                       COALESCE((SELECT SUM(d.qty) FROM air_pesanan_detail d WHERE d.pesanan_id = p.id),0) AS total_unit,\n                       COALESCE((SELECT COUNT(*) FROM air_pesanan_lokasi l WHERE l.pesanan_id = p.id),0) AS total_lokasi,\n                       (SELECT GROUP_CONCAT(l.lokasi ORDER BY l.urutan, l.id SEPARATOR ' • ') FROM air_pesanan_lokasi l WHERE l.pesanan_id = p.id) AS daftar_lokasi\n                FROM air_pesanan p\n                JOIN air_pelanggan c ON c.id = p.pelanggan_id\n                WHERE $tanggalPesanExpr = :today\n                ORDER BY FIELD(p.status,'baru','diproses','siap_dikirim','dalam_pengiriman','selesai','batal'), p.id DESC\n                LIMIT 8\n            ");
+            $stmtAirLatest->execute([':today' => $today]);
+            $airPesananTerbaru = $stmtAirLatest->fetchAll(PDO::FETCH_ASSOC);
+
+            if (dashboard_has_table($pdo, 'air_pesanan_detail')) {
+                $stmtAirProduk = $pdo->prepare("\n                    SELECT d.nama_produk, COALESCE(SUM(d.qty),0) AS total_qty\n                    FROM air_pesanan_detail d\n                    JOIN air_pesanan p ON p.id = d.pesanan_id\n                    WHERE $tanggalPesanExpr = :today\n                      AND p.status <> 'batal'\n                    GROUP BY d.nama_produk\n                    ORDER BY total_qty DESC, d.nama_produk ASC\n                    LIMIT 6\n                ");
+                $stmtAirProduk->execute([':today' => $today]);
+                $airRekapProduk = $stmtAirProduk->fetchAll(PDO::FETCH_ASSOC);
+            }
+
+            if (dashboard_has_table($pdo, 'air_pesanan_lokasi') && dashboard_has_table($pdo, 'air_pesanan_detail')) {
+                $stmtAirLokasi = $pdo->prepare("\n                    SELECT l.lokasi, COALESCE(SUM(d.qty),0) AS total_qty, COUNT(DISTINCT l.pesanan_id) AS total_pesanan\n                    FROM air_pesanan_lokasi l\n                    JOIN air_pesanan p ON p.id = l.pesanan_id\n                    LEFT JOIN air_pesanan_detail d ON d.lokasi_id = l.id\n                    WHERE $tanggalPesanExpr = :today\n                      AND p.status <> 'batal'\n                    GROUP BY l.lokasi\n                    ORDER BY total_qty DESC, l.lokasi ASC\n                    LIMIT 8\n                ");
+                $stmtAirLokasi->execute([':today' => $today]);
+                $airRekapLokasi = $stmtAirLokasi->fetchAll(PDO::FETCH_ASSOC);
+            }
+        }
+    } catch (Throwable $e) {
+        $airDashboardError = $e->getMessage();
+        error_log('DASHBOARD AIR MINERAL ERROR: ' . $e->getMessage());
     }
 }
 
@@ -1397,7 +1479,9 @@ $title = 'Dashboard - ' . ($_SESSION['nama'] ?? 'SEJAHUB');
         <!-- ── Header ──────────────────────────────────────────────────────────── -->
         <header class="dashboard-header-main flex flex-col md:flex-row justify-between items-start md:items-end mb-8 md:mb-12 gap-4">
             <div>
-                <?php if (has_role('cafe')): ?>
+                <?php if (has_role('air_mineral')): ?>
+                    <h1 class="text-xl md:text-2xl font-light tracking-tight">Operasional Air Mineral &ndash; <span class="font-semibold"><?php echo htmlspecialchars($_SESSION['nama'] ?? '', ENT_QUOTES, 'UTF-8'); ?></span></h1>
+                <?php elseif (has_role('cafe')): ?>
                     <h1 class="text-xl md:text-2xl font-light tracking-tight">Operasional Cafe &ndash; <span class="font-semibold"><?php echo htmlspecialchars($_SESSION['nama'] ?? '', ENT_QUOTES, 'UTF-8'); ?></span></h1>
                 <?php elseif (has_role('admin', 'kasir')): ?>
                     <h1 class="text-xl md:text-2xl font-light tracking-tight">
@@ -1432,6 +1516,15 @@ $title = 'Dashboard - ' . ($_SESSION['nama'] ?? 'SEJAHUB');
                         <span>MESIN KASIR <span class="opacity-70">(CAFE)</span></span>
                     </a>
                 <?php endif; ?>
+                <?php if (has_role('admin', 'air_mineral')): ?>
+                    <a href="air_pesanan.php" class="dashboard-action-btn text-xs font-bold bg-black text-white hover:bg-gray-800 transition-all rounded-sm shadow-sm">
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path stroke-width="2" d="M12 4v16m8-8H4" />
+                        </svg>
+                        <span>PEMESANAN<span class="hidden sm:inline"> </span><br class="sm:hidden">AIR</span>
+                    </a>
+                <?php endif; ?>
+
                 <?php if (has_role('admin', 'rental')): ?>
                     <a href="rental_bandara.php" class="dashboard-action-btn text-xs font-bold bg-black text-white hover:bg-gray-800 transition-all rounded-sm shadow-sm">
                         <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -2346,6 +2439,136 @@ $title = 'Dashboard - ' . ($_SESSION['nama'] ?? 'SEJAHUB');
             </section>
         <?php endif; // end has_role ksp 
         ?>
+
+        <!-- ════════════════════════════════════════════════════════════════════ -->
+        <!-- KONTEN AIR MINERAL — DILETAKKAN SETELAH SIMPAN PINJAM              -->
+        <!-- ════════════════════════════════════════════════════════════════════ -->
+        <?php if (has_role('air_mineral', 'admin')): ?>
+            <section class="dashboard-role-section air-dashboard">
+                <div class="dashboard-section-title flex flex-col md:flex-row md:items-end md:justify-between gap-3">
+                    <div>
+                        <p class="text-[10px] font-black uppercase tracking-widest text-gray-400">Operasional Air Mineral</p>
+                        <h2 class="text-lg md:text-xl font-black tracking-tight mt-1">Pesanan dan Distribusi Hari Ini</h2>
+                        <p class="text-xs text-gray-400 mt-1">Ringkasan pesanan publik, lokasi pengantaran, dan jumlah produk.</p>
+                    </div>
+                    <a href="air_pesanan.php" class="inline-flex min-h-[42px] items-center justify-center gap-2 bg-black px-4 text-[10px] font-black uppercase tracking-widest text-white">
+                        <i data-lucide="clipboard-list" class="w-4 h-4"></i> Kelola Pesanan
+                    </a>
+                </div>
+
+                <?php if ($airDashboardError !== ''): ?>
+                    <div class="mb-5 border border-red-200 bg-red-50 px-4 py-3 text-xs font-bold text-red-700">
+                        Data Air Mineral gagal dimuat: <?php echo htmlspecialchars($airDashboardError, ENT_QUOTES, 'UTF-8'); ?>
+                    </div>
+                <?php endif; ?>
+
+                <div class="grid grid-cols-2 md:grid-cols-4 xl:grid-cols-7 gap-3 mb-6">
+                    <div class="kas-monitor-card p-4 xl:col-span-1">
+                        <p class="text-[9px] font-black uppercase tracking-widest text-gray-400">Total Pesanan</p>
+                        <p class="text-2xl font-black mt-2"><?php echo number_format((int)$airSummary['total']); ?></p>
+                    </div>
+                    <div class="kas-monitor-card p-4">
+                        <p class="text-[9px] font-black uppercase tracking-widest text-blue-600">Baru</p>
+                        <p class="text-2xl font-black text-blue-700 mt-2"><?php echo number_format((int)$airSummary['baru']); ?></p>
+                    </div>
+                    <div class="kas-monitor-card p-4">
+                        <p class="text-[9px] font-black uppercase tracking-widest text-amber-600">Diproses</p>
+                        <p class="text-2xl font-black text-amber-700 mt-2"><?php echo number_format((int)$airSummary['diproses']); ?></p>
+                    </div>
+                    <div class="kas-monitor-card p-4">
+                        <p class="text-[9px] font-black uppercase tracking-widest text-purple-600">Siap Dikirim</p>
+                        <p class="text-2xl font-black text-purple-700 mt-2"><?php echo number_format((int)$airSummary['siap_dikirim']); ?></p>
+                    </div>
+                    <div class="kas-monitor-card p-4">
+                        <p class="text-[9px] font-black uppercase tracking-widest text-cyan-600">Dalam Pengiriman</p>
+                        <p class="text-2xl font-black text-blue-600 mt-2"><?php echo number_format((int)$airSummary['dalam_pengiriman']); ?></p>
+                    </div>
+                    <div class="kas-monitor-card p-4">
+                        <p class="text-[9px] font-black uppercase tracking-widest text-green-600">Selesai</p>
+                        <p class="text-2xl font-black text-green-700 mt-2"><?php echo number_format((int)$airSummary['selesai']); ?></p>
+                    </div>
+                    <div class="kas-monitor-card p-4 col-span-2 md:col-span-1">
+                        <p class="text-[9px] font-black uppercase tracking-widest text-gray-400">Total Produk</p>
+                        <p class="text-2xl font-black text-blue-600 mt-2"><?php echo number_format((int)$airSummary['total_unit']); ?></p>
+                        <p class="text-[9px] text-gray-400 mt-1"><?php echo number_format((int)$airSummary['total_lokasi']); ?> lokasi</p>
+                    </div>
+                </div>
+
+                <div class="grid grid-cols-1 xl:grid-cols-3 gap-6 mb-8">
+                    <div class="xl:col-span-2 kas-monitor-card overflow-hidden">
+                        <div class="px-5 py-4 border-b border-gray-100 flex items-center justify-between gap-3">
+                            <div>
+                                <p class="text-[10px] font-black uppercase tracking-widest text-gray-400">Pesanan Air Terbaru</p>
+                                <p class="text-xs text-gray-400 mt-1">Pesanan yang masuk hari ini</p>
+                            </div>
+                            <a href="air_pesanan.php" class="text-[9px] font-black uppercase tracking-widest underline">Lihat Semua</a>
+                        </div>
+                        <div class="divide-y divide-gray-100">
+                            <?php if (empty($airPesananTerbaru)): ?>
+                                <div class="p-10 text-center text-xs font-bold text-gray-400">Belum ada pesanan air hari ini.</div>
+                            <?php endif; ?>
+                            <?php foreach ($airPesananTerbaru as $order): ?>
+                                <?php $airStatus = strtolower((string)($order['status'] ?? 'baru')); ?>
+                                <a href="air_pesanan.php?q=<?php echo urlencode((string)$order['nomor_pesanan']); ?>" class="p-4 md:p-5 flex items-center justify-between gap-4 hover:bg-gray-50">
+                                    <div class="flex items-center gap-3 min-w-0">
+                                        <div class="w-10 h-10 bg-blue-50 border border-blue-100 flex items-center justify-center shrink-0"><i data-lucide="droplets" class="w-5 h-5 text-blue-600"></i></div>
+                                        <div class="min-w-0">
+                                            <p class="text-sm font-black truncate"><?php echo htmlspecialchars((string)$order['nomor_pesanan'], ENT_QUOTES, 'UTF-8'); ?></p>
+                                            <p class="text-[10px] text-gray-400 mt-1 truncate"><?php echo htmlspecialchars((string)$order['nama_pemesan'], ENT_QUOTES, 'UTF-8'); ?> · <?php echo number_format((int)$order['total_lokasi']); ?> lokasi</p>
+                                            <p class="text-[9px] text-gray-400 mt-1 truncate"><?php echo htmlspecialchars((string)($order['daftar_lokasi'] ?: 'Lokasi belum tersedia'), ENT_QUOTES, 'UTF-8'); ?></p>
+                                        </div>
+                                    </div>
+                                    <div class="text-right shrink-0">
+                                        <p class="text-lg font-black"><?php echo number_format((int)$order['total_unit']); ?></p>
+                                        <p class="text-[8px] font-black uppercase tracking-widest text-gray-400">Unit</p>
+                                        <span class="inline-flex mt-2 px-2 py-1 border text-[8px] font-black uppercase tracking-widest <?php echo air_status_class($airStatus); ?>"><?php echo htmlspecialchars(air_status_label($airStatus), ENT_QUOTES, 'UTF-8'); ?></span>
+                                    </div>
+                                </a>
+                            <?php endforeach; ?>
+                        </div>
+                    </div>
+
+                    <div class="kas-monitor-card p-5">
+                        <p class="text-[10px] font-black uppercase tracking-widest text-gray-400">Rekap Produk Hari Ini</p>
+                        <p class="text-xs text-gray-400 mt-1 mb-4">Jumlah produk seluruh lokasi</p>
+                        <div class="space-y-3">
+                            <?php if (empty($airRekapProduk)): ?><p class="py-8 text-center text-xs text-gray-400">Belum ada produk dipesan.</p><?php endif; ?>
+                            <?php foreach ($airRekapProduk as $produkAir): ?>
+                                <div class="flex items-start justify-between gap-3 border-b border-gray-100 pb-3">
+                                    <p class="text-xs font-bold leading-5"><?php echo htmlspecialchars((string)$produkAir['nama_produk'], ENT_QUOTES, 'UTF-8'); ?></p>
+                                    <span class="text-sm font-black text-blue-600 shrink-0"><?php echo number_format((int)$produkAir['total_qty']); ?></span>
+                                </div>
+                            <?php endforeach; ?>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="kas-monitor-card p-5">
+                    <div class="flex items-center justify-between gap-3 mb-4">
+                        <div>
+                            <p class="text-[10px] font-black uppercase tracking-widest text-gray-400">Distribusi per Lokasi</p>
+                            <p class="text-xs text-gray-400 mt-1">Lokasi dengan kebutuhan terbanyak hari ini</p>
+                        </div>
+                        <a href="air_pesanan.php" class="text-[9px] font-black uppercase tracking-widest underline">Detail</a>
+                    </div>
+                    <div class="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-3">
+                        <?php if (empty($airRekapLokasi)): ?><div class="sm:col-span-2 xl:col-span-4 p-8 text-center text-xs text-gray-400 border border-gray-100">Belum ada distribusi lokasi.</div><?php endif; ?>
+                        <?php foreach ($airRekapLokasi as $lokasiAir): ?>
+                            <div class="border border-gray-100 bg-gray-50 p-4">
+                                <p class="text-xs font-black leading-5"><?php echo htmlspecialchars((string)$lokasiAir['lokasi'], ENT_QUOTES, 'UTF-8'); ?></p>
+                                <div class="flex items-end justify-between gap-3 mt-3">
+                                    <div>
+                                        <p class="text-2xl font-black text-blue-600"><?php echo number_format((int)$lokasiAir['total_qty']); ?></p>
+                                        <p class="text-[8px] font-black uppercase tracking-widest text-gray-400">Unit</p>
+                                    </div>
+                                    <p class="text-[9px] font-bold text-gray-400"><?php echo number_format((int)$lokasiAir['total_pesanan']); ?> pesanan</p>
+                                </div>
+                            </div>
+                        <?php endforeach; ?>
+                    </div>
+                </div>
+            </section>
+        <?php endif; ?>
 
     </main>
 
