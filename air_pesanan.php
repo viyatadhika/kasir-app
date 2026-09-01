@@ -198,6 +198,13 @@ if (!function_exists('air_ensure_schema')) {
             $pdo->exec("ALTER TABLE air_pesanan ADD COLUMN tanggal_pemesanan DATE NULL AFTER user_id");
         }
 
+        if (!air_column_exists($pdo, 'air_pesanan', 'nama_penerima')) {
+            $pdo->exec("ALTER TABLE air_pesanan ADD COLUMN nama_penerima VARCHAR(120) NULL AFTER alamat_pengiriman");
+        }
+
+        if (!air_column_exists($pdo, 'air_pesanan', 'no_hp_penerima')) {
+            $pdo->exec("ALTER TABLE air_pesanan ADD COLUMN no_hp_penerima VARCHAR(30) NULL AFTER nama_penerima");
+        }
 
         if (!air_column_exists($pdo, 'air_pesanan', 'sumber_data')) {
             $pdo->exec("ALTER TABLE air_pesanan ADD COLUMN sumber_data VARCHAR(30) NOT NULL DEFAULT 'publik' AFTER catatan");
@@ -529,6 +536,8 @@ if ($q !== '') {
         p.nomor_pesanan LIKE :q
         OR c.nama LIKE :q
         OR c.no_hp LIKE :q
+        OR COALESCE(p.nama_penerima, '') LIKE :q
+        OR COALESCE(p.no_hp_penerima, '') LIKE :q
     )";
     $params[':q'] = '%' . $q . '%';
 }
@@ -634,7 +643,9 @@ try {
             produk_id,
             kode_produk,
             nama_produk,
+            harga,
             qty,
+            subtotal,
             catatan_item
         FROM air_pesanan_detail
         WHERE pesanan_id = :order_id
@@ -1435,7 +1446,7 @@ require_once 'navbar.php';
                             name="q"
                             value="<?php echo air_h($q); ?>"
                             class="field"
-                            placeholder="Cari nomor pesanan, nama, atau nomor WA">
+                            placeholder="Cari nomor pesanan, pemesan, penerima, atau nomor WA">
                     </div>
                 </div>
 
@@ -1510,7 +1521,7 @@ require_once 'navbar.php';
                         <tr>
                             <th class="w-[18%]">Pesanan</th>
                             <th class="w-[13%]">Pemesan</th>
-                            <th class="w-[11%]">Tanggal Pesan</th>
+                            <th class="w-[11%]">Tanggal Pemesanan</th>
                             <th class="w-[11%]">Tanggal Kirim</th>
                             <th class="w-[15%]">Lokasi</th>
                             <th class="w-[8%] text-center">Produk</th>
@@ -1532,7 +1543,11 @@ require_once 'navbar.php';
                                 <td class="order-number-cell">
                                     <span class="order-number-main"><?php echo air_h($order['nomor_pesanan']); ?></span>
                                     <p class="order-number-meta">
-                                        <?php echo !empty($order['created_at']) ? air_h(date('H:i', strtotime((string)$order['created_at']))) : '-'; ?> WIB
+                                        <?php if (!empty($order['created_at'])): ?>
+                                            Input <?php echo air_h(date('d/m/Y H:i', strtotime((string)$order['created_at']))); ?> WIB
+                                        <?php else: ?>
+                                            Waktu input -
+                                        <?php endif; ?>
                                         <?php if (!empty($order['is_historical'])): ?>
                                             <span class="ml-1 text-amber-600 font-black">· DATA LAMA</span>
                                         <?php endif; ?>
@@ -1628,6 +1643,12 @@ require_once 'navbar.php';
                             </div>
                             <p class="text-xs font-bold mt-1 truncate"><?php echo air_h($order['nama_pemesan']); ?></p>
                             <p class="text-[9px] text-gray-400 mt-1"><?php echo air_h($order['no_hp'] ?: '-'); ?></p>
+                            <p class="text-[9px] text-gray-400 mt-1">
+                                Input sistem:
+                                <?php echo !empty($order['created_at'])
+                                    ? air_h(date('d/m/Y H:i', strtotime((string)$order['created_at']))) . ' WIB'
+                                    : '-'; ?>
+                            </p>
                         </div>
                         <span class="status-badge <?php echo air_status_class($status); ?>">
                             <?php echo air_h(air_status_label($status)); ?>
@@ -1636,11 +1657,11 @@ require_once 'navbar.php';
 
                     <div class="grid grid-cols-3 gap-2 mt-4">
                         <div class="bg-gray-50 border border-gray-100 p-3">
-                            <p class="text-[8px] font-black uppercase tracking-widest text-gray-400">Pesan</p>
+                            <p class="text-[8px] font-black uppercase tracking-widest text-gray-400">Tanggal Pesan</p>
                             <p class="text-[11px] font-black mt-1"><?php echo air_h(date('d/m/Y', strtotime($orderDate))); ?></p>
                         </div>
                         <div class="bg-gray-50 border border-gray-100 p-3">
-                            <p class="text-[8px] font-black uppercase tracking-widest text-gray-400">Kirim</p>
+                            <p class="text-[8px] font-black uppercase tracking-widest text-gray-400">Tanggal Kirim</p>
                             <p class="text-[11px] font-black mt-1"><?php echo !empty($order['tanggal_kirim']) ? air_h(date('d/m/Y', strtotime((string)$order['tanggal_kirim']))) : '-'; ?></p>
                         </div>
                         <div class="bg-blue-50 border border-blue-100 p-3">
@@ -1786,17 +1807,27 @@ require_once 'navbar.php';
 
                 var itemHtml = items.length ?
                     items.map(function(item) {
+                        var price = Number(item.harga || 0);
+                        var subtotal = Number(item.subtotal || 0);
+
                         return '' +
                             '<div class="flex items-start justify-between gap-3 py-3 border-b border-gray-100 last:border-b-0">' +
                             '<div class="min-w-0">' +
-                            '<p class="text-sm font-bold">' + escapeHtml(item.nama_produk) + '</p>' +
+                            '<p class="text-[9px] font-black uppercase tracking-widest text-gray-400">' + escapeHtml(item.kode_produk || '-') + '</p>' +
+                            '<p class="text-sm font-bold mt-1">' + escapeHtml(item.nama_produk || '-') + '</p>' +
                             (item.catatan_item ?
-                                '<p class="text-[10px] text-gray-400 mt-1">' + escapeHtml(item.catatan_item) + '</p>' :
+                                '<p class="text-[10px] text-amber-700 mt-1">Catatan: ' + escapeHtml(item.catatan_item) + '</p>' :
+                                '') +
+                            (price > 0 ?
+                                '<p class="text-[10px] text-gray-500 mt-1">Harga satuan Rp ' + price.toLocaleString('id-ID') + '</p>' :
                                 '') +
                             '</div>' +
                             '<div class="text-right shrink-0">' +
                             '<p class="text-lg font-black">' + Number(item.qty || 0).toLocaleString('id-ID') + '</p>' +
                             '<p class="text-[8px] font-black uppercase tracking-widest text-gray-400">Jumlah</p>' +
+                            (subtotal > 0 ?
+                                '<p class="text-[10px] font-bold text-gray-600 mt-2">Rp ' + subtotal.toLocaleString('id-ID') + '</p>' :
+                                '') +
                             '</div>' +
                             '</div>';
                     }).join('') :
@@ -1828,19 +1859,61 @@ require_once 'navbar.php';
 
             var orderDate = order.tanggal_pemesanan || String(order.created_at || '').substring(0, 10);
 
+            var recipientName = order.nama_penerima || '';
+            var recipientPhone = order.no_hp_penerima || '';
+            var sameRecipient = recipientName && recipientPhone &&
+                recipientName === (order.nama_pemesan || '') &&
+                recipientPhone === (order.no_hp || '');
+
+            var statusLabel = String(order.status || 'baru')
+                .replace(/_/g, ' ')
+                .replace(/\b\w/g, function(m) {
+                    return m.toUpperCase();
+                });
+
             var html = '' +
-                '<div class="grid grid-cols-1 md:grid-cols-2 gap-4">' +
+                '<div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">' +
                 '<div class="border border-gray-100 bg-gray-50 p-4">' +
-                '<p class="text-[9px] font-black uppercase tracking-widest text-gray-400">Nama Pemesan</p>' +
+                '<p class="text-[9px] font-black uppercase tracking-widest text-gray-400">Pemesan</p>' +
                 '<p class="text-sm font-black mt-1">' + escapeHtml(order.nama_pemesan || '-') + '</p>' +
-                '<p class="text-xs text-gray-500 mt-1">' + escapeHtml(order.no_hp || '-') + '</p>' +
+                '<p class="text-xs text-gray-500 mt-1">WA ' + escapeHtml(order.no_hp || '-') + '</p>' +
                 '</div>' +
                 '<div class="border border-gray-100 bg-gray-50 p-4">' +
-                '<p class="text-[9px] font-black uppercase tracking-widest text-gray-400">Jadwal</p>' +
-                '<p class="text-sm font-black mt-1">Pesan ' + formatDate(orderDate) + '</p>' +
-                '<p class="text-xs text-gray-500 mt-1">Kirim ' + formatDate(order.tanggal_kirim) +
-                (order.jam_kirim ? ' · ' + String(order.jam_kirim).substring(0, 5) : '') +
+                '<p class="text-[9px] font-black uppercase tracking-widest text-gray-400">Penerima</p>' +
+                '<p class="text-sm font-black mt-1">' + escapeHtml(recipientName || '-') + '</p>' +
+                '<p class="text-xs text-gray-500 mt-1">WA ' + escapeHtml(recipientPhone || '-') + '</p>' +
+                (sameRecipient ?
+                    '<p class="text-[9px] font-black uppercase tracking-widest text-green-600 mt-2">Sama dengan pemesan</p>' :
+                    '') +
+                '</div>' +
+                '<div class="border border-gray-100 bg-gray-50 p-4">' +
+                '<p class="text-[9px] font-black uppercase tracking-widest text-gray-400">Jadwal Pesanan</p>' +
+                '<p class="text-sm font-black mt-1">Tanggal Pemesanan</p>' +
+                '<p class="text-xs text-gray-500 mt-1">' + formatDate(orderDate) + '</p>' +
+                '<p class="text-sm font-black mt-3">Tanggal Pengiriman</p>' +
+                '<p class="text-xs text-gray-500 mt-1">' + formatDate(order.tanggal_kirim) +
+                (order.jam_kirim ? ' · ' + String(order.jam_kirim).substring(0, 5) + ' WIB' : ' · Jam fleksibel') +
                 '</p>' +
+                '</div>' +
+                '<div class="border border-gray-100 bg-gray-50 p-4">' +
+                '<p class="text-[9px] font-black uppercase tracking-widest text-gray-400">Status Pesanan</p>' +
+                '<p class="text-sm font-black mt-1">' + escapeHtml(statusLabel) + '</p>' +
+                (Number(order.is_historical || 0) === 1 ?
+                    '<p class="text-[9px] font-black uppercase tracking-widest text-amber-600 mt-2">Data Lama</p>' :
+                    '') +
+                '</div>' +
+                '</div>' +
+
+                '<div class="mt-4 border border-gray-100 bg-gray-50 p-4">' +
+                '<div class="grid grid-cols-1 sm:grid-cols-2 gap-3">' +
+                '<div>' +
+                '<p class="text-[9px] font-black uppercase tracking-widest text-gray-400">Nomor Pesanan</p>' +
+                '<p class="text-sm font-black mt-1">' + escapeHtml(order.nomor_pesanan || '-') + '</p>' +
+                '</div>' +
+                '<div>' +
+                '<p class="text-[9px] font-black uppercase tracking-widest text-gray-400">ID Data</p>' +
+                '<p class="text-sm font-black mt-1">#' + escapeHtml(order.id || '-') + '</p>' +
+                '</div>' +
                 '</div>' +
                 '</div>' +
 

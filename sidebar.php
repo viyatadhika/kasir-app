@@ -24,6 +24,7 @@ if (!isset($activeMenu)) {
         'menu_cafe.php'            => 'menu_cafe',
         'meja_cafe.php'            => 'meja_cafe',
         'dapur.php'                => 'dapur',
+        'promo_cafe.php'           => 'promo_cafe',
         'air_pesanan.php'          => 'air_pesanan',
         'air_rekap_vendor.php'     => 'air_rekap_vendor',
         'air_kwitansi.php'         => 'air_kwitansi',
@@ -162,6 +163,7 @@ $menuGroups = array(
             array('key' => 'menu_cafe',  'href' => 'menu_cafe.php',  'label' => 'Menu Cafe'),
             array('key' => 'meja_cafe',  'href' => 'meja_cafe.php',  'label' => 'Meja Cafe'),
             array('key' => 'dapur',      'href' => 'dapur.php',      'label' => 'Dapur'),
+            array('key' => 'promo_cafe', 'href' => 'promo_cafe.php', 'label' => 'Promo & Diskon'),
         ),
     ),
     array(

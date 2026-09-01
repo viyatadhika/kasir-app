@@ -537,18 +537,54 @@ if ($isCafe) {
         ? " AND LOWER(COALESCE(t.`{$cafeStatusColumn}`,'')) NOT IN ('batal','cancel','cancelled','void')"
         : '';
 
-    $cafeWhereSource = $cafeHasSource
-        ? " AND LOWER(COALESCE(t.sumber_transaksi,'')) = 'cafe'"
-        : " AND 1=0";
+    /*
+     * Identifikasi transaksi Cafe dibuat fleksibel.
+     *
+     * Sebelumnya laporan hanya membaca t.sumber_transaksi = 'cafe'.
+     * Bahkan jika kolom sumber_transaksi tidak tersedia, kondisi menjadi
+     * AND 1=0 sehingga seluruh laporan Cafe pasti kosong.
+     *
+     * Sekarang transaksi dianggap Cafe jika salah satu benar:
+     * 1. sumber_transaksi = 'cafe';
+     * 2. transaksi sudah terhubung ke cafe_pesanan;
+     * 3. transaksi_detail berisi produk dengan tipe_produk = 'cafe'.
+     */
+    $cafeSourceConditions = [];
 
-    $cafeWhereSesi = " AND EXISTS (
-        SELECT 1
-        FROM kas_harian kh
-        WHERE kh.user_id = t.user_id
-          AND kh.tanggal BETWEEN :awal AND :akhir
-          AND t.created_at >= kh.opened_at
-          AND t.created_at <= COALESCE(kh.closed_at, NOW())
-    )";
+    if ($cafeHasSource) {
+        $cafeSourceConditions[] = "LOWER(TRIM(COALESCE(t.sumber_transaksi,''))) = 'cafe'";
+    }
+
+    if (laporan_table_exists($pdo, 'cafe_pesanan')) {
+        $cafeSourceConditions[] = "EXISTS (
+            SELECT 1
+            FROM cafe_pesanan cp_src
+            WHERE cp_src.transaksi_id = t.id
+        )";
+    }
+
+    if (laporan_table_exists($pdo, 'transaksi_detail') && laporan_table_exists($pdo, 'produk')) {
+        $cafeSourceConditions[] = "EXISTS (
+            SELECT 1
+            FROM transaksi_detail td_src
+            LEFT JOIN produk p_src ON p_src.id = td_src.produk_id
+            WHERE td_src.transaksi_id = t.id
+              AND LOWER(TRIM(COALESCE(p_src.tipe_produk,''))) = 'cafe'
+        )";
+    }
+
+    $cafeWhereSource = $cafeSourceConditions
+        ? " AND (" . implode(" OR ", $cafeSourceConditions) . ")"
+        : "";
+
+    /*
+     * Rentang laporan Cafe memakai tanggal transaksi langsung.
+     * Jangan mewajibkan transaksi berada di sesi kas_harian karena:
+     * - pesanan Cafe bisa dibuat sebelum pembayaran;
+     * - pembayaran bisa dilakukan belakangan;
+     * - data lama belum tentu punya pasangan sesi kas_harian.
+     */
+    $cafeWherePeriode = " AND DATE(t.created_at) BETWEEN :awal AND :akhir";
 
     $cafeMetodeCandidates = [];
     foreach (['metode_pembayaran', 'payment_method', 'metode', 'jenis_pembayaran', 'tipe_pembayaran'] as $column) {
@@ -575,7 +611,7 @@ if ($isCafe) {
                 COALESCE(SUM(CASE WHEN LOWER({$cafeMetodeSql}) IN ('tunai','cash') THEN t.total ELSE 0 END),0) AS tunai,
                 COALESCE(SUM(CASE WHEN LOWER({$cafeMetodeSql}) NOT IN ('tunai','cash','') THEN t.total ELSE 0 END),0) AS nontunai
             FROM transaksi t
-            WHERE 1=1 {$cafeWhereSesi} {$cafeWhereStatus} {$cafeWhereSource}
+            WHERE 1=1 {$cafeWherePeriode} {$cafeWhereStatus} {$cafeWhereSource}
         ");
         $stmtCafe->execute([':awal' => $awal, ':akhir' => $akhir]);
         $cafeSummaryRow = $stmtCafe->fetch(PDO::FETCH_ASSOC) ?: [];
@@ -617,7 +653,7 @@ if ($isCafe) {
             FROM transaksi_detail td
             JOIN transaksi t ON t.id = td.transaksi_id
             {$joinProdukMargin}
-            WHERE 1=1 {$cafeWhereSesi} {$cafeWhereStatus} {$cafeWhereSource}
+            WHERE 1=1 {$cafeWherePeriode} {$cafeWhereStatus} {$cafeWhereSource}
         ");
         $stmtCafeMargin->execute([':awal' => $awal, ':akhir' => $akhir]);
         $cafeMargin = (float)$stmtCafeMargin->fetchColumn();
@@ -672,7 +708,7 @@ if ($isCafe) {
             LEFT JOIN users u ON u.id = t.user_id
             {$joinCafePesanan}
             {$joinCafeMeja}
-            WHERE 1=1 {$cafeWhereSesi} {$cafeWhereStatus} {$cafeWhereSource}
+            WHERE 1=1 {$cafeWherePeriode} {$cafeWhereStatus} {$cafeWhereSource}
             ORDER BY t.created_at DESC, t.id DESC
             LIMIT {$cafePerPage} OFFSET {$cafeOffset}
         ");
@@ -688,7 +724,7 @@ if ($isCafe) {
                 SUM(td.subtotal) AS penjualan
             FROM transaksi_detail td
             JOIN transaksi t ON t.id = td.transaksi_id
-            WHERE 1=1 {$cafeWhereSesi} {$cafeWhereStatus} {$cafeWhereSource}
+            WHERE 1=1 {$cafeWherePeriode} {$cafeWhereStatus} {$cafeWhereSource}
             GROUP BY td.produk_id, td.nama
             ORDER BY qty DESC, penjualan DESC
             LIMIT 20

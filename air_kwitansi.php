@@ -303,7 +303,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $flashType !== 'error') {
                 SELECT p.id
                 FROM air_pesanan p
                 WHERE p.id IN ($placeholders)
-                  AND p.status = 'selesai'
+                  AND LOWER(TRIM(p.status)) = 'selesai'
                   AND NOT EXISTS (
                       SELECT 1
                       FROM air_kwitansi_source s
@@ -555,11 +555,20 @@ if (!in_array($perPage, $allowedLimits, true)) {
 */
 
 $availableOrders = [];
+$billableOrders = [];
 $availableRecap = [];
 $availableOrderItems = [];
 $availableTotal = 0;
 
 try {
+    /*
+     * Tampilkan SEMUA pesanan yang benar-benar berstatus selesai.
+     * LEFT JOIN dipakai agar data lama yang pelanggan_id-nya tidak lagi cocok
+     * tetap terlihat dan tidak hilang diam-diam dari halaman kwitansi.
+     *
+     * Pesanan yang sudah pernah masuk kwitansi aktif tetap ditampilkan,
+     * tetapi ditandai "Sudah Ditagihkan" dan tidak bisa dipilih lagi.
+     */
     $stmtAvailable = $pdo->prepare("
         SELECT
             p.id,
@@ -567,8 +576,8 @@ try {
             p.tanggal_pemesanan,
             p.tanggal_kirim,
             p.created_at,
-            c.nama AS nama_pemesan,
-            c.no_hp,
+            COALESCE(NULLIF(TRIM(c.nama), ''), 'Pemesan #' , p.pelanggan_id) AS nama_pemesan,
+            COALESCE(c.no_hp, '') AS no_hp,
             COALESCE((
                 SELECT GROUP_CONCAT(
                     DISTINCT l.lokasi
@@ -582,30 +591,33 @@ try {
                 SELECT SUM(d.qty)
                 FROM air_pesanan_detail d
                 WHERE d.pesanan_id = p.id
-            ), 0) AS total_unit
+            ), 0) AS total_unit,
+            CASE
+                WHEN EXISTS (
+                    SELECT 1
+                    FROM air_kwitansi_source s
+                    JOIN air_kwitansi k ON k.id = s.kwitansi_id
+                    WHERE s.pesanan_id = p.id
+                      AND COALESCE(k.status_pembayaran, 'belum_bayar') <> 'batal'
+                ) THEN 1
+                ELSE 0
+            END AS sudah_ditagihkan
         FROM air_pesanan p
-        JOIN air_pelanggan c ON c.id = p.pelanggan_id
-        WHERE p.status = 'selesai'
-          AND DATE(COALESCE(p.tanggal_kirim, p.tanggal_pemesanan, p.created_at))
-              BETWEEN :tanggal_awal AND :tanggal_akhir
-          AND NOT EXISTS (
-              SELECT 1
-              FROM air_kwitansi_source s
-              JOIN air_kwitansi k ON k.id = s.kwitansi_id
-              WHERE s.pesanan_id = p.id
-                AND k.status_pembayaran <> 'batal'
-          )
-        ORDER BY COALESCE(p.tanggal_kirim, p.tanggal_pemesanan, p.created_at) ASC, p.id ASC
+        LEFT JOIN air_pelanggan c ON c.id = p.pelanggan_id
+        WHERE LOWER(TRIM(COALESCE(p.status, ''))) = 'selesai'
+        ORDER BY COALESCE(p.tanggal_kirim, p.tanggal_pemesanan, DATE(p.created_at)) DESC, p.id DESC
     ");
-    $stmtAvailable->execute([
-        ':tanggal_awal' => $periodStart,
-        ':tanggal_akhir' => $periodEnd,
-    ]);
+    $stmtAvailable->execute();
     $availableOrders = $stmtAvailable->fetchAll(PDO::FETCH_ASSOC);
+
+    // Hanya yang belum ditagihkan yang dipakai untuk ringkasan dan pembuatan kwitansi baru.
+    $billableOrders = array_values(array_filter($availableOrders, function ($row) {
+        return (int)($row['sudah_ditagihkan'] ?? 0) === 0;
+    }));
 
     $availableIds = array_map(function ($row) {
         return (int)$row['id'];
-    }, $availableOrders);
+    }, $billableOrders);
 
     if ($availableIds) {
         $placeholders = implode(',', array_fill(0, count($availableIds), '?'));
@@ -684,6 +696,10 @@ try {
         $flash = 'Gagal memuat pesanan yang siap ditagihkan: ' . $e->getMessage();
         $flashType = 'error';
     }
+}
+
+if (!isset($billableOrders) || !is_array($billableOrders)) {
+    $billableOrders = [];
 }
 
 /*
@@ -1286,8 +1302,7 @@ require_once 'navbar.php';
 
             <button type="button"
                 onclick="openCreateModal()"
-                class="btn bg-black text-white disabled:opacity-40"
-                <?php echo !$availableOrders ? 'disabled' : ''; ?>>
+                class="btn bg-black text-white">
                 <i data-lucide="plus" class="w-4 h-4"></i>
                 Buat Kwitansi
             </button>
@@ -1335,18 +1350,16 @@ require_once 'navbar.php';
             <div class="flex flex-col md:flex-row md:items-end md:justify-between gap-4">
                 <div>
                     <p class="text-[9px] font-black uppercase tracking-widest text-gray-400">Pesanan Siap Ditagihkan</p>
-                    <p class="text-xl font-black mt-1"><?php echo number_format(count($availableOrders)); ?></p>
+                    <p class="text-xl font-black mt-1"><?php echo number_format(count($billableOrders)); ?></p>
                     <p class="text-xs text-gray-400 mt-1">
-                        Periode <?php echo akw_h(date('d/m/Y', strtotime($periodStart))); ?>
-                        sampai <?php echo akw_h(date('d/m/Y', strtotime($periodEnd))); ?>
+                        <?php echo number_format(count($availableOrders)); ?> pesanan berstatus selesai ditemukan ·
+                        <?php echo number_format(count($billableOrders)); ?> belum ditagihkan.
                     </p>
                 </div>
 
-                <form method="get" class="grid grid-cols-1 sm:grid-cols-3 gap-2">
-                    <input type="date" name="period_start" value="<?php echo akw_h($periodStart); ?>" class="field">
-                    <input type="date" name="period_end" value="<?php echo akw_h($periodEnd); ?>" class="field">
-                    <button type="submit" class="btn bg-black text-white">Tampilkan</button>
-                </form>
+                <div class="border border-gray-100 bg-gray-50 px-4 py-3 text-[10px] font-bold text-gray-500">
+                    Syarat: status pesanan <strong>Selesai</strong> dan belum ditagihkan.
+                </div>
             </div>
 
             <?php if ($availableRecap): ?>
@@ -1369,6 +1382,15 @@ require_once 'navbar.php';
                 </div>
             <?php endif; ?>
         </section>
+
+        <?php if ($availableOrders && !$billableOrders): ?>
+            <div class="mb-4 border border-amber-200 bg-amber-50 px-4 py-3">
+                <p class="text-xs font-black text-amber-800">Pesanan selesai ditemukan, tetapi semuanya sudah terhubung ke kwitansi aktif.</p>
+                <p class="text-[10px] text-amber-700 mt-1">
+                    Buka daftar kwitansi di bawah. Jika kwitansi lama seharusnya dibatalkan, ubah statusnya menjadi Batal agar pesanan dapat ditagihkan kembali.
+                </p>
+            </div>
+        <?php endif; ?>
 
         <form method="get" class="filter-card p-4 mb-4">
             <input type="hidden" name="period_start" value="<?php echo akw_h($periodStart); ?>">
@@ -1671,20 +1693,40 @@ require_once 'navbar.php';
                         </div>
 
                         <div class="border border-[#f0f0f0] divide-y divide-[#f5f5f5] max-h-60 overflow-y-auto">
+                            <?php if (!$availableOrders): ?>
+                                <div class="p-5 text-center bg-gray-50">
+                                    <p class="text-xs font-black text-gray-600">Belum ada pesanan selesai yang bisa ditagihkan.</p>
+                                    <p class="text-[10px] text-gray-400 mt-2">
+                                        Pesanan harus berstatus Selesai dan belum pernah masuk kwitansi yang tidak dibatalkan.
+                                    </p>
+                                </div>
+                            <?php endif; ?>
                             <?php foreach ($availableOrders as $source): ?>
-                                <label class="flex items-center gap-3 p-3 hover:bg-gray-50 cursor-pointer">
+                                <?php $alreadyBilled = (int)($source['sudah_ditagihkan'] ?? 0) === 1; ?>
+                                <label class="flex items-center gap-3 p-3 <?php echo $alreadyBilled ? 'bg-gray-50 opacity-70 cursor-not-allowed' : 'hover:bg-gray-50 cursor-pointer'; ?>">
                                     <input type="checkbox"
                                         name="source_ids[]"
                                         value="<?php echo (int)$source['id']; ?>"
-                                        checked
+                                        <?php echo $alreadyBilled ? 'disabled' : 'checked'; ?>
                                         class="source-check accent-black"
                                         data-order-id="<?php echo (int)$source['id']; ?>"
                                         onchange="updateCreatePreview()">
 
                                     <div class="min-w-0 flex-1">
-                                        <p class="text-xs font-black">
-                                            <?php echo akw_h($source['nomor_pesanan']); ?> · <?php echo akw_h($source['nama_pemesan']); ?>
-                                        </p>
+                                        <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-1">
+                                            <p class="text-xs font-black">
+                                                <?php echo akw_h($source['nomor_pesanan']); ?> · <?php echo akw_h($source['nama_pemesan']); ?>
+                                            </p>
+                                            <?php if ($alreadyBilled): ?>
+                                                <span class="inline-flex self-start border border-gray-200 bg-white px-2 py-1 text-[8px] font-black uppercase tracking-widest text-gray-500">
+                                                    Sudah Ditagihkan
+                                                </span>
+                                            <?php else: ?>
+                                                <span class="inline-flex self-start border border-green-200 bg-green-50 px-2 py-1 text-[8px] font-black uppercase tracking-widest text-green-700">
+                                                    Siap Ditagihkan
+                                                </span>
+                                            <?php endif; ?>
+                                        </div>
                                         <p class="text-[9px] text-gray-400 mt-1">
                                             <?php echo akw_h($source['no_hp'] ?: '-'); ?>
                                             · <?php echo akw_h($source['lokasi'] ?: '-'); ?>
@@ -1778,7 +1820,8 @@ require_once 'navbar.php';
 
                     <button type="submit"
                         id="btnSaveKwitansi"
-                        class="flex-1 py-3 text-xs font-bold uppercase bg-black text-white disabled:opacity-40">
+                        class="flex-1 py-3 text-xs font-bold uppercase bg-black text-white disabled:opacity-40 disabled:cursor-not-allowed"
+                        <?php echo !$billableOrders ? 'disabled' : ''; ?>>
                         Simpan Kwitansi
                     </button>
                 </div>
@@ -1918,7 +1961,7 @@ require_once 'navbar.php';
         }
 
         function toggleAllSources(checked) {
-            document.querySelectorAll('.source-check').forEach(function(input) {
+            document.querySelectorAll('.source-check:not(:disabled)').forEach(function(input) {
                 input.checked = checked;
             });
             updateCreatePreview();

@@ -76,6 +76,36 @@ function pa_normalize_wa(string $number): string
     return $number;
 }
 
+
+/**
+ * @return array<int,string>
+ */
+function pa_admin_wa_numbers(): array
+{
+    /*
+     * Nomor WhatsApp admin penerima notifikasi pesanan air.
+     * Isi langsung di halaman pesan_air.php ini.
+     *
+     * Format yang disarankan: 628xxxxxxxxxx
+     * Untuk menambah admin, tambahkan nomor baru ke array.
+     */
+    $adminNumbers = [
+        '6285217776575', // GANTI dengan nomor WhatsApp admin
+        // '6289876543210', // Admin kedua (opsional)
+    ];
+
+    $result = [];
+
+    foreach ($adminNumbers as $number) {
+        $normalized = pa_normalize_wa((string)$number);
+        if ($normalized !== '') {
+            $result[$normalized] = $normalized;
+        }
+    }
+
+    return array_values($result);
+}
+
 function pa_base_url(): string
 {
     $https = !empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off';
@@ -162,6 +192,15 @@ function pa_ensure_database(PDO $pdo): void
         $pdo->exec("ALTER TABLE air_pesanan ADD UNIQUE KEY uq_air_pesanan_tracking (tracking_token)");
     }
 
+
+    if (!pa_column_exists($pdo, 'air_pesanan', 'nama_penerima')) {
+        $pdo->exec("ALTER TABLE air_pesanan ADD COLUMN nama_penerima VARCHAR(120) NULL AFTER alamat_pengiriman");
+    }
+
+    if (!pa_column_exists($pdo, 'air_pesanan', 'no_hp_penerima')) {
+        $pdo->exec("ALTER TABLE air_pesanan ADD COLUMN no_hp_penerima VARCHAR(30) NULL AFTER nama_penerima");
+    }
+
     $pdo->exec("CREATE TABLE IF NOT EXISTS air_pesanan_lokasi (
         id INT AUTO_INCREMENT PRIMARY KEY,
         pesanan_id INT NOT NULL,
@@ -226,6 +265,7 @@ $orderSummary = [];
 $trackingToken = '';
 $trackingUrl = '';
 $whatsappUrl = '';
+$adminWhatsappUrls = [];
 
 try {
     pa_ensure_database($pdo);
@@ -250,10 +290,21 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $error === '') {
             throw new RuntimeException('Sesi formulir tidak valid. Muat ulang halaman lalu coba kembali.');
         }
 
+        // Tanggal pemesanan dapat dipilih dari form.
+        // Default pada form tetap menggunakan tanggal hari ini.
         $tanggalPemesanan = trim((string)($_POST['tanggal_pemesanan'] ?? ''));
         $tanggalKirim = trim((string)($_POST['tanggal_kirim'] ?? ''));
         $nama = trim((string)($_POST['nama'] ?? ''));
         $noHp = trim((string)($_POST['no_hp'] ?? ''));
+
+        $penerimaSama = !empty($_POST['penerima_sama']);
+        $namaPenerima = $penerimaSama
+            ? $nama
+            : trim((string)($_POST['nama_penerima'] ?? ''));
+        $noHpPenerima = $penerimaSama
+            ? $noHp
+            : trim((string)($_POST['no_hp_penerima'] ?? ''));
+
         // Pembayaran dikelola oleh petugas setelah pesanan masuk.
         $metodePembayaran = 'tunai';
         $catatan = '';
@@ -262,11 +313,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $error === '') {
         if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $tanggalKirim)) {
             throw new RuntimeException('Tanggal pengiriman wajib diisi.');
         }
+        if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $tanggalPemesanan)) {
+            throw new RuntimeException('Tanggal pemesanan wajib diisi.');
+        }
         if ($tanggalKirim < $tanggalPemesanan) {
             throw new RuntimeException('Tanggal pengiriman tidak boleh sebelum tanggal pemesanan.');
         }
         if ($nama === '') throw new RuntimeException('Nama pemesan wajib diisi.');
-        if ($noHp === '') throw new RuntimeException('Nomor WhatsApp wajib diisi.');
+        if ($noHp === '') throw new RuntimeException('Nomor WhatsApp pemesan wajib diisi.');
+        if ($namaPenerima === '') throw new RuntimeException('Nama penerima wajib diisi.');
+        if ($noHpPenerima === '') throw new RuntimeException('Nomor WhatsApp penerima wajib diisi.');
         if (!$lokasiRows) throw new RuntimeException('Tambahkan minimal satu lokasi pengantaran.');
         if (!in_array($metodePembayaran, ['tunai', 'qris', 'transfer'], true)) $metodePembayaran = 'tunai';
 
@@ -349,17 +405,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $error === '') {
 
         $stmtOrder = $pdo->prepare("INSERT INTO air_pesanan(
             nomor_pesanan,pelanggan_id,user_id,tanggal_pemesanan,tipe_pengambilan,
-            alamat_pengiriman,tanggal_kirim,jam_kirim,status,metode_pembayaran,
+            alamat_pengiriman,nama_penerima,no_hp_penerima,tanggal_kirim,jam_kirim,status,metode_pembayaran,
             status_pembayaran,total,dibayar,galon_kosong_diterima,galon_dipinjamkan,
             deposit_galon,catatan,tracking_token,created_at
         ) VALUES(
             :nomor,:pelanggan_id,NULL,:tanggal_pemesanan,'antar','Multi Lokasi',
-            :tanggal_kirim,NULL,'baru',:metode,'belum_bayar',0,0,0,0,0,:catatan,:tracking_token,NOW()
+            :nama_penerima,:no_hp_penerima,:tanggal_kirim,NULL,'baru',:metode,'belum_bayar',0,0,0,0,0,:catatan,:tracking_token,NOW()
         )");
         $stmtOrder->execute([
             ':nomor' => $orderNumber,
             ':pelanggan_id' => $pelangganId,
             ':tanggal_pemesanan' => $tanggalPemesanan,
+            ':nama_penerima' => $namaPenerima,
+            ':no_hp_penerima' => $noHpPenerima,
             ':tanggal_kirim' => $tanggalKirim,
             ':metode' => $metodePembayaran,
             ':catatan' => $catatan,
@@ -423,8 +481,34 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $error === '') {
             . $trackingUrl . "\n\n"
             . "Simpan link ini sampai pesanan selesai.";
 
-        if ($waNumber !== '') {
-            $whatsappUrl = 'https://wa.me/' . $waNumber . '?text=' . rawurlencode($waMessage);
+        // WhatsApp hanya dikirim/diteruskan ke admin.
+        // Nomor pemesan tetap tersimpan di database untuk kebutuhan konfirmasi.
+        $whatsappUrl = '';
+
+        $adminMessage = "PESANAN AIR BARU - SEJAHUB\n\n"
+            . "Nomor Pesanan: " . $orderNumber . "\n"
+            . "Pemesan: " . $nama . "\n"
+            . "WA Pemesan: " . $noHp . "\n"
+            . "Penerima: " . $namaPenerima . "\n"
+            . "WA Penerima: " . $noHpPenerima . "\n"
+            . "Tanggal Pemesanan: " . date('d/m/Y', strtotime($tanggalPemesanan)) . "\n"
+            . "Tanggal Kirim: " . date('d/m/Y', strtotime($tanggalKirim)) . "\n"
+            . "Total: " . $orderTotalQty . " unit\n"
+            . "Status: Baru\n\n";
+
+        foreach ($orderSummary as $summaryRow) {
+            $adminMessage .= "Lokasi: " . $summaryRow['lokasi'] . "\n";
+            foreach ($summaryRow['items'] as $summaryItem) {
+                $adminMessage .= "- " . $summaryItem . "\n";
+            }
+            $adminMessage .= "\n";
+        }
+
+        $adminMessage .= "Link Tracking:\n" . $trackingUrl . "\n\n"
+            . "Silakan proses pesanan melalui halaman admin.";
+
+        foreach (pa_admin_wa_numbers() as $adminWa) {
+            $adminWhatsappUrls[] = 'https://wa.me/' . $adminWa . '?text=' . rawurlencode($adminMessage);
         }
 
         $success = true;
@@ -731,11 +815,19 @@ $csrfToken = pa_csrf_token();
                         <p class="text-xs text-blue-700 mt-2 leading-5">Gunakan link berikut untuk memantau status pesanan tanpa login.</p>
                         <div class="mt-3 flex flex-col sm:flex-row gap-2">
                             <a href="<?= pa_h($trackingUrl) ?>" target="_blank" class="btn btn-light flex-1"><i data-lucide="map-pinned" class="w-4 h-4"></i>Lacak Pesanan</a>
-                            <?php if ($whatsappUrl !== ''): ?>
-                                <a href="<?= pa_h($whatsappUrl) ?>" target="_blank" rel="noopener" class="btn btn-dark flex-1"><i data-lucide="message-circle" class="w-4 h-4"></i>Kirim ke WhatsApp</a>
-                            <?php endif; ?>
+                            <?php foreach ($adminWhatsappUrls as $adminIndex => $adminWhatsappUrl): ?>
+                                <a href="<?= pa_h($adminWhatsappUrl) ?>" target="_blank" rel="noopener" class="btn btn-dark flex-1">
+                                    <i data-lucide="bell-ring" class="w-4 h-4"></i>
+                                    WA Admin<?= count($adminWhatsappUrls) > 1 ? ' ' . ($adminIndex + 1) : '' ?>
+                                </a>
+                            <?php endforeach; ?>
                         </div>
                         <p class="text-[10px] text-blue-600 mt-3 break-all"><?= pa_h($trackingUrl) ?></p>
+                        <?php if ($adminWhatsappUrls): ?>
+                            <p class="text-[10px] text-blue-600 mt-3">Pesanan berhasil disimpan. Link tracking tetap tersedia untuk pemesan, dan ringkasan pesanan dapat dikirim ke admin melalui tombol WA Admin.</p>
+                        <?php else: ?>
+                            <p class="text-[10px] text-amber-600 mt-3">Nomor WA admin belum diatur pada fungsi pa_admin_wa_numbers() di pesan_air.php.</p>
+                        <?php endif; ?>
                     </div>
                     <a href="pesan_air.php" class="btn btn-dark mt-3 w-full"><i data-lucide="plus" class="w-4 h-4"></i>Buat Pesanan Lagi</a>
                 </section>
@@ -755,17 +847,63 @@ $csrfToken = pa_csrf_token();
                             </div>
                             <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-1 gap-4">
                                 <div>
+                                    <label class="section-eyebrow block mb-2">Tanggal Pemesanan</label>
+                                    <input type="date"
+                                        name="tanggal_pemesanan"
+                                        id="tanggal_pemesanan"
+                                        required
+                                        value="<?= pa_h($_POST['tanggal_pemesanan'] ?? date('Y-m-d')) ?>"
+                                        class="field"
+                                        onchange="syncTanggalKirimMin()">
+                                    <p class="text-[9px] text-gray-400 mt-2">Bisa diubah bila pesanan dicatat untuk tanggal sebelumnya atau input ulang pesanan lama.</p>
+                                </div>
+                                <div>
                                     <label class="section-eyebrow block mb-2">Tanggal Pengiriman</label>
                                     <input type="date"
                                         name="tanggal_kirim"
+                                        id="tanggal_kirim"
                                         required
-                                        min="<?= date('Y-m-d') ?>"
+                                        min="<?= pa_h($_POST['tanggal_pemesanan'] ?? date('Y-m-d')) ?>"
                                         value="<?= pa_h($_POST['tanggal_kirim'] ?? date('Y-m-d')) ?>"
                                         class="field">
-                                    <p class="text-[9px] text-gray-400 mt-2">Tanggal pemesanan dicatat otomatis oleh sistem saat pesanan dikirim.</p>
+                                    <p class="text-[9px] text-gray-400 mt-2">Tanggal pengiriman tidak boleh lebih awal dari tanggal pemesanan.</p>
                                 </div>
                                 <div><label class="section-eyebrow block mb-2">Nama Pemesan</label><input type="text" name="nama" required value="<?= pa_h($_POST['nama'] ?? '') ?>" class="field" placeholder="Nama lengkap"></div>
-                                <div><label class="section-eyebrow block mb-2">Nomor WhatsApp</label><input type="tel" name="no_hp" required value="<?= pa_h($_POST['no_hp'] ?? '') ?>" class="field" placeholder="08xxxxxxxxxx"></div>
+                                <div><label class="section-eyebrow block mb-2">Nomor WhatsApp Pemesan</label><input type="tel" name="no_hp" id="no_hp" required value="<?= pa_h($_POST['no_hp'] ?? '') ?>" class="field" placeholder="08xxxxxxxxxx"></div>
+                            </div>
+
+                            <div class="mt-5 pt-5 border-t border-gray-100">
+                                <label class="flex items-center gap-3 cursor-pointer">
+                                    <input type="checkbox"
+                                        name="penerima_sama"
+                                        id="penerima_sama"
+                                        value="1"
+                                        <?= !isset($_POST['penerima_sama']) || !empty($_POST['penerima_sama']) ? 'checked' : '' ?>
+                                        onchange="toggleRecipientFields()"
+                                        class="w-4 h-4 accent-black">
+                                    <span class="text-xs font-extrabold">Penerima sama dengan pemesan</span>
+                                </label>
+
+                                <div id="recipient-fields" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-1 gap-4 mt-4">
+                                    <div>
+                                        <label class="section-eyebrow block mb-2">Nama Penerima</label>
+                                        <input type="text"
+                                            name="nama_penerima"
+                                            id="nama_penerima"
+                                            value="<?= pa_h($_POST['nama_penerima'] ?? '') ?>"
+                                            class="field"
+                                            placeholder="Nama penerima">
+                                    </div>
+                                    <div>
+                                        <label class="section-eyebrow block mb-2">Nomor WhatsApp Penerima</label>
+                                        <input type="tel"
+                                            name="no_hp_penerima"
+                                            id="no_hp_penerima"
+                                            value="<?= pa_h($_POST['no_hp_penerima'] ?? '') ?>"
+                                            class="field"
+                                            placeholder="08xxxxxxxxxx">
+                                    </div>
+                                </div>
                             </div>
                         </section>
 
@@ -965,6 +1103,38 @@ $csrfToken = pa_csrf_token();
             sel.closest('[data-location]').querySelector('.location-title').textContent = sel.value || 'Lokasi Baru'
         }
 
+
+        function syncTanggalKirimMin() {
+            var orderDate = document.getElementById('tanggal_pemesanan');
+            var deliveryDate = document.getElementById('tanggal_kirim');
+            if (!orderDate || !deliveryDate) return;
+
+            deliveryDate.min = orderDate.value || '';
+
+            if (deliveryDate.value && orderDate.value && deliveryDate.value < orderDate.value) {
+                deliveryDate.value = orderDate.value;
+            }
+        }
+
+        function toggleRecipientFields() {
+            var same = document.getElementById('penerima_sama');
+            var wrap = document.getElementById('recipient-fields');
+            var name = document.getElementById('nama_penerima');
+            var phone = document.getElementById('no_hp_penerima');
+
+            if (!same || !wrap || !name || !phone) return;
+
+            if (same.checked) {
+                wrap.classList.add('hidden');
+                name.required = false;
+                phone.required = false;
+            } else {
+                wrap.classList.remove('hidden');
+                name.required = true;
+                phone.required = true;
+            }
+        }
+
         function calculateTotal() {
             var totalQty = 0;
             document.querySelectorAll('[data-item]').forEach(function(item) {
@@ -999,6 +1169,8 @@ $csrfToken = pa_csrf_token();
             })
         }
         addLocation();
+        syncTanggalKirimMin();
+        toggleRecipientFields();
         calculateTotal();
         if (window.lucide) lucide.createIcons();
 

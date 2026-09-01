@@ -161,6 +161,55 @@ try {
     $flashType = 'error';
 }
 
+/*
+ * Bersihkan rekap vendor yatim.
+ * Jika seluruh pesanan sumber suatu rekap sudah dihapus dari air_pesanan,
+ * detail/source/rekap vendor tersebut tidak boleh tetap muncul di halaman.
+ */
+if ($flashType !== 'error') {
+    try {
+        $pdo->beginTransaction();
+
+        $orphanIds = $pdo->query("
+            SELECT vo.id
+            FROM air_vendor_order vo
+            WHERE NOT EXISTS (
+                SELECT 1
+                FROM air_vendor_order_source s
+                INNER JOIN air_pesanan p ON p.id = s.pesanan_id
+                WHERE s.vendor_order_id = vo.id
+            )
+        ")->fetchAll(PDO::FETCH_COLUMN);
+
+        if ($orphanIds) {
+            $orphanIds = array_map('intval', $orphanIds);
+            $orphanIds = array_values(array_filter($orphanIds, function ($id) {
+                return $id > 0;
+            }));
+
+            if ($orphanIds) {
+                $orphanPlaceholders = implode(',', array_fill(0, count($orphanIds), '?'));
+
+                $stmtCleanupSource = $pdo->prepare("DELETE FROM air_vendor_order_source WHERE vendor_order_id IN ($orphanPlaceholders)");
+                $stmtCleanupSource->execute($orphanIds);
+
+                $stmtCleanupDetail = $pdo->prepare("DELETE FROM air_vendor_order_detail WHERE vendor_order_id IN ($orphanPlaceholders)");
+                $stmtCleanupDetail->execute($orphanIds);
+
+                $stmtCleanupOrder = $pdo->prepare("DELETE FROM air_vendor_order WHERE id IN ($orphanPlaceholders)");
+                $stmtCleanupOrder->execute($orphanIds);
+            }
+        }
+
+        $pdo->commit();
+    } catch (Throwable $e) {
+        if ($pdo->inTransaction()) {
+            $pdo->rollBack();
+        }
+        error_log('AIR VENDOR CLEANUP ORPHAN ERROR: ' . $e->getMessage());
+    }
+}
+
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && $flashType !== 'error') {
     try {
         $action = trim((string)($_POST['action'] ?? ''));
@@ -346,7 +395,38 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $flashType !== 'error') {
 }
 
 $today = date('Y-m-d');
-$needDate = trim((string)($_GET['need_date'] ?? $today));
+$needDate = trim((string)($_GET['need_date'] ?? ''));
+
+if ($needDate === '') {
+    try {
+        $stmtNextNeedDate = $pdo->query("
+            SELECT COALESCE(p.tanggal_kirim, p.tanggal_pemesanan, DATE(p.created_at)) AS need_date
+            FROM air_pesanan p
+            WHERE p.status NOT IN ('batal', 'selesai')
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM air_vendor_order_source s
+                  JOIN air_vendor_order vo ON vo.id = s.vendor_order_id
+                    AND vo.status <> 'batal'
+                  WHERE s.pesanan_id = p.id
+              )
+            ORDER BY
+                CASE
+                    WHEN COALESCE(p.tanggal_kirim, p.tanggal_pemesanan, DATE(p.created_at)) >= CURDATE() THEN 0
+                    ELSE 1
+                END,
+                COALESCE(p.tanggal_kirim, p.tanggal_pemesanan, DATE(p.created_at)) ASC,
+                p.id ASC
+            LIMIT 1
+        ");
+
+        $detectedNeedDate = $stmtNextNeedDate ? (string)$stmtNextNeedDate->fetchColumn() : '';
+        $needDate = $detectedNeedDate !== '' ? $detectedNeedDate : $today;
+    } catch (Throwable $e) {
+        $needDate = $today;
+    }
+}
+
 if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $needDate)) {
     $needDate = $today;
 }
@@ -490,7 +570,7 @@ try {
     }
 }
 
-$whereVendor = ['1=1'];
+$whereVendor = ["EXISTS (\n    SELECT 1\n    FROM air_vendor_order_source src_live\n    INNER JOIN air_pesanan p_live ON p_live.id = src_live.pesanan_id\n    WHERE src_live.vendor_order_id = vo.id\n)"];
 $paramsVendor = [];
 if ($q !== '') {
     $whereVendor[] = '(vo.nomor_vendor_order LIKE :q OR vo.vendor_nama LIKE :q OR vo.vendor_wa LIKE :q)';
@@ -527,7 +607,41 @@ try {
     $vendorOrders = $stmtOrders->fetchAll(PDO::FETCH_ASSOC);
 
     $stmtDetails = $pdo->prepare("\n        SELECT *\n        FROM air_vendor_order_detail\n        WHERE vendor_order_id = :id\n        ORDER BY nama_produk ASC, id ASC\n    ");
-    $stmtSources = $pdo->prepare("\n        SELECT p.nomor_pesanan, c.nama AS nama_pemesan\n        FROM air_vendor_order_source s\n        JOIN air_pesanan p ON p.id = s.pesanan_id\n        JOIN air_pelanggan c ON c.id = p.pelanggan_id\n        WHERE s.vendor_order_id = :id\n        ORDER BY p.created_at ASC, p.id ASC\n    ");
+    $stmtDeliveryLocations = $pdo->prepare("
+        SELECT
+            COALESCE(NULLIF(TRIM(l.lokasi), ''), 'Lokasi belum ditentukan') AS lokasi,
+            d.nama_produk,
+            COALESCE(pr.satuan, 'unit') AS satuan,
+            SUM(d.qty) AS qty
+        FROM air_vendor_order_source s
+        JOIN air_pesanan_detail d ON d.pesanan_id = s.pesanan_id
+        LEFT JOIN air_pesanan_lokasi l ON l.id = d.lokasi_id AND l.pesanan_id = d.pesanan_id
+        LEFT JOIN air_produk pr ON pr.id = d.produk_id
+        WHERE s.vendor_order_id = :id
+        GROUP BY COALESCE(NULLIF(TRIM(l.lokasi), ''), 'Lokasi belum ditentukan'), d.nama_produk, pr.satuan
+        HAVING SUM(d.qty) > 0
+        ORDER BY COALESCE(NULLIF(TRIM(l.lokasi), ''), 'Lokasi belum ditentukan') ASC, d.nama_produk ASC
+    ");
+    $stmtSources = $pdo->prepare("
+        SELECT
+            p.id AS pesanan_id,
+            p.nomor_pesanan,
+            c.nama AS nama_pemesan,
+            COALESCE((
+                SELECT GROUP_CONCAT(
+                    DISTINCT NULLIF(TRIM(l.lokasi), '')
+                    ORDER BY l.urutan ASC, l.id ASC
+                    SEPARATOR '||'
+                )
+                FROM air_pesanan_lokasi l
+                WHERE l.pesanan_id = p.id
+            ), '') AS daftar_lokasi
+        FROM air_vendor_order_source s
+        JOIN air_pesanan p ON p.id = s.pesanan_id
+        JOIN air_pelanggan c ON c.id = p.pelanggan_id
+        WHERE s.vendor_order_id = :id
+        ORDER BY p.created_at ASC, p.id ASC
+    ");
 
     foreach ($vendorOrders as &$vendorOrder) {
         $stmtDetails->execute([':id' => (int)$vendorOrder['id']]);
@@ -535,6 +649,21 @@ try {
 
         $stmtSources->execute([':id' => (int)$vendorOrder['id']]);
         $vendorOrder['sources'] = $stmtSources->fetchAll(PDO::FETCH_ASSOC);
+
+        $stmtDeliveryLocations->execute([':id' => (int)$vendorOrder['id']]);
+        $deliveryRows = $stmtDeliveryLocations->fetchAll(PDO::FETCH_ASSOC);
+        $deliveryGroups = [];
+        foreach ($deliveryRows as $deliveryRow) {
+            $locationName = trim((string)($deliveryRow['lokasi'] ?? ''));
+            if ($locationName === '') $locationName = 'Lokasi belum ditentukan';
+            if (!isset($deliveryGroups[$locationName])) $deliveryGroups[$locationName] = [];
+            $deliveryGroups[$locationName][] = [
+                'nama_produk' => (string)($deliveryRow['nama_produk'] ?? '-'),
+                'satuan' => (string)($deliveryRow['satuan'] ?? 'unit'),
+                'qty' => (int)($deliveryRow['qty'] ?? 0),
+            ];
+        }
+        $vendorOrder['delivery_locations'] = $deliveryGroups;
     }
     unset($vendorOrder);
 } catch (Throwable $e) {
@@ -804,8 +933,11 @@ require_once 'navbar.php';
                 <a href="air_pesanan.php" class="btn border border-gray-200 bg-white text-gray-700">
                     <i data-lucide="clipboard-list" class="w-4 h-4"></i> Pesanan Pelanggan
                 </a>
-                <button type="button" onclick="openCreateModal()" class="btn bg-black text-white" <?php echo !$availableOrders ? 'disabled' : ''; ?>>
-                    <i data-lucide="plus" class="w-4 h-4"></i> Buat Rekap Vendor
+                <button type="button"
+                    onclick="openCreateModal()"
+                    class="btn bg-black text-white">
+                    <i data-lucide="plus" class="w-4 h-4"></i>
+                    Buat Rekap Vendor
                 </button>
             </div>
         </div>
@@ -1040,6 +1172,14 @@ require_once 'navbar.php';
                         </div>
 
                         <div class="max-h-72 overflow-y-auto space-y-2">
+                            <?php if (!$availableOrders): ?>
+                                <div class="border border-dashed border-gray-200 bg-gray-50 p-5 text-center">
+                                    <p class="text-xs font-bold text-gray-600">Belum ada pesanan yang dapat direkap.</p>
+                                    <p class="text-[10px] text-gray-400 mt-1">
+                                        Ubah tanggal kebutuhan pada halaman utama, atau pastikan pesanan belum selesai/batal dan belum masuk rekap vendor.
+                                    </p>
+                                </div>
+                            <?php endif; ?>
                             <?php foreach ($availableOrders as $source): ?>
                                 <label class="block border border-subtle bg-white p-3 hover:bg-gray-50 cursor-pointer">
                                     <div class="flex items-start gap-3">
@@ -1125,7 +1265,12 @@ require_once 'navbar.php';
                         <p class="text-[9px] text-gray-400 mt-2">Ringkasan otomatis dihitung hanya dari pesanan pelanggan yang dicentang di atas.</p>
                     </div>
                 </div>
-                <div class="px-5 md:px-7 py-5 border-t border-subtle bg-gray-50 flex gap-3"><button type="button" onclick="closeModal('createModal')" class="flex-1 py-3 text-xs font-bold uppercase border border-subtle bg-white">Batal</button><button type="submit" class="flex-1 py-3 text-xs font-bold uppercase bg-black text-white">Simpan Rekap</button></div>
+                <div class="px-5 md:px-7 py-5 border-t border-subtle bg-gray-50 flex gap-3"><button type="button" onclick="closeModal('createModal')" class="flex-1 py-3 text-xs font-bold uppercase border border-subtle bg-white">Batal</button><button type="submit"
+                        id="saveCreateRecapButton"
+                        class="flex-1 py-3 text-xs font-bold uppercase bg-black text-white disabled:opacity-40 disabled:cursor-not-allowed"
+                        <?php echo !$availableOrders ? 'disabled' : ''; ?>>
+                        Simpan Rekap
+                    </button></div>
             </form>
         </div>
     </div>
@@ -1182,6 +1327,13 @@ require_once 'navbar.php';
         function openCreateModal() {
             refreshCreateRecapSummary();
             openModal('createModal');
+
+            var firstVendorInput = document.querySelector('#createModal input[name="vendor_nama"]');
+            if (firstVendorInput) {
+                setTimeout(function() {
+                    firstVendorInput.focus();
+                }, 80);
+            }
         }
 
         function toggleAllSources(checked) {
@@ -1255,6 +1407,11 @@ require_once 'navbar.php';
                 checkAll.checked = all.length > 0 && checked.length === all.length;
                 checkAll.indeterminate = checked.length > 0 && checked.length < all.length;
             }
+
+            var saveButton = document.getElementById('saveCreateRecapButton');
+            if (saveButton) {
+                saveButton.disabled = checked.length === 0;
+            }
         }
 
         function formatDate(v) {
@@ -1316,24 +1473,62 @@ require_once 'navbar.php';
             var wa = normalizeWa(order.vendor_wa || '');
             if (!wa) {
                 alert('Nomor WhatsApp vendor belum diisi.');
-                return
+                return;
             }
+
             var details = Array.isArray(order.details) ? order.details : [];
-            var lines = ['Permintaan Air Mineral', 'Nomor Rekap: ' + (order.nomor_vendor_order || '-'), 'Tanggal Kebutuhan: ' + formatDate(order.tanggal_kebutuhan), ''];
-            details.forEach(function(d) {
-                lines.push('- ' + d.nama_produk + ': ' + Number(d.jumlah_dipesan || 0).toLocaleString('id-ID') + ' ' + (d.satuan || 'unit'))
-            });
-            lines.push('', 'Mohon konfirmasi jumlah yang tersedia dan jadwal pengiriman.');
+            var deliveryLocations = order.delivery_locations && typeof order.delivery_locations === 'object' ?
+                order.delivery_locations :
+                {};
+
+            var lines = [
+                'Permintaan Air Mineral',
+                '',
+                'Tanggal Pengiriman: ' + formatDate(order.tanggal_kebutuhan),
+                ''
+            ];
+
+            var locationNames = Object.keys(deliveryLocations);
+            if (locationNames.length) {
+                lines.push('Lokasi Pengantaran:');
+                lines.push('');
+                locationNames.forEach(function(locationName, index) {
+                    lines.push(locationName);
+                    var items = Array.isArray(deliveryLocations[locationName]) ? deliveryLocations[locationName] : [];
+                    items.forEach(function(item) {
+                        lines.push('- ' + String(item.nama_produk || '-') + ': ' + Number(item.qty || 0).toLocaleString('id-ID') + ' ' + String(item.satuan || 'unit'));
+                    });
+                    if (index < locationNames.length - 1) lines.push('');
+                });
+            } else {
+                lines.push('Pesanan:');
+                details.forEach(function(d) {
+                    lines.push('- ' + String(d.nama_produk || '-') + ': ' + Number(d.jumlah_dipesan || 0).toLocaleString('id-ID') + ' ' + String(d.satuan || 'unit'));
+                });
+            }
+
+            var totalOrdered = details.reduce(function(total, d) {
+                return total + Number(d.jumlah_dipesan || 0);
+            }, 0);
+
+            lines.push('');
+            lines.push('Total Pesanan: ' + totalOrdered.toLocaleString('id-ID') + ' unit');
+            lines.push('');
+            lines.push('Mohon konfirmasi ketersediaan dan jadwal pengiriman.');
+            lines.push('Terima kasih.');
+            lines.push('');
+            lines.push('No. Rekap: ' + (order.nomor_vendor_order || '-'));
+
             window.open('https://wa.me/' + wa + '?text=' + encodeURIComponent(lines.join('\n')), '_blank');
-            // Tandai status dikirim tanpa menghalangi pembukaan WA.
+
             var form = document.createElement('form');
             form.method = 'post';
             form.style.display = 'none';
             form.innerHTML = '<input name="action" value="update_vendor_status"><input name="vendor_order_id" value="' + Number(order.id || 0) + '"><input name="status" value="dikirim">';
             document.body.appendChild(form);
             setTimeout(function() {
-                form.submit()
-            }, 500)
+                form.submit();
+            }, 500);
         }
         refreshCreateRecapSummary();
         document.querySelectorAll('.modal-wrap').forEach(function(modal) {

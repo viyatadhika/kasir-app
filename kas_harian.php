@@ -310,6 +310,10 @@ function hitung_penjualan_shift(PDO $pdo, $openedAt, $closedAt = null, $operator
     ];
 
     $unit = normalize_unit_kas($unit);
+    $queryStart = (string)$openedAt;
+    $queryEnd = $closedAt ? (string)$closedAt : date('Y-m-d H:i:s');
+    $data['debug_start'] = $queryStart;
+    $data['debug_end'] = $queryEnd;
 
     try {
         if (!has_table($pdo, 'transaksi')) {
@@ -317,53 +321,163 @@ function hitung_penjualan_shift(PDO $pdo, $openedAt, $closedAt = null, $operator
             return $data;
         }
 
+        /* ================================================================
+         * KHUSUS CAFE
+         * ----------------------------------------------------------------
+         * Pesanan Cafe dapat dibuat lebih dulu lalu dibayar belakangan.
+         * Karena itu sesi kas Cafe HARUS memakai cafe_pesanan.paid_at,
+         * bukan transaksi.created_at.
+         * ================================================================ */
+        if ($unit === 'cafe') {
+            if (!has_table($pdo, 'cafe_pesanan')) {
+                $data['debug_error'] = 'Tabel cafe_pesanan tidak ditemukan.';
+                return $data;
+            }
+
+            $trxIdCol = first_existing_column($pdo, 'transaksi', ['id', 'transaksi_id'], '');
+            $totalCol = first_existing_column($pdo, 'transaksi', ['total', 'grand_total', 'total_bayar', 'subtotal', 'total_harga'], '');
+            $bayarCol = first_existing_column($pdo, 'transaksi', ['bayar', 'dibayar', 'payment_amount'], '');
+            $kembaliCol = first_existing_column($pdo, 'transaksi', ['kembalian', 'change_amount'], '');
+            $payCol = first_existing_column($pdo, 'transaksi', ['metode_pembayaran', 'payment_method', 'metode_bayar', 'jenis_bayar', 'pembayaran'], '');
+            $pointValueCol = first_existing_column($pdo, 'transaksi', ['nilai_point_pakai'], '');
+
+            if ($trxIdCol === '' || $totalCol === '') {
+                $data['debug_error'] = 'Kolom ID atau total transaksi Cafe tidak ditemukan.';
+                return $data;
+            }
+
+            // Nilai penjualan aktual: bayar - kembalian. Untuk data lama yang
+            // belum menyimpan bayar, fallback ke kolom total transaksi.
+            if ($bayarCol !== '') {
+                $paidExpr = "COALESCE(t.`$bayarCol`,0)";
+                $changeExpr = $kembaliCol !== '' ? "COALESCE(t.`$kembaliCol`,0)" : '0';
+                $saleExpr = "CASE WHEN ($paidExpr <> 0 OR $changeExpr <> 0) THEN GREATEST($paidExpr - $changeExpr,0) ELSE COALESCE(t.`$totalCol`,0) END";
+            } else {
+                $saleExpr = "COALESCE(t.`$totalCol`,0)";
+            }
+
+            $methodExpr = $payCol !== ''
+                ? "LOWER(TRIM(COALESCE(t.`$payCol`,'')))"
+                : "'tunai'";
+
+            $tunaiExpr = "SUM(CASE WHEN $methodExpr IN ('tunai','cash','uang tunai','') THEN $saleExpr ELSE 0 END)";
+            $nontunaiExpr = "SUM(CASE WHEN $methodExpr NOT IN ('tunai','cash','uang tunai','') THEN $saleExpr ELSE 0 END)";
+
+            $sqlCafe = "SELECT
+                    COALESCE(SUM($saleExpr),0) AS total_sales,
+                    COALESCE($tunaiExpr,0) AS total_tunai,
+                    COALESCE($nontunaiExpr,0) AS total_nontunai,
+                    COUNT(DISTINCT t.`$trxIdCol`) AS total_struk,
+                    COALESCE(SUM(COALESCE(cp.promo_diskon,0)),0) AS fee_promosi
+                FROM cafe_pesanan cp
+                JOIN transaksi t ON t.`$trxIdCol` = cp.transaksi_id
+                WHERE LOWER(TRIM(COALESCE(cp.status_pembayaran,''))) = 'lunas'
+                  AND LOWER(TRIM(COALESCE(cp.status,''))) <> 'batal'
+                  AND cp.paid_at IS NOT NULL
+                  AND cp.paid_at >= :start
+                  AND cp.paid_at <= :end";
+
+            $stCafe = $pdo->prepare($sqlCafe);
+            $stCafe->execute([':start' => $queryStart, ':end' => $queryEnd]);
+            $r = $stCafe->fetch(PDO::FETCH_ASSOC) ?: [];
+
+            $data['total_sales'] = (float)($r['total_sales'] ?? 0);
+            $data['total_tunai'] = (float)($r['total_tunai'] ?? 0);
+            $data['total_nontunai'] = (float)($r['total_nontunai'] ?? 0);
+            $data['total_struk'] = (int)($r['total_struk'] ?? 0);
+            $data['fee_promosi'] = (float)($r['fee_promosi'] ?? 0);
+            $data['source_info'] = 'cafe_pesanan.paid_at + transaksi (rumus kas minimarket)';
+
+            // Margin Cafe dihitung hanya dari transaksi yang benar-benar lunas
+            // pada rentang sesi kas yang sama.
+            if (has_table($pdo, 'transaksi_detail')) {
+                try {
+                    $detailTransCol = first_existing_column($pdo, 'transaksi_detail', ['transaksi_id', 'id_transaksi'], '');
+                    $detailQtyCol = first_existing_column($pdo, 'transaksi_detail', ['qty', 'jumlah', 'kuantitas'], '');
+                    $detailHargaCol = first_existing_column($pdo, 'transaksi_detail', ['harga', 'harga_jual', 'harga_satuan'], '');
+                    $detailSubtotalCol = first_existing_column($pdo, 'transaksi_detail', ['subtotal', 'total', 'jumlah_harga'], '');
+                    $detailBeliCol = first_existing_column($pdo, 'transaksi_detail', ['harga_beli', 'harga_modal', 'harga_pokok', 'modal', 'hpp'], '');
+                    $detailProdukCol = first_existing_column($pdo, 'transaksi_detail', ['produk_id', 'id_produk'], '');
+
+                    if ($detailTransCol && $detailQtyCol && $detailHargaCol) {
+                        $joinProduk = '';
+                        $hargaBeliExpr = '0';
+                        if ($detailBeliCol !== '') {
+                            $hargaBeliExpr = "COALESCE(d.`$detailBeliCol`,0)";
+                        } elseif ($detailProdukCol !== '' && has_table($pdo, 'produk')) {
+                            $produkIdCol = first_existing_column($pdo, 'produk', ['id', 'produk_id'], '');
+                            $produkBeliCol = first_existing_column($pdo, 'produk', ['harga_beli', 'harga_modal', 'harga_pokok', 'modal', 'hpp'], '');
+                            if ($produkIdCol !== '' && $produkBeliCol !== '') {
+                                $joinProduk = " LEFT JOIN produk p ON p.`$produkIdCol` = d.`$detailProdukCol` ";
+                                $hargaBeliExpr = "COALESCE(p.`$produkBeliCol`,0)";
+                            }
+                        }
+
+                        $pendapatanItemExpr = $detailSubtotalCol !== ''
+                            ? "COALESCE(d.`$detailSubtotalCol`,0)"
+                            : "COALESCE(d.`$detailHargaCol`,0)*COALESCE(d.`$detailQtyCol`,0)";
+
+                        $pointExpr = $pointValueCol !== '' ? "COALESCE(t.`$pointValueCol`,0)" : '0';
+                        $sqlMarginCafe = "SELECT COALESCE(
+                                SUM($pendapatanItemExpr - ($hargaBeliExpr * COALESCE(d.`$detailQtyCol`,0))),0
+                            )
+                            - COALESCE(SUM(DISTINCT COALESCE(cp.promo_diskon,0)),0)
+                            - COALESCE(SUM(DISTINCT $pointExpr),0)
+                            FROM cafe_pesanan cp
+                            JOIN transaksi t ON t.`$trxIdCol` = cp.transaksi_id
+                            JOIN transaksi_detail d ON d.`$detailTransCol` = t.`$trxIdCol`
+                            $joinProduk
+                            WHERE LOWER(TRIM(COALESCE(cp.status_pembayaran,''))) = 'lunas'
+                              AND LOWER(TRIM(COALESCE(cp.status,''))) <> 'batal'
+                              AND cp.paid_at IS NOT NULL
+                              AND cp.paid_at >= :start
+                              AND cp.paid_at <= :end";
+
+                        $stm = $pdo->prepare($sqlMarginCafe);
+                        $stm->execute([':start' => $queryStart, ':end' => $queryEnd]);
+                        $data['margin'] = (float)$stm->fetchColumn();
+                    }
+                } catch (Throwable $marginError) {
+                    $data['margin'] = 0;
+                }
+            }
+
+            return $data;
+        }
+
+        /* ================================================================
+         * TOKO / RETAIL — logika lama dipertahankan
+         * ================================================================ */
         $dateCol   = first_existing_column($pdo, 'transaksi', ['created_at', 'tanggal', 'waktu', 'tgl_transaksi', 'tanggal_transaksi'], '');
         $totalCol  = first_existing_column($pdo, 'transaksi', ['total', 'grand_total', 'total_bayar', 'subtotal', 'total_harga'], '');
         $payCol    = first_existing_column($pdo, 'transaksi', ['metode_pembayaran', 'payment_method', 'metode_bayar', 'jenis_bayar', 'pembayaran'], '');
         $statusCol = first_existing_column($pdo, 'transaksi', ['status_transaksi', 'status'], '');
         $userCol   = first_existing_column($pdo, 'transaksi', ['user_id', 'kasir_id', 'operator_id', 'created_by'], '');
         $promoCol  = first_existing_column($pdo, 'transaksi', ['fee_promosi', 'biaya_promosi', 'promo_fee'], '');
-        $unitCol   = first_existing_column($pdo, 'transaksi', ['unit', 'modul', 'sumber', 'outlet', 'jenis_transaksi', 'channel'], '');
+        $unitCol   = first_existing_column($pdo, 'transaksi', ['sumber_transaksi', 'unit', 'modul', 'sumber', 'outlet', 'jenis_transaksi', 'channel'], '');
+        $idCol     = first_existing_column($pdo, 'transaksi', ['id', 'transaksi_id'], '');
 
         if ($dateCol === '' || $totalCol === '') {
             $data['debug_error'] = 'Kolom tanggal atau total transaksi tidak ditemukan.';
             return $data;
         }
 
-        // Gunakan nilai created_at secara langsung seperti Laporan Operasional.
-        // Ini menjaga Total Sales dan Margin konsisten pada database/server yang sama.
-        $queryStart = (string)$openedAt;
-        $queryEnd = $closedAt ? (string)$closedAt : date('Y-m-d H:i:s');
-        $data['debug_start'] = (string)$queryStart;
-        $data['debug_end'] = (string)$queryEnd;
-
         $where = ["`$dateCol` >= :start", "`$dateCol` <= :end"];
         $params = [':start' => $queryStart, ':end' => $queryEnd];
 
-        // Pisahkan transaksi Toko dan Cafe bila tabel transaksi memiliki penanda unit/modul.
         if ($unitCol !== '') {
-            if ($unit === 'cafe') {
-                $where[] = "LOWER(TRIM(COALESCE(`$unitCol`,''))) IN ('cafe','kafe','pos_cafe','kasir_cafe')";
-            } else {
-                $where[] = "(LOWER(TRIM(COALESCE(`$unitCol`,''))) NOT IN ('cafe','kafe','pos_cafe','kasir_cafe') OR TRIM(COALESCE(`$unitCol`,''))='')";
-            }
+            $where[] = "(LOWER(TRIM(COALESCE(`$unitCol`,''))) NOT IN ('cafe','kafe','pos_cafe','kasir_cafe') OR TRIM(COALESCE(`$unitCol`,''))='')";
             $data['source_info'] = 'transaksi.' . $unitCol;
-        } elseif ($unit === 'cafe') {
-            // Tanpa kolom penanda unit, transaksi Cafe tidak boleh dicampur dengan Toko.
-            $data['debug_error'] = 'Transaksi Cafe belum memiliki kolom unit/modul pada tabel transaksi.';
-            return $data;
         } else {
             $data['source_info'] = 'transaksi';
         }
 
-        // Satu sesi kas hanya menghitung transaksi operator yang membuka kas.
         if ($operatorUserId > 0 && $userCol !== '') {
             $where[] = "`$userCol` = :operator_user_id";
             $params[':operator_user_id'] = (int)$operatorUserId;
         }
-
         if ($statusCol !== '') {
-            $where[] = "(LOWER(COALESCE(`$statusCol`,'')) NOT IN ('batal','cancel','cancelled','void'))";
+            $where[] = "LOWER(COALESCE(`$statusCol`,'')) NOT IN ('batal','cancel','cancelled','void')";
         }
 
         $totalExpr = "COALESCE(`$totalCol`,0)";
@@ -373,9 +487,9 @@ function hitung_penjualan_shift(PDO $pdo, $openedAt, $closedAt = null, $operator
             $nontunaiExpr = "SUM(CASE WHEN $methodExpr NOT IN ('tunai','cash','uang tunai','') THEN $totalExpr ELSE 0 END)";
         } else {
             $tunaiExpr = "SUM($totalExpr)";
-            $nontunaiExpr = "0";
+            $nontunaiExpr = '0';
         }
-        $promoExpr = $promoCol !== '' ? "SUM(COALESCE(`$promoCol`,0))" : "0";
+        $promoExpr = $promoCol !== '' ? "SUM(COALESCE(`$promoCol`,0))" : '0';
 
         $sql = "SELECT
                     COALESCE(SUM($totalExpr),0) AS total_sales,
@@ -396,9 +510,6 @@ function hitung_penjualan_shift(PDO $pdo, $openedAt, $closedAt = null, $operator
             $data[$key] = (float)($r[$key] ?? 0);
         }
 
-        // Margin = total keuntungan per item: (harga jual - harga beli) x qty.
-        // Prioritas harga beli dari transaksi_detail agar historis tetap akurat.
-        // Jika kolom tersebut belum tersedia, gunakan harga_beli pada tabel produk.
         if (has_table($pdo, 'transaksi_detail')) {
             try {
                 $detailTransCol = first_existing_column($pdo, 'transaksi_detail', ['transaksi_id', 'id_transaksi'], '');
@@ -407,16 +518,11 @@ function hitung_penjualan_shift(PDO $pdo, $openedAt, $closedAt = null, $operator
                 $detailSubtotalCol = first_existing_column($pdo, 'transaksi_detail', ['subtotal', 'total', 'jumlah_harga'], '');
                 $detailBeliCol  = first_existing_column($pdo, 'transaksi_detail', ['harga_beli', 'harga_modal', 'harga_pokok', 'modal', 'hpp'], '');
                 $detailProdukCol = first_existing_column($pdo, 'transaksi_detail', ['produk_id', 'id_produk'], '');
-                $idCol = first_existing_column($pdo, 'transaksi', ['id', 'transaksi_id'], '');
 
                 if ($detailTransCol && $detailQtyCol && $detailHargaCol && $idCol) {
                     $whereMargin = ["t.`$dateCol` >= :start", "t.`$dateCol` <= :end"];
                     if ($unitCol !== '') {
-                        if ($unit === 'cafe') {
-                            $whereMargin[] = "LOWER(TRIM(COALESCE(t.`$unitCol`,''))) IN ('cafe','kafe','pos_cafe','kasir_cafe')";
-                        } else {
-                            $whereMargin[] = "(LOWER(TRIM(COALESCE(t.`$unitCol`,''))) NOT IN ('cafe','kafe','pos_cafe','kasir_cafe') OR TRIM(COALESCE(t.`$unitCol`,''))='')";
-                        }
+                        $whereMargin[] = "(LOWER(TRIM(COALESCE(t.`$unitCol`,''))) NOT IN ('cafe','kafe','pos_cafe','kasir_cafe') OR TRIM(COALESCE(t.`$unitCol`,''))='')";
                     }
                     if ($operatorUserId > 0 && $userCol !== '') $whereMargin[] = "t.`$userCol` = :operator_user_id";
                     if ($statusCol !== '') $whereMargin[] = "LOWER(COALESCE(t.`$statusCol`,'')) NOT IN ('batal','cancel','cancelled','void')";
@@ -1867,7 +1973,7 @@ $rightActionHtml = '
                 <div class="row"><span class="label">Operator</span><span class="value">: <?php echo e(strtoupper($shiftLast['operator'] ?? $operatorName)); ?></span></div>
                 <div class="row"><span class="label">Kas Awal</span><span class="value">: <?php echo rupiah($shiftLast['kas_awal'] ?? 0); ?></span></div>
                 <div class="row"><span class="label">Total Sales</span><span class="value">: <?php echo rupiah($salesNow['total_sales']); ?></span></div>
-                <div class="row"><span class="label">Kas Akhir</span><span class="value">: <?php echo rupiah($kasAkhirNow); ?></span></div>
+                <div class="row"><span class="label">Kas Akhir Tunai</span><span class="value">: <?php echo rupiah($kasAkhirNow); ?></span></div>
                 <div class="row"><span class="label">Kas Aktual</span><span class="value">: <?php echo rupiah($kasAktualNow); ?></span></div>
                 <div class="row"><span class="label">TUNAI</span><span class="value">: <?php echo rupiah($salesNow['total_tunai']); ?></span></div>
                 <div class="row"><span class="label">NON-TUNAI</span><span class="value">: <?php echo rupiah($salesNow['total_nontunai']); ?></span></div>
@@ -2078,7 +2184,7 @@ $rightActionHtml = '
                     ['Total Sales', rupiahJs(s.total_sales)],
                     ['Total Tunai', rupiahJs(s.total_tunai)],
                     ['Total Non-Tunai', rupiahJs(s.total_nontunai)],
-                    ['Kas Akhir Sistem', rupiahJs(r.kas_akhir_sistem)],
+                    ['Kas Akhir Tunai', rupiahJs(r.kas_akhir_sistem)],
                     ['Kas Aktual', rupiahJs(r.kas_aktual_display)],
                     ['Selisih', (selisih >= 0 ? '+' : '-') + rupiahJs(Math.abs(selisih))],
                     ['Margin', rupiahJs(s.margin)],
@@ -2208,7 +2314,7 @@ $rightActionHtml = '
             line(kasLr('Status', d.status) + '\n');
             line(kasDash() + '\n');
 
-            /* RINGKASAN KAS */
+            /* RINGKASAN KAS - disamakan dengan minimarket */
             line(kasLr('Kas Awal', kasFmt(d.kas_awal)) + '\n');
             line(kasLr('Total Sales', kasFmt(d.total_sales)) + '\n');
             line(kasLr('  Tunai', kasFmt(d.total_tunai)) + '\n');

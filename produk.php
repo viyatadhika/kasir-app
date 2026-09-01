@@ -731,7 +731,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_GET['action'])) {
 // ── Fetch Data ────────────────────────────────────────────────────────────────
 $search       = trim(isset($_GET['q'])      ? $_GET['q']      : '');
 $katFilter    = isset($_GET['kat'])          ? $_GET['kat']    : '';
-$statusFilter = isset($_GET['status'])       ? $_GET['status'] : 'aktif';
+$statusFilter = isset($_GET['status'])       ? $_GET['status'] : 'semua';
 $stokFilter   = isset($_GET['stok'])         ? $_GET['stok']   : '';
 $expiredFilter = isset($_GET['expired'])      ? $_GET['expired'] : '';
 $page         = max(1, (int)(isset($_GET['page']) ? $_GET['page'] : 1));
@@ -751,28 +751,38 @@ if ($search) {
     $params[':q2'] = "%$search%";
     $params[':q3'] = "%$search%";
 }
-if ($katFilter) {
-    $where[]        = 'kategori = :kat';
-    $params[':kat'] = $katFilter;
-}
-if ($statusFilter !== 'semua') {
-    $where[]           = 'status = :status';
-    $params[':status'] = $statusFilter;
-}
-if ($stokFilter === 'limit') {
-    $where[] = 'stok > 0 AND stok <= stok_minimum';
-} elseif ($stokFilter === 'habis') {
-    $where[] = 'stok <= 0';
-}
+/*
+ * Saat pengguna sedang mengetik pencarian, pencarian dibuat global ke seluruh
+ * produk. Filter kategori/status/stok/kedaluwarsa hanya diterapkan ketika
+ * kolom pencarian kosong. Ini mencegah produk sebenarnya ada tetapi terlihat
+ * "tidak ditemukan" hanya karena tertutup filter lain.
+ */
+if ($search === '') {
+    if ($katFilter) {
+        $where[]        = 'kategori = :kat';
+        $params[':kat'] = $katFilter;
+    }
 
-if ($expiredFilter === 'expired') {
-    $where[] = "expired_date IS NOT NULL AND YEAR(expired_date) >= 1000 AND expired_date < CURDATE()";
-} elseif ($expiredFilter === '30_hari') {
-    $where[] = "expired_date IS NOT NULL AND YEAR(expired_date) >= 1000 AND expired_date >= CURDATE() AND expired_date <= DATE_ADD(CURDATE(), INTERVAL 30 DAY)";
-} elseif ($expiredFilter === '90_hari') {
-    $where[] = "expired_date IS NOT NULL AND YEAR(expired_date) >= 1000 AND expired_date >= CURDATE() AND expired_date <= DATE_ADD(CURDATE(), INTERVAL 90 DAY)";
-} elseif ($expiredFilter === 'tanpa_tanggal') {
-    $where[] = "(expired_date IS NULL OR YEAR(expired_date) = 0)";
+    if ($statusFilter !== 'semua') {
+        $where[]           = 'status = :status';
+        $params[':status'] = $statusFilter;
+    }
+
+    if ($stokFilter === 'limit') {
+        $where[] = 'stok > 0 AND stok <= stok_minimum';
+    } elseif ($stokFilter === 'habis') {
+        $where[] = 'stok <= 0';
+    }
+
+    if ($expiredFilter === 'expired') {
+        $where[] = "expired_date IS NOT NULL AND YEAR(expired_date) >= 1000 AND expired_date < CURDATE()";
+    } elseif ($expiredFilter === '30_hari') {
+        $where[] = "expired_date IS NOT NULL AND YEAR(expired_date) >= 1000 AND expired_date >= CURDATE() AND expired_date <= DATE_ADD(CURDATE(), INTERVAL 30 DAY)";
+    } elseif ($expiredFilter === '90_hari') {
+        $where[] = "expired_date IS NOT NULL AND YEAR(expired_date) >= 1000 AND expired_date >= CURDATE() AND expired_date <= DATE_ADD(CURDATE(), INTERVAL 90 DAY)";
+    } elseif ($expiredFilter === 'tanpa_tanggal') {
+        $where[] = "(expired_date IS NULL OR YEAR(expired_date) = 0)";
+    }
 }
 
 $whereStr = implode(' AND ', $where);
@@ -1483,7 +1493,7 @@ $rightActionHtml = '
     <main class="produk-main p-4 sm:p-5 md:p-8 lg:p-10">
 
         <!-- Summary Cards -->
-        <div class="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-3 md:gap-4 mb-6 md:mb-8">
+        <div id="produkSummary" class="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-3 md:gap-4 mb-6 md:mb-8">
             <div class="summary-card p-4 md:p-5">
                 <p class="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1">Total SKU</p>
                 <p class="text-2xl font-bold"><?php echo number_format($summary['total']); ?></p>
@@ -1565,13 +1575,13 @@ $rightActionHtml = '
             <button type="button" onclick="openModal('tambah')" class="scanner-btn">
                 Scan / Tambah Produk
             </button>
-            <span class="text-xs text-gray-400 font-medium ml-auto hidden sm:block">
+            <span id="produkResultCount" class="text-xs text-gray-400 font-medium ml-auto hidden sm:block">
                 <?php echo number_format($totalRows); ?> produk ditemukan
             </span>
         </div>
 
         <!-- Tabel & Card -->
-        <div class="table-card overflow-hidden">
+        <div id="produkTableCard" class="table-card overflow-hidden">
 
             <!-- ── DESKTOP: Tabel ──────────────────────────────────────────── -->
             <div class="hidden lg:block overflow-x-auto no-scrollbar">
@@ -2029,13 +2039,28 @@ $rightActionHtml = '
     <script>
         var editMode = false;
 
-        // ── Live Filter ─────────────────────────────────────────────────────────────
-        var searchTimer;
+        // ── Live Filter AJAX (tanpa reload halaman) ─────────────────────────────────
+        var searchTimer = null;
+        var produkFilterController = null;
+
         document.getElementById('search-input').addEventListener('input', function() {
             clearTimeout(searchTimer);
-            searchTimer = setTimeout(applyFilter, 400);
+
+            if (this.value.trim() !== '') {
+                document.getElementById('filter-kat').value = '';
+                document.getElementById('filter-status').value = 'semua';
+                document.getElementById('filter-stok').value = '';
+                document.getElementById('filter-expired').value = '';
+            }
+
+            searchTimer = setTimeout(function() {
+                applyFilterAjax(1);
+            }, 250);
         });
-        document.getElementById('filter-kat').addEventListener('change', applyFilter);
+
+        document.getElementById('filter-kat').addEventListener('change', function() {
+            applyFilterAjax(1);
+        });
         document.addEventListener('DOMContentLoaded', function() {
             var kategoriSelect = document.getElementById('form-kategori-select');
             if (kategoriSelect) {
@@ -2046,10 +2071,18 @@ $rightActionHtml = '
                 });
             }
         });
-        document.getElementById('filter-status').addEventListener('change', applyFilter);
-        document.getElementById('filter-stok').addEventListener('change', applyFilter);
-        document.getElementById('filter-expired').addEventListener('change', applyFilter);
-        document.getElementById('filter-limit').addEventListener('change', applyFilter);
+        document.getElementById('filter-status').addEventListener('change', function() {
+            applyFilterAjax(1);
+        });
+        document.getElementById('filter-stok').addEventListener('change', function() {
+            applyFilterAjax(1);
+        });
+        document.getElementById('filter-expired').addEventListener('change', function() {
+            applyFilterAjax(1);
+        });
+        document.getElementById('filter-limit').addEventListener('change', function() {
+            applyFilterAjax(1);
+        });
 
         document.addEventListener('DOMContentLoaded', function() {
             var kodeInput = document.getElementById('form-kode');
@@ -2068,24 +2101,122 @@ $rightActionHtml = '
                     if (e.key === 'Enter') {
                         e.preventDefault();
                         this.value = normalizeBarcodeValue(this.value);
-                        applyFilter();
+                        clearTimeout(searchTimer);
+                        applyFilterAjax(1);
                     }
                 });
             }
         });
 
 
-        function applyFilter() {
+        function buildProdukFilterUrl(page) {
             var url = new URL(window.location.href);
+
+            url.searchParams.delete('action');
             url.searchParams.set('q', document.getElementById('search-input').value);
             url.searchParams.set('kat', document.getElementById('filter-kat').value);
             url.searchParams.set('status', document.getElementById('filter-status').value);
             url.searchParams.set('stok', document.getElementById('filter-stok').value);
             url.searchParams.set('expired', document.getElementById('filter-expired').value);
             url.searchParams.set('limit', document.getElementById('filter-limit').value);
-            url.searchParams.set('page', '1');
-            window.location.href = url.toString();
+            url.searchParams.set('page', String(page || 1));
+
+            return url;
         }
+
+        async function applyFilterAjax(page) {
+            var searchInput = document.getElementById('search-input');
+            var currentFocus = document.activeElement === searchInput;
+            var caretPosition = null;
+
+            if (currentFocus && typeof searchInput.selectionStart === 'number') {
+                caretPosition = searchInput.selectionStart;
+            }
+
+            if (produkFilterController) {
+                produkFilterController.abort();
+            }
+
+            produkFilterController = new AbortController();
+
+            var url = buildProdukFilterUrl(page || 1);
+
+            try {
+                var response = await fetch(url.toString(), {
+                    method: 'GET',
+                    cache: 'no-store',
+                    signal: produkFilterController.signal,
+                    headers: {
+                        'X-Requested-With': 'XMLHttpRequest'
+                    }
+                });
+
+                if (!response.ok) {
+                    throw new Error('HTTP ' + response.status);
+                }
+
+                var html = await response.text();
+                var doc = new DOMParser().parseFromString(html, 'text/html');
+
+                var newSummary = doc.getElementById('produkSummary');
+                var newTableCard = doc.getElementById('produkTableCard');
+                var newResultCount = doc.getElementById('produkResultCount');
+
+                var currentSummary = document.getElementById('produkSummary');
+                var currentTableCard = document.getElementById('produkTableCard');
+                var currentResultCount = document.getElementById('produkResultCount');
+
+                if (!newSummary || !newTableCard || !currentSummary || !currentTableCard) {
+                    throw new Error('Bagian hasil produk tidak ditemukan.');
+                }
+
+                currentSummary.innerHTML = newSummary.innerHTML;
+                currentTableCard.innerHTML = newTableCard.innerHTML;
+
+                if (newResultCount && currentResultCount) {
+                    currentResultCount.innerHTML = newResultCount.innerHTML;
+                }
+
+                // URL browser ikut diperbarui tanpa reload agar filter bisa dibookmark/back.
+                window.history.replaceState({}, '', url.toString());
+
+                // Fokus pencarian tidak hilang saat hasil diperbarui.
+                if (currentFocus) {
+                    searchInput.focus();
+                    if (caretPosition !== null && typeof searchInput.setSelectionRange === 'function') {
+                        var safePos = Math.min(caretPosition, searchInput.value.length);
+                        searchInput.setSelectionRange(safePos, safePos);
+                    }
+                }
+
+                if (window.lucide) {
+                    lucide.createIcons();
+                }
+            } catch (error) {
+                if (error && error.name === 'AbortError') {
+                    return;
+                }
+                console.error('Pencarian produk gagal:', error);
+                if (typeof showToast === 'function') {
+                    showToast('Gagal memuat hasil pencarian.', 'error');
+                }
+            }
+        }
+
+        // Pagination ikut AJAX supaya tidak reload halaman.
+        document.addEventListener('click', function(event) {
+            var link = event.target.closest('#produkTableCard a[href]');
+            if (!link) return;
+
+            var href = link.getAttribute('href') || '';
+            if (href === '' || href.indexOf('page=') === -1) return;
+
+            var targetUrl = new URL(link.href, window.location.href);
+            var page = parseInt(targetUrl.searchParams.get('page') || '1', 10);
+
+            event.preventDefault();
+            applyFilterAjax(page);
+        });
 
         // ── Modal Produk ─────────────────────────────────────────────────────────────
         function openModal(mode) {
