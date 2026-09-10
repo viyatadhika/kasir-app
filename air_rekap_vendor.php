@@ -74,6 +74,77 @@ if (!function_exists('arv_column_exists')) {
     }
 }
 
+
+if (!function_exists('arv_save_vendor_delivery_note')) {
+    /**
+     * Simpan surat jalan vendor dari form penerimaan.
+     * Mendukung foto hasil kamera/WhatsApp maupun PDF hasil scan.
+     */
+    function arv_save_vendor_delivery_note(string $field = 'surat_jalan_vendor'): ?string
+    {
+        if (empty($_FILES[$field]) || !is_array($_FILES[$field])) {
+            return null;
+        }
+
+        $file = $_FILES[$field];
+        $error = isset($file['error']) ? (int)$file['error'] : UPLOAD_ERR_NO_FILE;
+        if ($error === UPLOAD_ERR_NO_FILE) {
+            return null;
+        }
+        if ($error !== UPLOAD_ERR_OK) {
+            throw new RuntimeException('Upload surat jalan vendor gagal. Kode upload: ' . $error);
+        }
+
+        $size = isset($file['size']) ? (int)$file['size'] : 0;
+        if ($size <= 0 || $size > 8 * 1024 * 1024) {
+            throw new RuntimeException('Ukuran surat jalan vendor maksimal 8 MB.');
+        }
+
+        $originalName = (string)($file['name'] ?? '');
+        $extension = strtolower(pathinfo($originalName, PATHINFO_EXTENSION));
+        $allowedExtensions = ['jpg', 'jpeg', 'png', 'webp', 'pdf'];
+        if (!in_array($extension, $allowedExtensions, true)) {
+            throw new RuntimeException('Surat jalan vendor harus berformat JPG, JPEG, PNG, WebP, atau PDF.');
+        }
+
+        $tmpName = (string)($file['tmp_name'] ?? '');
+        if ($tmpName === '' || !is_uploaded_file($tmpName)) {
+            throw new RuntimeException('File surat jalan vendor tidak valid.');
+        }
+
+        // Validasi MIME bila Fileinfo tersedia.
+        if (function_exists('finfo_open')) {
+            $finfo = finfo_open(FILEINFO_MIME_TYPE);
+            if ($finfo) {
+                $mime = (string)finfo_file($finfo, $tmpName);
+                finfo_close($finfo);
+                $allowedMime = ['image/jpeg', 'image/png', 'image/webp', 'application/pdf'];
+                if ($mime !== '' && !in_array($mime, $allowedMime, true)) {
+                    throw new RuntimeException('Isi file surat jalan vendor tidak sesuai dengan format yang diizinkan.');
+                }
+            }
+        }
+
+        $directory = __DIR__ . '/uploads/surat_jalan_vendor';
+        if (!is_dir($directory) && !mkdir($directory, 0775, true) && !is_dir($directory)) {
+            throw new RuntimeException('Folder uploads/surat_jalan_vendor tidak dapat dibuat.');
+        }
+        if (!is_writable($directory)) {
+            throw new RuntimeException('Folder uploads/surat_jalan_vendor belum memiliki izin tulis.');
+        }
+
+        $random = function_exists('random_bytes') ? bin2hex(random_bytes(4)) : substr(md5(uniqid('', true)), 0, 8);
+        $filename = 'surat_jalan_' . date('Ymd_His') . '_' . $random . '.' . $extension;
+        $destination = $directory . '/' . $filename;
+
+        if (!move_uploaded_file($tmpName, $destination)) {
+            throw new RuntimeException('Surat jalan vendor gagal disimpan.');
+        }
+
+        return 'uploads/surat_jalan_vendor/' . $filename;
+    }
+}
+
 if (!function_exists('arv_generate_number')) {
     function arv_generate_number(): string
     {
@@ -128,10 +199,47 @@ if (!function_exists('arv_status_class')) {
     }
 }
 
+
+if (!function_exists('arv_customer_status_label')) {
+    function arv_customer_status_label(string $status): string
+    {
+        $map = [
+            'baru'             => 'Baru',
+            'diproses'         => 'Diproses',
+            'siap_dikirim'     => 'Siap Dikirim',
+            'dalam_pengiriman' => 'Dalam Pengiriman',
+            'selesai'          => 'Selesai',
+            'batal'            => 'Batal',
+        ];
+
+        return $map[$status] ?? ucfirst(str_replace('_', ' ', $status));
+    }
+}
+
+if (!function_exists('arv_customer_status_class')) {
+    function arv_customer_status_class(string $status): string
+    {
+        $map = [
+            'baru'             => 'bg-blue-50 text-blue-700 border-blue-200',
+            'diproses'         => 'bg-amber-50 text-amber-700 border-amber-200',
+            'siap_dikirim'     => 'bg-purple-50 text-purple-700 border-purple-200',
+            'dalam_pengiriman' => 'bg-cyan-50 text-cyan-700 border-cyan-200',
+            'selesai'          => 'bg-green-50 text-green-700 border-green-200',
+            'batal'            => 'bg-red-50 text-red-700 border-red-200',
+        ];
+
+        return $map[$status] ?? 'bg-gray-50 text-gray-600 border-gray-200';
+    }
+}
+
 if (!function_exists('arv_ensure_schema')) {
     function arv_ensure_schema(PDO $pdo): void
     {
         $pdo->exec("\n            CREATE TABLE IF NOT EXISTS air_vendor_order (\n                id INT AUTO_INCREMENT PRIMARY KEY,\n                nomor_vendor_order VARCHAR(60) NOT NULL,\n                tanggal_rekap DATE NOT NULL,\n                tanggal_kebutuhan DATE NOT NULL,\n                vendor_nama VARCHAR(150) NOT NULL,\n                vendor_wa VARCHAR(30) NULL,\n                status VARCHAR(30) NOT NULL DEFAULT 'draft',\n                total_unit INT NOT NULL DEFAULT 0,\n                catatan TEXT NULL,\n                created_by INT NULL,\n                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,\n                updated_at DATETIME NULL,\n                UNIQUE KEY uq_air_vendor_nomor (nomor_vendor_order),\n                INDEX idx_air_vendor_tanggal (tanggal_kebutuhan),\n                INDEX idx_air_vendor_status (status)\n            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4\n        ");
+
+        if (!arv_column_exists($pdo, 'air_vendor_order', 'surat_jalan_vendor')) {
+            $pdo->exec("ALTER TABLE air_vendor_order ADD COLUMN surat_jalan_vendor VARCHAR(255) NULL AFTER catatan");
+        }
 
         $pdo->exec("\n            CREATE TABLE IF NOT EXISTS air_vendor_order_detail (\n                id INT AUTO_INCREMENT PRIMARY KEY,\n                vendor_order_id INT NOT NULL,\n                produk_id INT NULL,\n                kode_produk VARCHAR(30) NULL,\n                nama_produk VARCHAR(180) NOT NULL,\n                satuan VARCHAR(30) NOT NULL DEFAULT 'unit',\n                jumlah_diminta INT NOT NULL DEFAULT 0,\n                jumlah_dipesan INT NOT NULL DEFAULT 0,\n                jumlah_dikonfirmasi INT NOT NULL DEFAULT 0,\n                jumlah_diterima INT NOT NULL DEFAULT 0,\n                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,\n                updated_at DATETIME NULL,\n                INDEX idx_air_vendor_detail_order (vendor_order_id),\n                INDEX idx_air_vendor_detail_produk (produk_id)\n            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4\n        ");
 
@@ -159,6 +267,27 @@ try {
 } catch (Throwable $e) {
     $flash = 'Gagal menyiapkan database rekap vendor: ' . $e->getMessage();
     $flashType = 'error';
+}
+
+/*
+ * Sinkronisasi status final.
+ * Rekap vendor berstatus SELESAI hanya terjadi setelah seluruh pesanan sumber
+ * selesai. Untuk data lama yang pernah tidak sinkron, status pelanggan dibuat
+ * konsisten menjadi selesai. Status BATAL tetap dilindungi dan tidak diubah.
+ */
+if ($flashType !== 'error') {
+    try {
+        $pdo->exec("
+            UPDATE air_pesanan p
+            INNER JOIN air_vendor_order_source s ON s.pesanan_id = p.id
+            INNER JOIN air_vendor_order vo ON vo.id = s.vendor_order_id
+            SET p.status = 'selesai', p.updated_at = NOW()
+            WHERE vo.status = 'selesai'
+              AND p.status NOT IN ('selesai', 'batal')
+        ");
+    } catch (Throwable $e) {
+        error_log('AIR VENDOR STATUS SYNC ERROR: ' . $e->getMessage());
+    }
 }
 
 /*
@@ -210,12 +339,33 @@ if ($flashType !== 'error') {
     }
 }
 
+/*
+ * Penanda data historis/migrasi.
+ * Pesanan lama yang SUDAH SELESAI diperlakukan sebagai arsip dan tidak wajib
+ * dibuatkan rekap vendor. Pesanan baru tetap mengikuti alur rekap vendor.
+ * Kode dibuat adaptif agar tetap aman bila salah satu kolom belum tersedia.
+ */
+$hasIsHistorical = arv_column_exists($pdo, 'air_pesanan', 'is_historical');
+$hasSumberData = arv_column_exists($pdo, 'air_pesanan', 'sumber_data');
+
+$historicalParts = [];
+if ($hasIsHistorical) {
+    $historicalParts[] = "COALESCE(p.is_historical, 0) = 1";
+}
+if ($hasSumberData) {
+    $historicalParts[] = "LOWER(COALESCE(p.sumber_data, '')) IN ('migrasi','historis','historical','import_lama')";
+}
+$historicalSql = $historicalParts ? '(' . implode(' OR ', $historicalParts) . ')' : '0=1';
+$historicalSelectSql = $historicalParts
+    ? "CASE WHEN $historicalSql THEN 1 ELSE 0 END AS is_data_historis,"
+    : "0 AS is_data_historis,";
+
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && $flashType !== 'error') {
     try {
         $action = trim((string)($_POST['action'] ?? ''));
 
         if ($action === 'create_vendor_order') {
-            $tanggalKebutuhan = trim((string)($_POST['tanggal_kebutuhan'] ?? ''));
+            $tanggalKebutuhan = '';
             $vendorNama = trim((string)($_POST['vendor_nama'] ?? ''));
             $vendorWa = trim((string)($_POST['vendor_wa'] ?? ''));
             $catatan = trim((string)($_POST['catatan'] ?? ''));
@@ -223,9 +373,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $flashType !== 'error') {
                 ? array_values(array_unique(array_filter(array_map('intval', $_POST['source_ids']))))
                 : [];
 
-            if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $tanggalKebutuhan)) {
-                throw new RuntimeException('Tanggal kebutuhan tidak valid.');
-            }
             if ($vendorNama === '') {
                 throw new RuntimeException('Nama vendor wajib diisi.');
             }
@@ -234,12 +381,46 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $flashType !== 'error') {
             }
 
             $placeholders = implode(',', array_fill(0, count($sourceIds), '?'));
-            $stmtEligible = $pdo->prepare("\n                SELECT p.id\n                FROM air_pesanan p\n                WHERE p.id IN ($placeholders)\n                  AND p.status NOT IN ('batal', 'selesai')\n                  AND COALESCE(p.tanggal_kirim, p.tanggal_pemesanan, DATE(p.created_at)) = ?\n                  AND NOT EXISTS (\n                      SELECT 1\n                      FROM air_vendor_order_source s\n                      JOIN air_vendor_order vo ON vo.id = s.vendor_order_id\n                      WHERE s.pesanan_id = p.id\n                        AND vo.status <> 'batal'\n                  )\n                FOR UPDATE\n            ");
+            $stmtEligible = $pdo->prepare("
+                SELECT
+                    p.id,
+                    COALESCE(p.tanggal_kirim, p.tanggal_pemesanan, DATE(p.created_at)) AS tanggal_kebutuhan
+                FROM air_pesanan p
+                WHERE p.id IN ($placeholders)
+                  AND p.status NOT IN ('batal', 'selesai')
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM air_vendor_order_source s
+                      JOIN air_vendor_order vo ON vo.id = s.vendor_order_id
+                      WHERE s.pesanan_id = p.id
+                        AND vo.status <> 'batal'
+                  )
+                FOR UPDATE
+            ");
 
             $pdo->beginTransaction();
-            $eligibleArgs = array_merge($sourceIds, [$tanggalKebutuhan]);
-            $stmtEligible->execute($eligibleArgs);
-            $eligibleIds = array_map('intval', $stmtEligible->fetchAll(PDO::FETCH_COLUMN));
+            $stmtEligible->execute($sourceIds);
+            $eligibleRows = $stmtEligible->fetchAll(PDO::FETCH_ASSOC);
+            $eligibleIds = array_map(function ($row) {
+                return (int)$row['id'];
+            }, $eligibleRows);
+
+            $selectedDates = [];
+            foreach ($eligibleRows as $eligibleRow) {
+                $dateValue = trim((string)($eligibleRow['tanggal_kebutuhan'] ?? ''));
+                if ($dateValue !== '') {
+                    $selectedDates[$dateValue] = true;
+                }
+            }
+
+            if (count($selectedDates) !== 1) {
+                throw new RuntimeException('Pilih pesanan dengan tanggal kebutuhan yang sama untuk satu rekap vendor.');
+            }
+
+            $tanggalKebutuhan = (string)array_key_first($selectedDates);
+            if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $tanggalKebutuhan)) {
+                throw new RuntimeException('Tanggal kebutuhan pesanan tidak valid.');
+            }
 
             if (!$eligibleIds) {
                 throw new RuntimeException('Pesanan yang dipilih sudah direkap atau tidak lagi tersedia.');
@@ -311,6 +492,106 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $flashType !== 'error') {
             $flash = 'Rekap vendor ' . $nomor . ' berhasil dibuat dari ' . count($eligibleIds) . ' pesanan pelanggan.';
         }
 
+        if ($action === 'complete_customer_order') {
+            $pesananId = (int)($_POST['pesanan_id'] ?? 0);
+
+            if ($pesananId <= 0) {
+                throw new RuntimeException('Pesanan pelanggan tidak valid.');
+            }
+
+            $stmtCheckCustomer = $pdo->prepare("
+                SELECT status
+                FROM air_pesanan
+                WHERE id = :id
+                LIMIT 1
+            ");
+            $stmtCheckCustomer->execute([':id' => $pesananId]);
+            $customerStatus = (string)$stmtCheckCustomer->fetchColumn();
+
+            if ($customerStatus === '') {
+                throw new RuntimeException('Pesanan pelanggan tidak ditemukan.');
+            }
+
+            if ($customerStatus === 'selesai') {
+                $flash = 'Pesanan pelanggan sudah berstatus selesai.';
+            } elseif ($customerStatus === 'batal') {
+                throw new RuntimeException('Pesanan yang dibatalkan tidak dapat diselesaikan.');
+            } elseif ($customerStatus !== 'siap_dikirim' && $customerStatus !== 'dalam_pengiriman') {
+                throw new RuntimeException('Pesanan hanya dapat diselesaikan setelah status Siap Dikirim / Dalam Pengiriman.');
+            } else {
+                $pdo->beginTransaction();
+
+                $stmtCompleteCustomer = $pdo->prepare("
+                    UPDATE air_pesanan
+                    SET status = 'selesai', updated_at = NOW()
+                    WHERE id = :id
+                      AND status IN ('siap_dikirim', 'dalam_pengiriman')
+                ");
+                $stmtCompleteCustomer->execute([':id' => $pesananId]);
+
+                /*
+                 * Jika pesanan ini terhubung ke rekap vendor dan seluruh pesanan
+                 * sumber pada rekap tersebut sudah selesai/batal, tandai rekap
+                 * vendornya sebagai selesai juga.
+                 */
+                $stmtVendorIds = $pdo->prepare("
+                    SELECT DISTINCT s.vendor_order_id
+                    FROM air_vendor_order_source s
+                    WHERE s.pesanan_id = :pesanan_id
+                ");
+                $stmtVendorIds->execute([':pesanan_id' => $pesananId]);
+                $vendorIds = array_map('intval', $stmtVendorIds->fetchAll(PDO::FETCH_COLUMN));
+
+                if ($vendorIds) {
+                    $stmtRemaining = $pdo->prepare("
+                        SELECT COUNT(*)
+                        FROM air_vendor_order_source s
+                        JOIN air_pesanan p ON p.id = s.pesanan_id
+                        WHERE s.vendor_order_id = :vendor_order_id
+                          AND p.status NOT IN ('selesai', 'batal')
+                    ");
+                    $stmtFinishVendor = $pdo->prepare("
+                        UPDATE air_vendor_order
+                        SET status = 'selesai', updated_at = NOW()
+                        WHERE id = :vendor_order_id
+                          AND status <> 'batal'
+                    ");
+
+                    foreach ($vendorIds as $vendorId) {
+                        $stmtRemaining->execute([':vendor_order_id' => $vendorId]);
+                        if ((int)$stmtRemaining->fetchColumn() === 0) {
+                            $stmtFinishVendor->execute([':vendor_order_id' => $vendorId]);
+                        }
+                    }
+                }
+
+                $pdo->commit();
+                $flash = 'Pesanan pelanggan berhasil ditandai selesai.';
+            }
+        }
+
+        // Legacy compatibility only. UI baru menyimpan catatan lewat form Penerimaan.
+        if ($action === 'save_vendor_note') {
+            $vendorOrderId = (int)($_POST['vendor_order_id'] ?? 0);
+            $catatanVendor = trim((string)($_POST['catatan'] ?? ''));
+
+            if ($vendorOrderId <= 0) {
+                throw new RuntimeException('Rekap vendor tidak valid.');
+            }
+
+            $stmtNote = $pdo->prepare("
+                UPDATE air_vendor_order
+                SET catatan = :catatan, updated_at = NOW()
+                WHERE id = :id
+            ");
+            $stmtNote->execute([
+                ':catatan' => $catatanVendor,
+                ':id'      => $vendorOrderId,
+            ]);
+
+            $flash = 'Catatan pengiriman vendor berhasil disimpan.';
+        }
+
         if ($action === 'update_vendor_status') {
             $vendorOrderId = (int)($_POST['vendor_order_id'] ?? 0);
             $status = trim((string)($_POST['status'] ?? ''));
@@ -330,6 +611,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $flashType !== 'error') {
             if ($status === 'diterima') {
                 $stmtCustomer = $pdo->prepare("\n                    UPDATE air_pesanan p\n                    JOIN air_vendor_order_source s ON s.pesanan_id = p.id\n                    SET p.status = 'siap_dikirim', p.updated_at = NOW()\n                    WHERE s.vendor_order_id = :vendor_order_id\n                      AND p.status NOT IN ('batal', 'selesai')\n                ");
                 $stmtCustomer->execute([':vendor_order_id' => $vendorOrderId]);
+            } elseif ($status === 'selesai') {
+                $stmtCustomer = $pdo->prepare("\n                    UPDATE air_pesanan p\n                    JOIN air_vendor_order_source s ON s.pesanan_id = p.id\n                    SET p.status = 'selesai', p.updated_at = NOW()\n                    WHERE s.vendor_order_id = :vendor_order_id\n                      AND p.status <> 'batal'\n                ");
+                $stmtCustomer->execute([':vendor_order_id' => $vendorOrderId]);
             } elseif ($status === 'batal') {
                 $stmtCustomer = $pdo->prepare("\n                    UPDATE air_pesanan p\n                    JOIN air_vendor_order_source s ON s.pesanan_id = p.id\n                    SET p.status = 'baru', p.updated_at = NOW()\n                    WHERE s.vendor_order_id = :vendor_order_id\n                      AND p.status = 'diproses'\n                ");
                 $stmtCustomer->execute([':vendor_order_id' => $vendorOrderId]);
@@ -341,6 +625,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $flashType !== 'error') {
 
         if ($action === 'save_quantities') {
             $vendorOrderId = (int)($_POST['vendor_order_id'] ?? 0);
+            $catatanVendor = trim((string)($_POST['catatan'] ?? ''));
             $detailIds = isset($_POST['detail_id']) && is_array($_POST['detail_id'])
                 ? $_POST['detail_id']
                 : [];
@@ -354,6 +639,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $flashType !== 'error') {
             if ($vendorOrderId <= 0 || !$detailIds) {
                 throw new RuntimeException('Rincian penerimaan tidak valid.');
             }
+
+            // Ambil surat jalan lama agar tetap dipertahankan jika pengguna tidak mengunggah file baru.
+            $stmtOldSuratJalan = $pdo->prepare("SELECT surat_jalan_vendor FROM air_vendor_order WHERE id = :id LIMIT 1");
+            $stmtOldSuratJalan->execute([':id' => $vendorOrderId]);
+            $oldSuratJalan = trim((string)$stmtOldSuratJalan->fetchColumn());
+            $newSuratJalan = arv_save_vendor_delivery_note('surat_jalan_vendor');
 
             $pdo->beginTransaction();
             $stmt = $pdo->prepare("\n                UPDATE air_vendor_order_detail\n                SET jumlah_dikonfirmasi = :confirmed,\n                    jumlah_diterima = :received,\n                    updated_at = NOW()\n                WHERE id = :id\n                  AND vendor_order_id = :vendor_order_id\n            ");
@@ -374,16 +665,40 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $flashType !== 'error') {
                 ]);
             }
 
+            // Catatan pengiriman/vendor disimpan bersamaan dengan jumlah penerimaan.
+            $stmtCatatan = $pdo->prepare("\n                UPDATE air_vendor_order\n                SET catatan = :catatan,\n                    surat_jalan_vendor = COALESCE(:surat_jalan_vendor, surat_jalan_vendor),\n                    updated_at = NOW()\n                WHERE id = :id\n            ");
+            $stmtCatatan->execute([
+                ':catatan'            => $catatanVendor,
+                ':surat_jalan_vendor' => $newSuratJalan,
+                ':id'                 => $vendorOrderId,
+            ]);
+
             if ($hasReceived) {
-                $stmtOrder = $pdo->prepare("\n                    UPDATE air_vendor_order\n                    SET status = 'diterima', updated_at = NOW()\n                    WHERE id = :id\n                      AND status <> 'batal'\n                ");
+                /*
+                 * Alur operasional Air Mineral:
+                 * vendor mengirim langsung ke lokasi tujuan. Karena itu saat
+                 * penerimaan dicatat, distribusi dianggap sudah terlaksana.
+                 */
+                $stmtOrder = $pdo->prepare("\n                    UPDATE air_vendor_order\n                    SET status = 'selesai', updated_at = NOW()\n                    WHERE id = :id\n                      AND status <> 'batal'\n                ");
                 $stmtOrder->execute([':id' => $vendorOrderId]);
 
-                $stmtCustomer = $pdo->prepare("\n                    UPDATE air_pesanan p\n                    JOIN air_vendor_order_source s ON s.pesanan_id = p.id\n                    SET p.status = 'siap_dikirim', p.updated_at = NOW()\n                    WHERE s.vendor_order_id = :vendor_order_id\n                      AND p.status NOT IN ('batal', 'selesai')\n                ");
+                $stmtCustomer = $pdo->prepare("\n                    UPDATE air_pesanan p\n                    JOIN air_vendor_order_source s ON s.pesanan_id = p.id\n                    SET p.status = 'selesai', p.updated_at = NOW()\n                    WHERE s.vendor_order_id = :vendor_order_id\n                      AND p.status <> 'batal'\n                ");
                 $stmtCustomer->execute([':vendor_order_id' => $vendorOrderId]);
             }
 
             $pdo->commit();
-            $flash = 'Jumlah konfirmasi dan penerimaan berhasil disimpan.';
+
+            // Bila ada upload baru, hapus file lama setelah transaksi database berhasil.
+            if ($newSuratJalan && $oldSuratJalan && $oldSuratJalan !== $newSuratJalan) {
+                $oldAbsolute = __DIR__ . '/' . ltrim($oldSuratJalan, '/');
+                if (is_file($oldAbsolute)) {
+                    @unlink($oldAbsolute);
+                }
+            }
+
+            $flash = $hasReceived
+                ? 'Penerimaan berhasil disimpan. Pesanan otomatis selesai karena vendor mengirim langsung ke lokasi.'
+                : 'Data konfirmasi dan catatan vendor berhasil disimpan. Status belum diselesaikan karena jumlah diterima masih 0.';
         }
     } catch (Throwable $e) {
         if ($pdo->inTransaction()) {
@@ -395,41 +710,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $flashType !== 'error') {
 }
 
 $today = date('Y-m-d');
-$needDate = trim((string)($_GET['need_date'] ?? ''));
-
-if ($needDate === '') {
-    try {
-        $stmtNextNeedDate = $pdo->query("
-            SELECT COALESCE(p.tanggal_kirim, p.tanggal_pemesanan, DATE(p.created_at)) AS need_date
-            FROM air_pesanan p
-            WHERE p.status NOT IN ('batal', 'selesai')
-              AND NOT EXISTS (
-                  SELECT 1
-                  FROM air_vendor_order_source s
-                  JOIN air_vendor_order vo ON vo.id = s.vendor_order_id
-                    AND vo.status <> 'batal'
-                  WHERE s.pesanan_id = p.id
-              )
-            ORDER BY
-                CASE
-                    WHEN COALESCE(p.tanggal_kirim, p.tanggal_pemesanan, DATE(p.created_at)) >= CURDATE() THEN 0
-                    ELSE 1
-                END,
-                COALESCE(p.tanggal_kirim, p.tanggal_pemesanan, DATE(p.created_at)) ASC,
-                p.id ASC
-            LIMIT 1
-        ");
-
-        $detectedNeedDate = $stmtNextNeedDate ? (string)$stmtNextNeedDate->fetchColumn() : '';
-        $needDate = $detectedNeedDate !== '' ? $detectedNeedDate : $today;
-    } catch (Throwable $e) {
-        $needDate = $today;
-    }
-}
-
-if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $needDate)) {
-    $needDate = $today;
-}
 
 $q = trim((string)($_GET['q'] ?? ''));
 $statusFilter = trim((string)($_GET['status'] ?? ''));
@@ -444,14 +724,187 @@ if (!in_array($perPage, $allowedLimits, true)) {
     $perPage = 15;
 }
 
+// Seluruh pesanan pelanggan yang belum selesai.
+// Bagian ini sengaja TIDAK hanya membaca pesanan yang belum direkap,
+// supaya petugas bisa melihat posisi seluruh pesanan aktif dalam satu halaman.
+$unfinishedOrders = [];
+$unfinishedSummary = [
+    'total' => 0,
+    'baru' => 0,
+    'diproses' => 0,
+    'siap_dikirim' => 0,
+    'dalam_pengiriman' => 0,
+    'selesai' => 0,
+    'batal' => 0,
+    'belum_rekap' => 0,
+];
+
+try {
+    $stmtUnfinished = $pdo->query("
+        SELECT
+            $historicalSelectSql
+            p.id,
+            p.nomor_pesanan,
+            p.status,
+            p.tanggal_pemesanan,
+            p.tanggal_kirim,
+            p.jam_kirim,
+            p.catatan,
+            p.created_at,
+            COALESCE(p.tanggal_kirim, p.tanggal_pemesanan, DATE(p.created_at)) AS tanggal_operasional,
+            c.nama AS nama_pemesan,
+            c.no_hp,
+            COALESCE((SELECT COUNT(*) FROM air_pesanan_lokasi lx WHERE lx.pesanan_id = p.id), 0) AS total_lokasi,
+            COALESCE((
+                SELECT SUM(d.qty)
+                FROM air_pesanan_detail d
+                WHERE d.pesanan_id = p.id
+            ), 0) AS total_unit,
+            COALESCE((
+                SELECT GROUP_CONCAT(
+                    DISTINCT NULLIF(TRIM(l.lokasi), '')
+                    ORDER BY l.urutan ASC, l.id ASC
+                    SEPARATOR '||'
+                )
+                FROM air_pesanan_lokasi l
+                WHERE l.pesanan_id = p.id
+            ), '') AS daftar_lokasi,
+            COALESCE((
+                SELECT GROUP_CONCAT(
+                    DISTINCT vo.nomor_vendor_order
+                    ORDER BY vo.created_at DESC
+                    SEPARATOR '||'
+                )
+                FROM air_vendor_order_source s
+                JOIN air_vendor_order vo ON vo.id = s.vendor_order_id
+                WHERE s.pesanan_id = p.id
+                  AND vo.status <> 'batal'
+            ), '') AS nomor_rekap_vendor,
+            COALESCE((
+                SELECT GROUP_CONCAT(
+                    DISTINCT vo.status
+                    ORDER BY vo.created_at DESC
+                    SEPARATOR '||'
+                )
+                FROM air_vendor_order_source s
+                JOIN air_vendor_order vo ON vo.id = s.vendor_order_id
+                WHERE s.pesanan_id = p.id
+                  AND vo.status <> 'batal'
+            ), '') AS status_rekap_vendor,
+            COALESCE((
+                SELECT vo.id
+                FROM air_vendor_order_source s
+                JOIN air_vendor_order vo ON vo.id = s.vendor_order_id
+                WHERE s.pesanan_id = p.id
+                  AND vo.status <> 'batal'
+                ORDER BY vo.created_at DESC, vo.id DESC
+                LIMIT 1
+            ), 0) AS latest_vendor_order_id
+        FROM air_pesanan p
+        JOIN air_pelanggan c ON c.id = p.pelanggan_id
+        ORDER BY
+            COALESCE(p.tanggal_kirim, p.tanggal_pemesanan, DATE(p.created_at)) DESC,
+            p.created_at DESC,
+            p.id DESC
+    ");
+
+    $unfinishedOrders = $stmtUnfinished
+        ? $stmtUnfinished->fetchAll(PDO::FETCH_ASSOC)
+        : [];
+
+    // Siapkan rincian lengkap setiap pesanan agar tombol Lihat membuka modal langsung
+    // tanpa berpindah ke halaman air_pesanan.php.
+    $stmtMonitorLocations = $pdo->prepare("
+        SELECT id, pesanan_id, lokasi, urutan, catatan
+        FROM air_pesanan_lokasi
+        WHERE pesanan_id = :pesanan_id
+        ORDER BY urutan ASC, id ASC
+    ");
+    $stmtMonitorItems = $pdo->prepare("
+        SELECT d.lokasi_id, d.nama_produk, d.qty, d.catatan_item, COALESCE(pr.satuan, 'unit') AS satuan
+        FROM air_pesanan_detail d
+        LEFT JOIN air_produk pr ON pr.id = d.produk_id
+        WHERE d.pesanan_id = :pesanan_id
+        ORDER BY d.lokasi_id ASC, d.id ASC
+    ");
+    foreach ($unfinishedOrders as &$monitorOrder) {
+        $pesananId = (int)$monitorOrder['id'];
+        $stmtMonitorLocations->execute([':pesanan_id' => $pesananId]);
+        $monitorLocations = $stmtMonitorLocations->fetchAll(PDO::FETCH_ASSOC);
+        $stmtMonitorItems->execute([':pesanan_id' => $pesananId]);
+        $monitorItems = $stmtMonitorItems->fetchAll(PDO::FETCH_ASSOC);
+        $itemsByLocation = [];
+        foreach ($monitorItems as $item) {
+            $lokasiId = (int)($item['lokasi_id'] ?? 0);
+            $itemsByLocation[$lokasiId][] = $item;
+        }
+        foreach ($monitorLocations as &$location) {
+            $location['items'] = $itemsByLocation[(int)$location['id']] ?? [];
+        }
+        unset($location);
+        if (!$monitorLocations && !empty($itemsByLocation[0])) {
+            $monitorLocations[] = [
+                'id' => 0,
+                'pesanan_id' => $pesananId,
+                'lokasi' => 'Lokasi belum ditentukan',
+                'urutan' => 1,
+                'catatan' => '',
+                'items' => $itemsByLocation[0],
+            ];
+        }
+        $monitorOrder['locations'] = $monitorLocations;
+    }
+    unset($monitorOrder);
+
+    foreach ($unfinishedOrders as $unfinishedOrder) {
+        $status = (string)($unfinishedOrder['status'] ?? '');
+
+        $unfinishedSummary['total']++;
+        if (isset($unfinishedSummary[$status])) {
+            $unfinishedSummary[$status]++;
+        }
+
+        if (trim((string)($unfinishedOrder['nomor_rekap_vendor'] ?? '')) === '') {
+            $unfinishedSummary['belum_rekap']++;
+        }
+    }
+} catch (Throwable $e) {
+    if ($flash === '') {
+        $flash = 'Gagal memuat monitoring pesanan belum selesai: ' . $e->getMessage();
+        $flashType = 'error';
+    }
+}
+
+
 // Pesanan pelanggan yang belum masuk rekap vendor aktif.
 $availableOrders = [];
 $availableRecap = [];
 $availableOrderProducts = [];
 $availableTotalUnit = 0;
 try {
-    $stmtAvailableOrders = $pdo->prepare("\n        SELECT\n            p.id, p.nomor_pesanan, p.tanggal_kirim, p.tanggal_pemesanan, p.created_at,\n            c.nama AS nama_pemesan, c.no_hp,\n            COALESCE((SELECT SUM(d.qty) FROM air_pesanan_detail d WHERE d.pesanan_id = p.id), 0) AS total_unit,\n            COALESCE((SELECT COUNT(*) FROM air_pesanan_lokasi l WHERE l.pesanan_id = p.id), 0) AS total_lokasi\n        FROM air_pesanan p\n        JOIN air_pelanggan c ON c.id = p.pelanggan_id\n        WHERE COALESCE(p.tanggal_kirim, p.tanggal_pemesanan, DATE(p.created_at)) = :need_date\n          AND p.status NOT IN ('batal', 'selesai')\n          AND NOT EXISTS (\n              SELECT 1\n              FROM air_vendor_order_source s\n              JOIN air_vendor_order vo ON vo.id = s.vendor_order_id\n              WHERE s.pesanan_id = p.id\n                AND vo.status <> 'batal'\n          )\n        ORDER BY p.created_at ASC, p.id ASC\n    ");
-    $stmtAvailableOrders->execute([':need_date' => $needDate]);
+    $stmtAvailableOrders = $pdo->prepare("
+        SELECT
+            p.id, p.nomor_pesanan, p.tanggal_kirim, p.tanggal_pemesanan, p.created_at,
+            COALESCE(p.tanggal_kirim, p.tanggal_pemesanan, DATE(p.created_at)) AS tanggal_operasional,
+            c.nama AS nama_pemesan, c.no_hp,
+            COALESCE((SELECT SUM(d.qty) FROM air_pesanan_detail d WHERE d.pesanan_id = p.id), 0) AS total_unit,
+            COALESCE((SELECT COUNT(*) FROM air_pesanan_lokasi l WHERE l.pesanan_id = p.id), 0) AS total_lokasi
+        FROM air_pesanan p
+        JOIN air_pelanggan c ON c.id = p.pelanggan_id
+        WHERE p.status NOT IN ('batal', 'selesai')
+          AND NOT EXISTS (
+              SELECT 1
+              FROM air_vendor_order_source s
+              JOIN air_vendor_order vo ON vo.id = s.vendor_order_id
+              WHERE s.pesanan_id = p.id
+                AND vo.status <> 'batal'
+          )
+        ORDER BY
+            COALESCE(p.tanggal_kirim, p.tanggal_pemesanan, DATE(p.created_at)) DESC,
+            p.created_at DESC,
+            p.id DESC
+    ");
+    $stmtAvailableOrders->execute();
     $availableOrders = $stmtAvailableOrders->fetchAll(PDO::FETCH_ASSOC);
 
     // Tambahkan rincian lokasi + produk per pesanan untuk ditampilkan di modal rekap.
@@ -597,7 +1050,7 @@ try {
     }
     $offset = ($page - 1) * $perPage;
 
-    $stmtOrders = $pdo->prepare("\n        SELECT\n            vo.*,\n            COALESCE((SELECT COUNT(*) FROM air_vendor_order_source s WHERE s.vendor_order_id = vo.id), 0) AS source_count,\n            COALESCE((SELECT SUM(d.jumlah_diminta) FROM air_vendor_order_detail d WHERE d.vendor_order_id = vo.id), 0) AS total_diminta,\n            COALESCE((SELECT SUM(d.jumlah_dipesan) FROM air_vendor_order_detail d WHERE d.vendor_order_id = vo.id), 0) AS total_dipesan,\n            COALESCE((SELECT SUM(d.jumlah_dikonfirmasi) FROM air_vendor_order_detail d WHERE d.vendor_order_id = vo.id), 0) AS total_dikonfirmasi,\n            COALESCE((SELECT SUM(d.jumlah_diterima) FROM air_vendor_order_detail d WHERE d.vendor_order_id = vo.id), 0) AS total_diterima\n        FROM air_vendor_order vo\n        WHERE $whereVendorSql\n        ORDER BY vo.created_at DESC, vo.id DESC\n        LIMIT :limit OFFSET :offset\n    ");
+    $stmtOrders = $pdo->prepare("\n        SELECT\n            vo.*,\n            COALESCE((SELECT COUNT(*) FROM air_vendor_order_source s WHERE s.vendor_order_id = vo.id), 0) AS source_count,\n            COALESCE((SELECT SUM(d.jumlah_diminta) FROM air_vendor_order_detail d WHERE d.vendor_order_id = vo.id), 0) AS total_diminta,\n            COALESCE((SELECT SUM(d.jumlah_dipesan) FROM air_vendor_order_detail d WHERE d.vendor_order_id = vo.id), 0) AS total_dipesan,\n            COALESCE((SELECT SUM(d.jumlah_dikonfirmasi) FROM air_vendor_order_detail d WHERE d.vendor_order_id = vo.id), 0) AS total_dikonfirmasi,\n            COALESCE((SELECT SUM(d.jumlah_diterima) FROM air_vendor_order_detail d WHERE d.vendor_order_id = vo.id), 0) AS total_diterima\n        FROM air_vendor_order vo\n        WHERE $whereVendorSql\n        ORDER BY vo.tanggal_kebutuhan DESC, vo.created_at DESC, vo.id DESC\n        LIMIT :limit OFFSET :offset\n    ");
     foreach ($paramsVendor as $key => $value) {
         $stmtOrders->bindValue($key, $value, PDO::PARAM_STR);
     }
@@ -640,7 +1093,7 @@ try {
         JOIN air_pesanan p ON p.id = s.pesanan_id
         JOIN air_pelanggan c ON c.id = p.pelanggan_id
         WHERE s.vendor_order_id = :id
-        ORDER BY p.created_at ASC, p.id ASC
+        ORDER BY COALESCE(p.tanggal_kirim, p.tanggal_pemesanan, DATE(p.created_at)) DESC, p.created_at DESC, p.id DESC
     ");
 
     foreach ($vendorOrders as &$vendorOrder) {
@@ -673,18 +1126,178 @@ try {
     }
 }
 
+
+/*
+ * Data rekap vendor yang terhubung ke pesanan belum selesai.
+ * Dipakai oleh satu tabel monitoring utama agar admin tidak perlu membuka
+ * tabel rekap vendor terpisah.
+ */
+$monitorVendorById = [];
+
+try {
+    $monitorVendorIds = [];
+
+    foreach ($unfinishedOrders as $unfinishedOrder) {
+        $monitorVendorId = (int)($unfinishedOrder['latest_vendor_order_id'] ?? 0);
+        if ($monitorVendorId > 0) {
+            $monitorVendorIds[$monitorVendorId] = $monitorVendorId;
+        }
+    }
+
+    $monitorVendorIds = array_values($monitorVendorIds);
+
+    if ($monitorVendorIds) {
+        $monitorPlaceholders = implode(',', array_fill(0, count($monitorVendorIds), '?'));
+
+        $stmtMonitorVendors = $pdo->prepare("
+            SELECT
+                vo.*,
+                COALESCE((SELECT COUNT(*) FROM air_vendor_order_source s WHERE s.vendor_order_id = vo.id), 0) AS source_count,
+                COALESCE((SELECT SUM(d.jumlah_diminta) FROM air_vendor_order_detail d WHERE d.vendor_order_id = vo.id), 0) AS total_diminta,
+                COALESCE((SELECT SUM(d.jumlah_dipesan) FROM air_vendor_order_detail d WHERE d.vendor_order_id = vo.id), 0) AS total_dipesan,
+                COALESCE((SELECT SUM(d.jumlah_dikonfirmasi) FROM air_vendor_order_detail d WHERE d.vendor_order_id = vo.id), 0) AS total_dikonfirmasi,
+                COALESCE((SELECT SUM(d.jumlah_diterima) FROM air_vendor_order_detail d WHERE d.vendor_order_id = vo.id), 0) AS total_diterima
+            FROM air_vendor_order vo
+            WHERE vo.id IN ($monitorPlaceholders)
+        ");
+        $stmtMonitorVendors->execute($monitorVendorIds);
+
+        $monitorVendorRows = $stmtMonitorVendors->fetchAll(PDO::FETCH_ASSOC);
+
+        $stmtMonitorDetails = $pdo->prepare("
+            SELECT *
+            FROM air_vendor_order_detail
+            WHERE vendor_order_id = :id
+            ORDER BY nama_produk ASC, id ASC
+        ");
+
+        $stmtMonitorSources = $pdo->prepare("
+            SELECT
+                p.id AS pesanan_id,
+                p.nomor_pesanan,
+                c.nama AS nama_pemesan,
+                COALESCE((
+                    SELECT GROUP_CONCAT(
+                        DISTINCT NULLIF(TRIM(l.lokasi), '')
+                        ORDER BY l.urutan ASC, l.id ASC
+                        SEPARATOR '||'
+                    )
+                    FROM air_pesanan_lokasi l
+                    WHERE l.pesanan_id = p.id
+                ), '') AS daftar_lokasi
+            FROM air_vendor_order_source s
+            JOIN air_pesanan p ON p.id = s.pesanan_id
+            JOIN air_pelanggan c ON c.id = p.pelanggan_id
+            WHERE s.vendor_order_id = :id
+            ORDER BY COALESCE(p.tanggal_kirim, p.tanggal_pemesanan, DATE(p.created_at)) DESC,
+                     p.created_at DESC,
+                     p.id DESC
+        ");
+
+        $stmtMonitorLocations = $pdo->prepare("
+            SELECT
+                COALESCE(NULLIF(TRIM(l.lokasi), ''), 'Lokasi belum ditentukan') AS lokasi,
+                d.nama_produk,
+                COALESCE(pr.satuan, 'unit') AS satuan,
+                SUM(d.qty) AS qty
+            FROM air_vendor_order_source s
+            JOIN air_pesanan_detail d ON d.pesanan_id = s.pesanan_id
+            LEFT JOIN air_pesanan_lokasi l
+                   ON l.id = d.lokasi_id
+                  AND l.pesanan_id = d.pesanan_id
+            LEFT JOIN air_produk pr ON pr.id = d.produk_id
+            WHERE s.vendor_order_id = :id
+            GROUP BY
+                COALESCE(NULLIF(TRIM(l.lokasi), ''), 'Lokasi belum ditentukan'),
+                d.nama_produk,
+                pr.satuan
+            HAVING SUM(d.qty) > 0
+            ORDER BY
+                COALESCE(NULLIF(TRIM(l.lokasi), ''), 'Lokasi belum ditentukan') ASC,
+                d.nama_produk ASC
+        ");
+
+        foreach ($monitorVendorRows as $monitorVendorRow) {
+            $monitorVendorId = (int)$monitorVendorRow['id'];
+
+            $stmtMonitorDetails->execute([':id' => $monitorVendorId]);
+            $monitorVendorRow['details'] = $stmtMonitorDetails->fetchAll(PDO::FETCH_ASSOC);
+
+            $stmtMonitorSources->execute([':id' => $monitorVendorId]);
+            $monitorVendorRow['sources'] = $stmtMonitorSources->fetchAll(PDO::FETCH_ASSOC);
+
+            $stmtMonitorLocations->execute([':id' => $monitorVendorId]);
+            $monitorLocationRows = $stmtMonitorLocations->fetchAll(PDO::FETCH_ASSOC);
+
+            $monitorDeliveryGroups = [];
+            foreach ($monitorLocationRows as $monitorLocationRow) {
+                $monitorLocationName = trim((string)($monitorLocationRow['lokasi'] ?? ''));
+                if ($monitorLocationName === '') {
+                    $monitorLocationName = 'Lokasi belum ditentukan';
+                }
+
+                if (!isset($monitorDeliveryGroups[$monitorLocationName])) {
+                    $monitorDeliveryGroups[$monitorLocationName] = [];
+                }
+
+                $monitorDeliveryGroups[$monitorLocationName][] = [
+                    'nama_produk' => (string)($monitorLocationRow['nama_produk'] ?? '-'),
+                    'satuan'      => (string)($monitorLocationRow['satuan'] ?? 'unit'),
+                    'qty'         => (int)($monitorLocationRow['qty'] ?? 0),
+                ];
+            }
+
+            $monitorVendorRow['delivery_locations'] = $monitorDeliveryGroups;
+            $monitorVendorById[$monitorVendorId] = $monitorVendorRow;
+        }
+    }
+} catch (Throwable $e) {
+    if ($flash === '') {
+        $flash = 'Gagal memuat data proses vendor untuk monitoring: ' . $e->getMessage();
+        $flashType = 'error';
+    }
+}
+
+/*
+ * Ringkasan utama mengikuti STATUS PESANAN PELANGGAN (air_pesanan),
+ * bukan status internal rekap vendor. Dengan begitu angka pada card sama
+ * dengan data yang admin lihat pada alur Pemesanan Air.
+ */
 $summary = [
-    'total_rekap'   => 0,
-    'draft'         => 0,
-    'dikirim'       => 0,
-    'dikonfirmasi'  => 0,
-    'diterima'      => 0,
-    'total_diminta' => 0,
-    'total_diterima' => 0,
+    'total'             => 0,
+    'baru'              => 0,
+    'diproses'          => 0,
+    'siap_dikirim'      => 0,
+    'dalam_pengiriman'  => 0,
+    'selesai'           => 0,
+    'batal'             => 0,
+    'belum_rekap'       => 0,
 ];
 
 try {
-    $summaryRow = $pdo->query("\n        SELECT\n            COUNT(*) AS total_rekap,\n            SUM(CASE WHEN status = 'draft' THEN 1 ELSE 0 END) AS draft,\n            SUM(CASE WHEN status = 'dikirim' THEN 1 ELSE 0 END) AS dikirim,\n            SUM(CASE WHEN status = 'dikonfirmasi' THEN 1 ELSE 0 END) AS dikonfirmasi,\n            SUM(CASE WHEN status = 'diterima' THEN 1 ELSE 0 END) AS diterima,\n            COALESCE(SUM((SELECT SUM(d.jumlah_diminta) FROM air_vendor_order_detail d WHERE d.vendor_order_id = air_vendor_order.id)), 0) AS total_diminta,\n            COALESCE(SUM((SELECT SUM(d.jumlah_diterima) FROM air_vendor_order_detail d WHERE d.vendor_order_id = air_vendor_order.id)), 0) AS total_diterima\n        FROM air_vendor_order\n        WHERE DATE(created_at) = CURDATE()\n          AND status <> 'batal'\n    ")->fetch(PDO::FETCH_ASSOC) ?: [];
+    $summaryRow = $pdo->query("
+        SELECT
+            COUNT(*) AS total,
+            SUM(CASE WHEN p.status = 'baru' THEN 1 ELSE 0 END) AS baru,
+            SUM(CASE WHEN p.status = 'diproses' THEN 1 ELSE 0 END) AS diproses,
+            SUM(CASE WHEN p.status = 'siap_dikirim' THEN 1 ELSE 0 END) AS siap_dikirim,
+            SUM(CASE WHEN p.status = 'dalam_pengiriman' THEN 1 ELSE 0 END) AS dalam_pengiriman,
+            SUM(CASE WHEN p.status = 'selesai' THEN 1 ELSE 0 END) AS selesai,
+            SUM(CASE WHEN p.status = 'batal' THEN 1 ELSE 0 END) AS batal,
+            SUM(CASE
+                WHEN p.status <> 'batal'
+                 AND NOT (p.status = 'selesai' AND $historicalSql)
+                 AND NOT EXISTS (
+                    SELECT 1
+                    FROM air_vendor_order_source s
+                    JOIN air_vendor_order vo ON vo.id = s.vendor_order_id
+                    WHERE s.pesanan_id = p.id
+                      AND vo.status <> 'batal'
+                 )
+                THEN 1 ELSE 0 END
+            ) AS belum_rekap
+        FROM air_pesanan p
+    ")->fetch(PDO::FETCH_ASSOC) ?: [];
 
     foreach ($summary as $key => $value) {
         if (array_key_exists($key, $summaryRow)) {
@@ -692,7 +1305,10 @@ try {
         }
     }
 } catch (Throwable $e) {
-    // Ringkasan tetap nol.
+    if ($flash === '') {
+        $flash = 'Gagal memuat ringkasan status pesanan: ' . $e->getMessage();
+        $flashType = 'error';
+    }
 }
 
 if (!function_exists('arv_page_url')) {
@@ -793,6 +1409,85 @@ require_once 'navbar.php';
             height: 7px;
             border-radius: 999px;
             background: currentColor
+        }
+
+
+        .unfinished-table td {
+            vertical-align: middle;
+        }
+
+        .unfinished-location {
+            max-width: 240px;
+        }
+
+        @media(max-width:1023px) {
+            .unfinished-location {
+                max-width: none;
+            }
+        }
+
+
+        /* Action buttons monitoring: compact, sejajar, dan konsisten */
+        .monitor-actions {
+            display: flex;
+            justify-content: flex-end;
+            align-items: center;
+            gap: 7px;
+            flex-wrap: nowrap;
+        }
+
+        .monitor-action-btn {
+            height: 34px;
+            min-height: 34px !important;
+            padding: 0 12px !important;
+            border-radius: 7px;
+            font-size: 9px !important;
+            font-weight: 800 !important;
+            letter-spacing: .05em;
+            white-space: nowrap;
+            gap: 6px !important;
+            box-shadow: none;
+        }
+
+        .monitor-action-view {
+            border: 1px solid #e5e7eb;
+            background: #fff;
+            color: #374151;
+        }
+
+        .monitor-action-view:hover {
+            background: #f8fafc;
+            border-color: #cbd5e1;
+        }
+
+        .monitor-action-done {
+            border: 1px solid #16a34a;
+            background: #16a34a;
+            color: #fff;
+        }
+
+        .monitor-action-done:hover {
+            background: #15803d;
+            border-color: #15803d;
+        }
+
+        .monitor-actions form {
+            margin: 0;
+        }
+
+        @media(max-width:1023px) {
+            .monitor-actions {
+                display: grid;
+                grid-template-columns: 1fr 1fr;
+                width: 100%;
+                gap: 8px;
+            }
+
+            .monitor-action-btn {
+                width: 100%;
+                justify-content: center;
+                height: 40px;
+            }
         }
 
         .field {
@@ -912,6 +1607,267 @@ require_once 'navbar.php';
                 max-height: calc(100vh - 132px) !important
             }
         }
+
+        /* ==========================================================
+           SATU TABEL MONITORING UTAMA
+           ========================================================== */
+        .workflow-filter {
+            display: grid;
+            grid-template-columns: minmax(220px, 1fr) 190px;
+            gap: 10px;
+        }
+
+        /* Search monitoring: icon dan teks dibuat benar-benar sejajar.
+           Padding memakai !important karena .field mendefinisikan padding sendiri. */
+        .workflow-search-wrap {
+            position: relative;
+            min-width: 0;
+        }
+
+        .workflow-search-icon {
+            position: absolute;
+            left: 0;
+            top: 0;
+            bottom: 0;
+            width: 44px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: #9ca3af;
+            border-right: 1px solid #eef0f3;
+            pointer-events: none;
+            z-index: 2;
+        }
+
+        .workflow-search-icon svg {
+            width: 15px !important;
+            height: 15px !important;
+            stroke-width: 2;
+        }
+
+        .workflow-search-input {
+            height: 44px;
+            padding-left: 56px !important;
+            padding-right: 34px !important;
+            background: #fff !important;
+            line-height: 44px;
+        }
+
+        .workflow-search-input::placeholder {
+            color: #9ca3af;
+            font-weight: 600;
+            opacity: 1;
+        }
+
+        .workflow-search-input::-webkit-search-cancel-button {
+            cursor: pointer;
+        }
+
+        .workflow-actions {
+            display: flex;
+            justify-content: flex-end;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 6px;
+            max-width: 430px;
+            margin-left: auto;
+        }
+
+        .workflow-btn {
+            min-height: 34px !important;
+            height: 34px !important;
+            padding: 0 11px !important;
+            border-radius: 0 !important;
+            font-size: 8.5px !important;
+            font-weight: 800 !important;
+            letter-spacing: .055em !important;
+            gap: 6px !important;
+            white-space: nowrap;
+            box-shadow: none !important;
+            transition: background .15s ease, color .15s ease, border-color .15s ease;
+        }
+
+        /* Tema aksi tabel dibuat seragam hitam-putih */
+        .workflow-btn-view {
+            background: #fff !important;
+            border: 1px solid #d1d5db !important;
+            color: #111827 !important;
+        }
+
+        .workflow-btn-view:hover {
+            background: #f8fafc !important;
+            border-color: #111827 !important;
+        }
+
+        .workflow-btn-recap,
+        .workflow-btn-vendor,
+        .workflow-btn-receive,
+        .workflow-btn-done {
+            background: #111827 !important;
+            border: 1px solid #111827 !important;
+            color: #fff !important;
+        }
+
+        .workflow-btn-recap:hover,
+        .workflow-btn-vendor:hover,
+        .workflow-btn-receive:hover,
+        .workflow-btn-done:hover {
+            background: #000 !important;
+            border-color: #000 !important;
+        }
+
+        .workflow-actions form {
+            margin: 0;
+        }
+
+        .workflow-actions .workflow-btn svg {
+            width: 13px !important;
+            height: 13px !important;
+            stroke-width: 2;
+        }
+
+        .workflow-stage {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 5px 8px;
+            border: 1px solid #e5e7eb;
+            background: #fff;
+            font-size: 9px;
+            font-weight: 800;
+            text-transform: uppercase;
+            letter-spacing: .05em;
+            white-space: nowrap;
+        }
+
+        .workflow-stage::before {
+            content: "";
+            width: 6px;
+            height: 6px;
+            border-radius: 999px;
+            background: currentColor;
+        }
+
+        @media(max-width:1023px) {
+            .workflow-filter {
+                grid-template-columns: 1fr;
+            }
+
+            .workflow-actions {
+                display: grid;
+                grid-template-columns: repeat(2, minmax(0, 1fr));
+                width: 100%;
+            }
+
+            .workflow-actions form,
+            .workflow-actions .workflow-btn {
+                width: 100%;
+            }
+        }
+
+
+        .workflow-pagination {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            padding-top: 14px;
+            border-top: 1px solid #eef0f3;
+        }
+
+        .workflow-pagination-info {
+            display: flex;
+            align-items: center;
+            gap: 14px;
+            color: #64748b;
+            font-size: 10px;
+            font-weight: 700;
+        }
+
+        .workflow-limit-wrap {
+            display: flex;
+            align-items: center;
+            gap: 7px;
+            white-space: nowrap;
+        }
+
+        .workflow-limit-select {
+            height: 32px;
+            min-width: 58px;
+            padding: 0 24px 0 9px;
+            border: 1px solid #dfe3e8;
+            background: #fff;
+            color: #111827;
+            font-size: 10px;
+            font-weight: 800;
+            outline: none;
+        }
+
+        .workflow-page-buttons {
+            display: flex;
+            align-items: center;
+            justify-content: flex-end;
+            gap: 5px;
+            flex-wrap: wrap;
+        }
+
+        .workflow-page-btn {
+            min-width: 32px;
+            height: 32px;
+            padding: 0 9px;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            border: 1px solid #dfe3e8;
+            background: #fff;
+            color: #111827;
+            font-size: 10px;
+            font-weight: 800;
+            cursor: pointer;
+            transition: .15s ease;
+        }
+
+        .workflow-page-btn:hover:not(:disabled),
+        .workflow-page-btn.is-active {
+            background: #111827;
+            border-color: #111827;
+            color: #fff;
+        }
+
+        .workflow-page-btn:disabled {
+            opacity: .35;
+            cursor: not-allowed;
+        }
+
+        .workflow-page-dots {
+            min-width: 24px;
+            text-align: center;
+            color: #94a3b8;
+            font-size: 10px;
+            font-weight: 800;
+        }
+
+        @media(max-width:767px) {
+            .workflow-pagination {
+                align-items: stretch;
+                flex-direction: column;
+            }
+
+            .workflow-pagination-info {
+                justify-content: space-between;
+                width: 100%;
+            }
+
+            .workflow-page-buttons {
+                justify-content: center;
+                width: 100%;
+            }
+
+            .workflow-page-btn {
+                min-width: 34px;
+                height: 34px;
+            }
+        }
     </style>
 </head>
 
@@ -927,7 +1883,7 @@ require_once 'navbar.php';
             <div>
                 <p class="text-[10px] font-bold uppercase tracking-widest text-gray-400">Air Mineral / Vendor</p>
                 <h1 class="text-2xl font-semibold mt-1">Rekap Pemesanan Vendor</h1>
-                <p class="text-xs text-gray-400 mt-1">Gabungkan kebutuhan pelanggan, kirim rekap WhatsApp, dan catat penerimaan vendor.</p>
+                <p class="text-xs text-gray-400 mt-1">Kelola seluruh alur pesanan air dari satu tabel: rekap vendor, penerimaan, distribusi, hingga selesai.</p>
             </div>
             <div class="flex flex-wrap gap-2">
                 <a href="air_pesanan.php" class="btn border border-gray-200 bg-white text-gray-700">
@@ -942,206 +1898,396 @@ require_once 'navbar.php';
             </div>
         </div>
 
-        <div class="summary-grid grid grid-cols-2 md:grid-cols-4 xl:grid-cols-7 gap-3 md:gap-4 mb-6">
+        <div class="summary-grid grid grid-cols-2 md:grid-cols-4 xl:grid-cols-8 gap-3 md:gap-4 mb-6">
             <div class="summary-card p-4">
-                <p class="text-[9px] font-bold uppercase tracking-widest text-gray-400">Rekap Hari Ini</p>
-                <p class="text-2xl font-bold mt-2"><?php echo number_format($summary['total_rekap']); ?></p>
+                <p class="text-[9px] font-bold uppercase tracking-widest text-gray-400">Total Pesanan</p>
+                <p class="text-2xl font-bold mt-2"><?php echo number_format($summary['total']); ?></p>
+                <p class="text-[9px] text-gray-400 mt-1">semua status</p>
             </div>
             <div class="summary-card p-4">
-                <p class="text-[9px] font-bold uppercase tracking-widest text-gray-400">Draft</p>
-                <p class="text-2xl font-bold mt-2"><?php echo number_format($summary['draft']); ?></p>
+                <p class="text-[9px] font-bold uppercase tracking-widest text-blue-600">Baru</p>
+                <p class="text-2xl font-bold text-blue-600 mt-2"><?php echo number_format($summary['baru']); ?></p>
             </div>
             <div class="summary-card p-4">
-                <p class="text-[9px] font-bold uppercase tracking-widest text-blue-600">Dikirim</p>
-                <p class="text-2xl font-bold text-blue-600 mt-2"><?php echo number_format($summary['dikirim']); ?></p>
+                <p class="text-[9px] font-bold uppercase tracking-widest text-amber-600">Diproses</p>
+                <p class="text-2xl font-bold text-amber-600 mt-2"><?php echo number_format($summary['diproses']); ?></p>
             </div>
             <div class="summary-card p-4">
-                <p class="text-[9px] font-bold uppercase tracking-widest text-amber-600">Dikonfirmasi</p>
-                <p class="text-2xl font-bold text-amber-600 mt-2"><?php echo number_format($summary['dikonfirmasi']); ?></p>
+                <p class="text-[9px] font-bold uppercase tracking-widest text-purple-600">Siap Dikirim</p>
+                <p class="text-2xl font-bold text-purple-600 mt-2"><?php echo number_format($summary['siap_dikirim']); ?></p>
             </div>
             <div class="summary-card p-4">
-                <p class="text-[9px] font-bold uppercase tracking-widest text-purple-600">Diterima</p>
-                <p class="text-2xl font-bold text-purple-600 mt-2"><?php echo number_format($summary['diterima']); ?></p>
+                <p class="text-[9px] font-bold uppercase tracking-widest text-cyan-600">Dalam Pengiriman</p>
+                <p class="text-2xl font-bold text-cyan-600 mt-2"><?php echo number_format($summary['dalam_pengiriman']); ?></p>
             </div>
             <div class="summary-card p-4">
-                <p class="text-[9px] font-bold uppercase tracking-widest text-gray-400">Diminta Hari Ini</p>
-                <p class="text-2xl font-bold mt-2"><?php echo number_format($summary['total_diminta']); ?></p>
-                <p class="text-[9px] text-gray-400 mt-1">unit</p>
+                <p class="text-[9px] font-bold uppercase tracking-widest text-green-600">Selesai</p>
+                <p class="text-2xl font-bold text-green-600 mt-2"><?php echo number_format($summary['selesai']); ?></p>
             </div>
-            <div class="summary-card p-4 col-span-2 md:col-span-1">
-                <p class="text-[9px] font-bold uppercase tracking-widest text-green-600">Diterima Hari Ini</p>
-                <p class="text-2xl font-bold text-green-600 mt-2"><?php echo number_format($summary['total_diterima']); ?></p>
-                <p class="text-[9px] text-gray-400 mt-1">unit</p>
+            <div class="summary-card p-4">
+                <p class="text-[9px] font-bold uppercase tracking-widest text-red-600">Batal</p>
+                <p class="text-2xl font-bold text-red-600 mt-2"><?php echo number_format($summary['batal']); ?></p>
+            </div>
+            <div class="summary-card p-4">
+                <p class="text-[9px] font-bold uppercase tracking-widest text-orange-600">Belum Direkap</p>
+                <p class="text-2xl font-bold text-orange-600 mt-2"><?php echo number_format($summary['belum_rekap']); ?></p>
+                <p class="text-[9px] text-gray-400 mt-1">masih aktif</p>
             </div>
         </div>
 
         <section class="recap-card p-4 md:p-5 mb-6">
-            <div class="flex flex-col md:flex-row md:items-center md:justify-between gap-3 mb-4">
+            <div class="flex flex-col xl:flex-row xl:items-end xl:justify-between gap-4 mb-4">
                 <div>
-                    <p class="text-[10px] font-bold uppercase tracking-widest text-gray-400">Kebutuhan Belum Direkap</p>
-                    <h2 class="text-base font-bold mt-1"><?php echo arv_h(date('d/m/Y', strtotime($needDate))); ?></h2>
+                    <p class="text-[10px] font-bold uppercase tracking-widest text-blue-600">Monitoring Utama</p>
+                    <h2 class="text-lg font-bold mt-1">Monitoring Pesanan Air</h2>
+                    <p class="text-[10px] text-gray-400 mt-1">
+                        Tabel ini menampilkan seluruh pesanan dari semua status, termasuk Selesai dan Batal. Gunakan filter status untuk mempersempit tampilan.
+                    </p>
                 </div>
-                <form method="get" class="flex gap-2">
-                    <input type="date" name="need_date" value="<?php echo arv_h($needDate); ?>" class="field">
-                    <button class="btn bg-black text-white">Tampilkan</button>
-                </form>
+
+                <div class="workflow-filter w-full xl:w-auto xl:min-w-[520px]">
+                    <div class="workflow-search-wrap">
+                        <span class="workflow-search-icon" aria-hidden="true">
+                            <i data-lucide="search"></i>
+                        </span>
+                        <input type="search"
+                            id="workflowSearch"
+                            class="field workflow-search-input"
+                            placeholder="Cari nomor pesanan, pemesan, lokasi, atau rekap vendor..."
+                            autocomplete="off"
+                            aria-label="Cari pesanan air">
+                    </div>
+                    <select id="workflowStatus" class="field">
+                        <option value="">Semua Status</option>
+                        <option value="baru">Baru</option>
+                        <option value="diproses">Diproses</option>
+                        <option value="siap_dikirim">Siap Dikirim</option>
+                        <option value="dalam_pengiriman">Dalam Pengiriman</option>
+                        <option value="selesai">Selesai</option>
+                        <option value="batal">Batal</option>
+                    </select>
+                </div>
             </div>
 
-            <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
+            <div class="grid grid-cols-2 md:grid-cols-4 xl:grid-cols-7 gap-2 mb-4">
                 <div class="border border-subtle bg-gray-50 p-3">
-                    <p class="text-[9px] font-bold uppercase tracking-widest text-gray-400">Pesanan</p>
-                    <p class="text-xl font-bold mt-1"><?php echo number_format(count($availableOrders)); ?></p>
+                    <p class="text-[8px] font-bold uppercase tracking-widest text-gray-400">Total Tampil</p>
+                    <p class="text-xl font-bold mt-1"><?php echo number_format($unfinishedSummary['total']); ?></p>
                 </div>
-                <div class="border border-subtle bg-gray-50 p-3">
-                    <p class="text-[9px] font-bold uppercase tracking-widest text-gray-400">Jenis Produk</p>
-                    <p class="text-xl font-bold mt-1"><?php echo number_format(count($availableRecap)); ?></p>
+                <div class="border border-blue-100 bg-blue-50 p-3">
+                    <p class="text-[8px] font-bold uppercase tracking-widest text-blue-600">Baru</p>
+                    <p class="text-xl font-bold text-blue-700 mt-1"><?php echo number_format($unfinishedSummary['baru']); ?></p>
                 </div>
-                <div class="border border-subtle bg-gray-50 p-3 col-span-2 md:col-span-1">
-                    <p class="text-[9px] font-bold uppercase tracking-widest text-gray-400">Total Kebutuhan</p>
-                    <p class="text-xl font-bold text-blue-600 mt-1"><?php echo number_format($availableTotalUnit); ?> unit</p>
+                <div class="border border-amber-100 bg-amber-50 p-3">
+                    <p class="text-[8px] font-bold uppercase tracking-widest text-amber-600">Diproses</p>
+                    <p class="text-xl font-bold text-amber-700 mt-1"><?php echo number_format($unfinishedSummary['diproses']); ?></p>
                 </div>
-                <div class="border border-subtle bg-gray-50 p-3 col-span-2 md:col-span-1">
-                    <p class="text-[9px] font-bold uppercase tracking-widest text-gray-400">Status</p>
-                    <p class="text-xs font-bold mt-2 <?php echo $availableOrders ? 'text-amber-600' : 'text-green-600'; ?>"><?php echo $availableOrders ? 'Perlu direkap vendor' : 'Semua sudah direkap'; ?></p>
+                <div class="border border-purple-100 bg-purple-50 p-3">
+                    <p class="text-[8px] font-bold uppercase tracking-widest text-purple-600">Siap Dikirim</p>
+                    <p class="text-xl font-bold text-purple-700 mt-1"><?php echo number_format($unfinishedSummary['siap_dikirim']); ?></p>
+                </div>
+                <div class="border border-cyan-100 bg-cyan-50 p-3">
+                    <p class="text-[8px] font-bold uppercase tracking-widest text-cyan-600">Dalam Pengiriman</p>
+                    <p class="text-xl font-bold text-cyan-700 mt-1"><?php echo number_format($unfinishedSummary['dalam_pengiriman']); ?></p>
+                </div>
+                <div class="border border-green-100 bg-green-50 p-3">
+                    <p class="text-[8px] font-bold uppercase tracking-widest text-green-600">Selesai</p>
+                    <p class="text-xl font-bold text-green-700 mt-1"><?php echo number_format($unfinishedSummary['selesai']); ?></p>
+                </div>
+                <div class="border border-red-100 bg-red-50 p-3">
+                    <p class="text-[8px] font-bold uppercase tracking-widest text-red-600">Batal</p>
+                    <p class="text-xl font-bold text-red-700 mt-1"><?php echo number_format($unfinishedSummary['batal']); ?></p>
                 </div>
             </div>
 
-            <?php if ($availableRecap): ?>
-                <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-2">
-                    <?php foreach ($availableRecap as $item): ?>
-                        <div class="border border-subtle p-3 flex items-center justify-between gap-3">
-                            <div class="min-w-0">
-                                <p class="text-xs font-bold leading-5"><?php echo arv_h($item['nama_produk']); ?></p>
-                                <p class="text-[9px] text-gray-400 mt-1"><?php echo arv_h($item['satuan']); ?></p>
-                            </div>
-                            <p class="text-xl font-bold shrink-0"><?php echo number_format((int)$item['jumlah_diminta']); ?></p>
-                        </div>
-                    <?php endforeach; ?>
-                </div>
-            <?php else: ?>
-                <div class="border border-dashed border-gray-200 p-8 text-center text-xs text-gray-400">Tidak ada kebutuhan pelanggan yang belum direkap pada tanggal ini.</div>
-            <?php endif; ?>
-        </section>
-
-        <form method="get" class="filter-card p-4 mb-4 flex flex-col md:flex-row md:flex-wrap gap-3 items-stretch md:items-center">
-            <input type="hidden" name="need_date" value="<?php echo arv_h($needDate); ?>">
-            <div class="relative flex-1 min-w-[220px] wide">
-                <i data-lucide="search" class="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400"></i>
-                <input type="search" name="q" value="<?php echo arv_h($q); ?>" class="field pl-10" placeholder="Cari nomor rekap, vendor, atau WA">
-            </div>
-            <select name="status" class="field md:w-auto md:min-w-[180px]">
-                <option value="">Semua Status</option>
-                <?php foreach ($allowedVendorStatuses as $status): ?>
-                    <option value="<?php echo arv_h($status); ?>" <?php echo $statusFilter === $status ? 'selected' : ''; ?>><?php echo arv_h(arv_status_label($status)); ?></option>
-                <?php endforeach; ?>
-            </select>
-            <select name="limit" class="field md:w-auto md:min-w-[125px]">
-                <?php foreach ($allowedLimits as $limit): ?>
-                    <option value="<?php echo $limit; ?>" <?php echo $perPage === $limit ? 'selected' : ''; ?>><?php echo $limit; ?> / Hal</option>
-                <?php endforeach; ?>
-            </select>
-            <button class="btn bg-black text-white"><i data-lucide="filter" class="w-4 h-4"></i> Terapkan</button>
-            <a href="air_rekap_vendor.php?need_date=<?php echo urlencode($needDate); ?>" class="btn border border-gray-200 bg-white text-gray-700">Reset</a>
-            <span class="text-xs text-gray-400 font-medium md:ml-auto"><?php echo number_format($totalRows); ?> rekap ditemukan</span>
-        </form>
-
-        <div class="table-card overflow-hidden">
-            <div class="hidden lg:block overflow-x-auto no-scrollbar">
-                <table class="w-full text-left min-w-[1050px]">
-                    <thead class="border-b border-subtle bg-gray-50">
+            <div class="hidden lg:block border border-subtle overflow-x-auto">
+                <table class="w-full min-w-[1320px] text-left">
+                    <thead class="bg-gray-50 border-b border-subtle">
                         <tr>
-                            <th class="px-5 py-4 text-[10px] font-bold uppercase tracking-widest text-gray-400">Rekap Vendor</th>
-                            <th class="px-5 py-4 text-[10px] font-bold uppercase tracking-widest text-gray-400">Vendor</th>
-                            <th class="px-5 py-4 text-[10px] font-bold uppercase tracking-widest text-gray-400 text-center">Kebutuhan</th>
-                            <th class="px-5 py-4 text-[10px] font-bold uppercase tracking-widest text-gray-400 text-center">Diminta</th>
-                            <th class="px-5 py-4 text-[10px] font-bold uppercase tracking-widest text-gray-400 text-center">Dipesan</th>
-                            <th class="px-5 py-4 text-[10px] font-bold uppercase tracking-widest text-gray-400 text-center">Diterima</th>
-                            <th class="px-5 py-4 text-[10px] font-bold uppercase tracking-widest text-gray-400 text-center">Status</th>
-                            <th class="px-5 py-4 text-[10px] font-bold uppercase tracking-widest text-gray-400 text-right">Aksi</th>
+                            <th class="px-4 py-3 text-[9px] font-bold uppercase tracking-widest text-gray-400">Pesanan</th>
+                            <th class="px-4 py-3 text-[9px] font-bold uppercase tracking-widest text-gray-400">Pemesan</th>
+                            <th class="px-4 py-3 text-[9px] font-bold uppercase tracking-widest text-gray-400">Tanggal</th>
+                            <th class="px-4 py-3 text-[9px] font-bold uppercase tracking-widest text-gray-400">Lokasi</th>
+                            <th class="px-4 py-3 text-[9px] font-bold uppercase tracking-widest text-gray-400 text-center">Produk</th>
+                            <th class="px-4 py-3 text-[9px] font-bold uppercase tracking-widest text-gray-400">Rekap Vendor</th>
+                            <th class="px-4 py-3 text-[9px] font-bold uppercase tracking-widest text-gray-400 text-center">Status</th>
+                            <th class="px-4 py-3 text-[9px] font-bold uppercase tracking-widest text-gray-400 text-right">Aksi Berikutnya</th>
                         </tr>
                     </thead>
-                    <tbody class="divide-y divide-[#f5f5f5]">
-                        <?php if (!$vendorOrders): ?>
+
+                    <tbody id="workflowTableBody" class="divide-y divide-[#f5f5f5]">
+                        <?php if (!$unfinishedOrders): ?>
                             <tr>
-                                <td colspan="8" class="py-20 text-center text-xs font-bold uppercase tracking-widest text-gray-300">Belum ada rekap vendor</td>
+                                <td colspan="8" class="px-4 py-14 text-center text-xs font-bold uppercase tracking-widest text-green-600">
+                                    Belum ada data pesanan
+                                </td>
                             </tr>
-                            <?php else: foreach ($vendorOrders as $order): ?>
-                                <tr>
-                                    <td class="px-5 py-4">
-                                        <p class="text-sm font-bold"><?php echo arv_h($order['nomor_vendor_order']); ?></p>
-                                        <p class="text-[10px] text-gray-400 mt-1"><?php echo number_format((int)$order['source_count']); ?> pesanan pelanggan</p>
+                        <?php else: ?>
+                            <?php foreach ($unfinishedOrders as $customerOrder): ?>
+                                <?php
+                                $locations = trim((string)($customerOrder['daftar_lokasi'] ?? '')) !== ''
+                                    ? explode('||', (string)$customerOrder['daftar_lokasi'])
+                                    : [];
+
+                                $monitorVendorId = (int)($customerOrder['latest_vendor_order_id'] ?? 0);
+                                $monitorVendor = $monitorVendorById[$monitorVendorId] ?? null;
+
+                                $searchText = strtolower(
+                                    (string)($customerOrder['nomor_pesanan'] ?? '') . ' ' .
+                                        (string)($customerOrder['nama_pemesan'] ?? '') . ' ' .
+                                        (string)($customerOrder['no_hp'] ?? '') . ' ' .
+                                        implode(' ', $locations) . ' ' .
+                                        (string)($monitorVendor['nomor_vendor_order'] ?? '') . ' ' .
+                                        (string)($monitorVendor['vendor_nama'] ?? '') . ' ' .
+                                        (string)($customerOrder['status'] ?? '')
+                                );
+                                ?>
+                                <tr class="workflow-row"
+                                    data-status="<?php echo arv_h((string)$customerOrder['status']); ?>"
+                                    data-search="<?php echo arv_h($searchText); ?>">
+                                    <td class="px-4 py-3">
+                                        <p class="text-xs font-bold"><?php echo arv_h($customerOrder['nomor_pesanan']); ?></p>
+                                        <p class="text-[9px] text-gray-400 mt-1">
+                                            Input <?php echo arv_h(date('d/m/Y H:i', strtotime((string)$customerOrder['created_at']))); ?> WIB
+                                        </p>
                                     </td>
-                                    <td class="px-5 py-4">
-                                        <p class="text-sm font-semibold"><?php echo arv_h($order['vendor_nama']); ?></p>
-                                        <p class="text-[10px] text-gray-400 mt-1"><?php echo arv_h($order['vendor_wa'] ?: '-'); ?></p>
+
+                                    <td class="px-4 py-3">
+                                        <p class="text-xs font-bold"><?php echo arv_h($customerOrder['nama_pemesan']); ?></p>
+                                        <p class="text-[9px] text-gray-400 mt-1"><?php echo arv_h($customerOrder['no_hp'] ?: '-'); ?></p>
                                     </td>
-                                    <td class="px-5 py-4 text-center text-xs font-bold"><?php echo arv_h(date('d/m/Y', strtotime($order['tanggal_kebutuhan']))); ?></td>
-                                    <td class="px-5 py-4 text-center text-sm font-bold"><?php echo number_format((int)$order['total_diminta']); ?></td>
-                                    <td class="px-5 py-4 text-center text-sm font-bold text-blue-600"><?php echo number_format((int)$order['total_dipesan']); ?></td>
-                                    <td class="px-5 py-4 text-center">
-                                        <p class="text-sm font-bold text-green-600"><?php echo number_format((int)$order['total_diterima']); ?></p><?php $shortage = (int)$order['total_diminta'] - (int)$order['total_diterima'];
-                                                                                                                                                    if ($shortage > 0): ?><p class="text-[9px] font-bold text-red-500 mt-1">Kurang <?php echo number_format($shortage); ?></p><?php endif; ?>
+
+                                    <td class="px-4 py-3">
+                                        <p class="text-xs font-bold">
+                                            <?php echo arv_h(date('d/m/Y', strtotime((string)$customerOrder['tanggal_operasional']))); ?>
+                                        </p>
+                                        <p class="text-[9px] text-gray-400 mt-1">Tanggal operasional</p>
                                     </td>
-                                    <td class="px-5 py-4 text-center"><span class="status-badge <?php echo arv_status_class((string)$order['status']); ?>"><?php echo arv_h(arv_status_label((string)$order['status'])); ?></span></td>
-                                    <td class="px-5 py-4">
-                                        <div class="flex justify-end gap-1"><button type="button" onclick='openDetail(<?php echo json_encode($order, JSON_UNESCAPED_UNICODE | JSON_HEX_APOS | JSON_HEX_QUOT); ?>)' class="p-2 text-gray-400 hover:text-blue-600 hover:bg-blue-50" title="Detail"><i data-lucide="eye" class="w-4 h-4"></i></button><button type="button" onclick='openQuantity(<?php echo json_encode($order, JSON_UNESCAPED_UNICODE | JSON_HEX_APOS | JSON_HEX_QUOT); ?>)' class="p-2 text-gray-400 hover:text-purple-600 hover:bg-purple-50" title="Catat penerimaan"><i data-lucide="package-check" class="w-4 h-4"></i></button><button type="button" onclick='sendWhatsApp(<?php echo json_encode($order, JSON_UNESCAPED_UNICODE | JSON_HEX_APOS | JSON_HEX_QUOT); ?>)' class="p-2 text-gray-400 hover:text-green-600 hover:bg-green-50" title="WhatsApp"><i data-lucide="message-circle" class="w-4 h-4"></i></button></div>
+
+                                    <td class="px-4 py-3 max-w-[220px]">
+                                        <?php if ($locations): ?>
+                                            <p class="text-xs font-bold truncate"><?php echo arv_h($locations[0]); ?></p>
+                                            <?php if (count($locations) > 1): ?>
+                                                <p class="text-[9px] text-gray-400 mt-1">+<?php echo number_format(count($locations) - 1); ?> lokasi lain</p>
+                                            <?php endif; ?>
+                                        <?php else: ?>
+                                            <p class="text-xs text-gray-400">Lokasi belum ditentukan</p>
+                                        <?php endif; ?>
+                                    </td>
+
+                                    <td class="px-4 py-3 text-center">
+                                        <p class="text-sm font-bold text-blue-600"><?php echo number_format((int)$customerOrder['total_unit']); ?></p>
+                                        <p class="text-[8px] text-gray-400 uppercase">unit</p>
+                                    </td>
+
+                                    <td class="px-4 py-3">
+                                        <?php if ($monitorVendor): ?>
+                                            <p class="text-[10px] font-bold"><?php echo arv_h($monitorVendor['nomor_vendor_order']); ?></p>
+                                            <p class="text-[9px] text-gray-400 mt-1">
+                                                <?php echo arv_h($monitorVendor['vendor_nama'] ?: '-'); ?> ·
+                                                <?php echo arv_h(arv_status_label((string)$monitorVendor['status'])); ?>
+                                            </p>
+                                        <?php else: ?>
+                                            <?php if ((string)$customerOrder['status'] === 'selesai' && !empty($customerOrder['is_data_historis'])): ?>
+                                                <span class="workflow-stage text-gray-500 border-gray-200 bg-gray-50">Arsip Lama</span>
+                                            <?php else: ?>
+                                                <span class="workflow-stage text-gray-700 border-gray-300 bg-white">Belum Direkap</span>
+                                            <?php endif; ?>
+                                        <?php endif; ?>
+                                    </td>
+
+                                    <td class="px-4 py-3 text-center">
+                                        <span class="status-badge <?php echo arv_customer_status_class((string)$customerOrder['status']); ?>">
+                                            <?php echo arv_h(arv_customer_status_label((string)$customerOrder['status'])); ?>
+                                        </span>
+                                    </td>
+
+                                    <td class="px-4 py-3">
+                                        <div class="workflow-actions">
+                                            <button type="button"
+                                                onclick='openCustomerDetail(<?php echo json_encode($customerOrder, JSON_UNESCAPED_UNICODE | JSON_HEX_APOS | JSON_HEX_QUOT); ?>)'
+                                                class="btn workflow-btn workflow-btn-view"
+                                                title="Lihat detail pesanan">
+                                                <i data-lucide="eye" class="w-3.5 h-3.5"></i>
+                                                Lihat
+                                            </button>
+
+                                            <?php if (!in_array((string)$customerOrder['status'], ['selesai', 'batal'], true)): ?>
+                                                <?php if (!$monitorVendor): ?>
+                                                    <button type="button"
+                                                        onclick="openCreateModalForOrder(<?php echo (int)$customerOrder['id']; ?>)"
+                                                        class="btn workflow-btn workflow-btn-recap">
+                                                        <i data-lucide="clipboard-plus" class="w-3.5 h-3.5"></i>
+                                                        Rekap
+                                                    </button>
+                                                <?php else: ?>
+                                                    <button type="button"
+                                                        onclick='openDetail(<?php echo json_encode($monitorVendor, JSON_UNESCAPED_UNICODE | JSON_HEX_APOS | JSON_HEX_QUOT); ?>)'
+                                                        class="btn workflow-btn workflow-btn-vendor">
+                                                        <i data-lucide="file-text" class="w-3.5 h-3.5"></i>
+                                                        Detail Vendor
+                                                    </button>
+
+                                                    <?php if (!in_array((string)$monitorVendor['status'], ['diterima', 'selesai', 'batal'], true)): ?>
+                                                        <button type="button"
+                                                            onclick='openQuantity(<?php echo json_encode($monitorVendor, JSON_UNESCAPED_UNICODE | JSON_HEX_APOS | JSON_HEX_QUOT); ?>)'
+                                                            class="btn workflow-btn workflow-btn-receive">
+                                                            <i data-lucide="package-check" class="w-3.5 h-3.5"></i>
+                                                            Terima Barang
+                                                        </button>
+                                                    <?php endif; ?>
+                                                <?php endif; ?>
+                                            <?php endif; // status pelanggan masih aktif (bukan selesai/batal) 
+                                            ?>
+                                        </div>
                                     </td>
                                 </tr>
-                        <?php endforeach;
-                        endif; ?>
+                            <?php endforeach; ?>
+                        <?php endif; ?>
+
+                        <tr id="workflowEmptyRow" class="hidden">
+                            <td colspan="8" class="px-4 py-12 text-center text-xs font-bold uppercase tracking-widest text-gray-400">
+                                Pesanan tidak ditemukan
+                            </td>
+                        </tr>
                     </tbody>
                 </table>
             </div>
 
-            <div class="lg:hidden">
-                <?php if (!$vendorOrders): ?>
-                    <div class="py-16 text-center text-xs font-bold uppercase tracking-widest text-gray-300">Belum ada rekap vendor</div>
-                <?php else: ?>
-                    <div class="mobile-grid grid grid-cols-1 md:grid-cols-2 gap-3 p-3 md:p-4">
-                        <?php foreach ($vendorOrders as $order): ?>
-                            <article class="mobile-card p-4">
-                                <div class="flex items-start justify-between gap-3">
-                                    <div class="min-w-0">
-                                        <p class="text-sm font-bold break-all"><?php echo arv_h($order['nomor_vendor_order']); ?></p>
-                                        <p class="text-xs text-gray-500 mt-1"><?php echo arv_h($order['vendor_nama']); ?></p>
-                                    </div><span class="status-badge <?php echo arv_status_class((string)$order['status']); ?>"><?php echo arv_h(arv_status_label((string)$order['status'])); ?></span>
-                                </div>
-                                <div class="grid grid-cols-3 gap-2 mt-4">
-                                    <div class="border border-subtle bg-gray-50 p-3">
-                                        <p class="text-[8px] font-bold uppercase text-gray-400">Diminta</p>
-                                        <p class="text-lg font-bold mt-1"><?php echo number_format((int)$order['total_diminta']); ?></p>
-                                    </div>
-                                    <div class="border border-subtle bg-gray-50 p-3">
-                                        <p class="text-[8px] font-bold uppercase text-gray-400">Dipesan</p>
-                                        <p class="text-lg font-bold text-blue-600 mt-1"><?php echo number_format((int)$order['total_dipesan']); ?></p>
-                                    </div>
-                                    <div class="border border-subtle bg-gray-50 p-3">
-                                        <p class="text-[8px] font-bold uppercase text-gray-400">Diterima</p>
-                                        <p class="text-lg font-bold text-green-600 mt-1"><?php echo number_format((int)$order['total_diterima']); ?></p>
-                                    </div>
-                                </div>
-                                <div class="mt-3 border border-subtle p-3">
-                                    <p class="text-[9px] font-bold uppercase tracking-widest text-gray-400">Tanggal Kebutuhan</p>
-                                    <p class="text-xs font-bold mt-1"><?php echo arv_h(date('d/m/Y', strtotime($order['tanggal_kebutuhan']))); ?> · <?php echo number_format((int)$order['source_count']); ?> pesanan</p>
-                                </div>
-                                <div class="grid grid-cols-3 gap-2 mt-3 pt-3 border-t border-subtle"><button type="button" onclick='openDetail(<?php echo json_encode($order, JSON_UNESCAPED_UNICODE | JSON_HEX_APOS | JSON_HEX_QUOT); ?>)' class="btn border border-blue-100 text-blue-700">Detail</button><button type="button" onclick='openQuantity(<?php echo json_encode($order, JSON_UNESCAPED_UNICODE | JSON_HEX_APOS | JSON_HEX_QUOT); ?>)' class="btn border border-purple-100 text-purple-700">Terima</button><button type="button" onclick='sendWhatsApp(<?php echo json_encode($order, JSON_UNESCAPED_UNICODE | JSON_HEX_APOS | JSON_HEX_QUOT); ?>)' class="btn border border-green-100 text-green-700">WA</button></div>
-                            </article>
-                        <?php endforeach; ?>
+            <div id="workflowMobileList" class="lg:hidden space-y-3">
+                <?php if (!$unfinishedOrders): ?>
+                    <div class="border border-green-100 bg-green-50 p-6 text-center text-xs font-bold text-green-700">
+                        Belum ada data pesanan.
                     </div>
+                <?php else: ?>
+                    <?php foreach ($unfinishedOrders as $customerOrder): ?>
+                        <?php
+                        $locations = trim((string)($customerOrder['daftar_lokasi'] ?? '')) !== ''
+                            ? explode('||', (string)$customerOrder['daftar_lokasi'])
+                            : [];
+
+                        $monitorVendorId = (int)($customerOrder['latest_vendor_order_id'] ?? 0);
+                        $monitorVendor = $monitorVendorById[$monitorVendorId] ?? null;
+
+                        $searchText = strtolower(
+                            (string)($customerOrder['nomor_pesanan'] ?? '') . ' ' .
+                                (string)($customerOrder['nama_pemesan'] ?? '') . ' ' .
+                                (string)($customerOrder['no_hp'] ?? '') . ' ' .
+                                implode(' ', $locations) . ' ' .
+                                (string)($monitorVendor['nomor_vendor_order'] ?? '') . ' ' .
+                                (string)($monitorVendor['vendor_nama'] ?? '') . ' ' .
+                                (string)($customerOrder['status'] ?? '')
+                        );
+                        ?>
+                        <article class="workflow-mobile-card border border-subtle bg-white p-4"
+                            data-status="<?php echo arv_h((string)$customerOrder['status']); ?>"
+                            data-search="<?php echo arv_h($searchText); ?>">
+                            <div class="flex items-start justify-between gap-3">
+                                <div class="min-w-0">
+                                    <p class="text-sm font-bold break-all"><?php echo arv_h($customerOrder['nomor_pesanan']); ?></p>
+                                    <p class="text-xs text-gray-500 mt-1"><?php echo arv_h($customerOrder['nama_pemesan']); ?></p>
+                                    <p class="text-[9px] text-gray-400 mt-1">
+                                        <?php echo arv_h(date('d/m/Y', strtotime((string)$customerOrder['tanggal_operasional']))); ?>
+                                    </p>
+                                </div>
+                                <span class="status-badge <?php echo arv_customer_status_class((string)$customerOrder['status']); ?>">
+                                    <?php echo arv_h(arv_customer_status_label((string)$customerOrder['status'])); ?>
+                                </span>
+                            </div>
+
+                            <div class="grid grid-cols-2 gap-2 mt-4">
+                                <div class="border border-subtle bg-gray-50 p-3">
+                                    <p class="text-[8px] font-bold uppercase text-gray-400">Produk</p>
+                                    <p class="text-sm font-bold text-blue-600 mt-1"><?php echo number_format((int)$customerOrder['total_unit']); ?> unit</p>
+                                </div>
+                                <div class="border border-subtle bg-gray-50 p-3">
+                                    <p class="text-[8px] font-bold uppercase text-gray-400">Lokasi</p>
+                                    <p class="text-xs font-bold mt-1 truncate">
+                                        <?php echo $locations ? arv_h($locations[0]) : 'Belum ditentukan'; ?>
+                                    </p>
+                                </div>
+                            </div>
+
+                            <div class="mt-3 border border-subtle p-3">
+                                <p class="text-[8px] font-bold uppercase tracking-widest text-gray-400">Rekap Vendor</p>
+                                <?php if ($monitorVendor): ?>
+                                    <p class="text-xs font-bold mt-1"><?php echo arv_h($monitorVendor['nomor_vendor_order']); ?></p>
+                                    <p class="text-[9px] text-gray-400 mt-1">
+                                        <?php echo arv_h($monitorVendor['vendor_nama'] ?: '-'); ?> ·
+                                        <?php echo arv_h(arv_status_label((string)$monitorVendor['status'])); ?>
+                                    </p>
+                                <?php else: ?>
+                                    <?php if ((string)$customerOrder['status'] === 'selesai' && !empty($customerOrder['is_data_historis'])): ?>
+                                        <p class="text-xs font-bold text-gray-500 mt-1">Arsip lama · tidak wajib rekap vendor</p>
+                                    <?php else: ?>
+                                        <p class="text-xs font-bold text-red-600 mt-1">Belum direkap vendor</p>
+                                    <?php endif; ?>
+                                <?php endif; ?>
+                            </div>
+
+                            <div class="workflow-actions mt-3">
+                                <button type="button"
+                                    onclick='openCustomerDetail(<?php echo json_encode($customerOrder, JSON_UNESCAPED_UNICODE | JSON_HEX_APOS | JSON_HEX_QUOT); ?>)'
+                                    class="btn workflow-btn workflow-btn-view"
+                                    title="Lihat detail pesanan">
+                                    <i data-lucide="eye" class="w-3.5 h-3.5"></i>
+                                    Lihat
+                                </button>
+
+                                <?php if (!in_array((string)$customerOrder['status'], ['selesai', 'batal'], true)): ?>
+                                    <?php if (!$monitorVendor): ?>
+                                        <button type="button"
+                                            onclick="openCreateModalForOrder(<?php echo (int)$customerOrder['id']; ?>)"
+                                            class="btn workflow-btn workflow-btn-recap">
+                                            <i data-lucide="clipboard-plus" class="w-3.5 h-3.5"></i>
+                                            Rekap
+                                        </button>
+                                    <?php else: ?>
+                                        <button type="button"
+                                            onclick='openDetail(<?php echo json_encode($monitorVendor, JSON_UNESCAPED_UNICODE | JSON_HEX_APOS | JSON_HEX_QUOT); ?>)'
+                                            class="btn workflow-btn workflow-btn-vendor">
+                                            <i data-lucide="file-text" class="w-3.5 h-3.5"></i>
+                                            Detail Vendor
+                                        </button>
+
+                                        <?php if (!in_array((string)$monitorVendor['status'], ['diterima', 'selesai', 'batal'], true)): ?>
+                                            <button type="button"
+                                                onclick='openQuantity(<?php echo json_encode($monitorVendor, JSON_UNESCAPED_UNICODE | JSON_HEX_APOS | JSON_HEX_QUOT); ?>)'
+                                                class="btn workflow-btn workflow-btn-receive">
+                                                <i data-lucide="package-check" class="w-3.5 h-3.5"></i>
+                                                Terima Barang
+                                            </button>
+                                        <?php endif; ?>
+                                    <?php endif; ?>
+                                <?php endif; // status pelanggan masih aktif (bukan selesai/batal) 
+                                ?>
+                            </div>
+                        </article>
+                    <?php endforeach; ?>
                 <?php endif; ?>
+
+                <div id="workflowMobileEmpty" class="hidden border border-dashed border-gray-200 bg-gray-50 p-6 text-center">
+                    <p class="text-xs font-bold text-gray-400">Pesanan tidak ditemukan.</p>
+                </div>
             </div>
 
-            <?php if ($totalPages > 1): ?>
-                <div class="px-4 md:px-5 py-4 border-t border-subtle flex flex-col sm:flex-row gap-3 sm:items-center sm:justify-between bg-gray-50">
-                    <span class="text-xs text-gray-400">Halaman <?php echo $page; ?> dari <?php echo $totalPages; ?> (<?php echo number_format($totalRows); ?> total · <?php echo $perPage; ?>/hal)</span>
-                    <div class="flex flex-wrap gap-2">
-                        <?php if ($page > 1): ?><a href="<?php echo arv_h(arv_page_url($baseQuery, $page - 1)); ?>" class="px-3 py-2 text-xs font-bold border border-subtle bg-white">&larr; Prev</a><?php endif; ?>
-                        <?php for ($pg = max(1, $page - 2); $pg <= min($totalPages, $page + 2); $pg++): ?><a href="<?php echo arv_h(arv_page_url($baseQuery, $pg)); ?>" class="px-3 py-2 text-xs font-bold <?php echo $pg === $page ? 'bg-black text-white' : 'border border-subtle bg-white'; ?>"><?php echo $pg; ?></a><?php endfor; ?>
-                        <?php if ($page < $totalPages): ?><a href="<?php echo arv_h(arv_page_url($baseQuery, $page + 1)); ?>" class="px-3 py-2 text-xs font-bold border border-subtle bg-white">Next &rarr;</a><?php endif; ?>
-                    </div>
+            <div id="workflowPagination" class="workflow-pagination mt-4">
+                <div class="workflow-pagination-info">
+                    <span id="workflowPageInfo">Menampilkan 0 data</span>
+                    <label class="workflow-limit-wrap">
+                        <span>Per halaman</span>
+                        <select id="workflowPageSize" class="workflow-limit-select">
+                            <option value="10">10</option>
+                            <option value="15" selected>15</option>
+                            <option value="25">25</option>
+                            <option value="50">50</option>
+                        </select>
+                    </label>
                 </div>
-            <?php endif; ?>
-        </div>
+                <div id="workflowPageButtons" class="workflow-page-buttons"></div>
+            </div>
+        </section>
+
     </main>
 
     <!-- Modal buat rekap -->
@@ -1150,12 +2296,11 @@ require_once 'navbar.php';
             <div class="flex items-center justify-between px-5 md:px-7 py-5 border-b border-subtle">
                 <div>
                     <h2 class="text-sm font-black uppercase tracking-widest">Buat Rekap Vendor</h2>
-                    <p class="text-[10px] text-gray-400 mt-1">Pilih pesanan pelanggan dan periksa jumlah yang akan dipesan.</p>
+                    <p class="text-[10px] text-gray-400 mt-1">Semua pesanan belum direkap ditampilkan. Pilih pesanan dengan tanggal kebutuhan yang sama untuk satu rekap.</p>
                 </div><button type="button" onclick="closeModal('createModal')" class="p-2 hover:bg-gray-100"><i data-lucide="x" class="w-4 h-4"></i></button>
             </div>
             <form method="post">
                 <input type="hidden" name="action" value="create_vendor_order">
-                <input type="hidden" name="tanggal_kebutuhan" value="<?php echo arv_h($needDate); ?>">
                 <div class="modal-body max-h-[72vh] overflow-y-auto px-5 md:px-7 py-6 space-y-5">
                     <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
                         <div><label class="block text-[10px] font-bold uppercase tracking-widest text-gray-500 mb-2">Nama Vendor *</label><input type="text" name="vendor_nama" required class="field" placeholder="Nama pemasok air mineral"></div>
@@ -1166,7 +2311,7 @@ require_once 'navbar.php';
                         <div class="flex items-center justify-between gap-3 mb-2">
                             <label class="text-[10px] font-bold uppercase tracking-widest text-gray-500">Pesanan Pelanggan</label>
                             <label class="text-xs font-bold cursor-pointer">
-                                <input type="checkbox" id="checkAllSources" checked onchange="toggleAllSources(this.checked)" class="accent-black">
+                                <input type="checkbox" id="checkAllSources" onchange="toggleAllSources(this.checked)" class="accent-black">
                                 Pilih Semua
                             </label>
                         </div>
@@ -1176,7 +2321,7 @@ require_once 'navbar.php';
                                 <div class="border border-dashed border-gray-200 bg-gray-50 p-5 text-center">
                                     <p class="text-xs font-bold text-gray-600">Belum ada pesanan yang dapat direkap.</p>
                                     <p class="text-[10px] text-gray-400 mt-1">
-                                        Ubah tanggal kebutuhan pada halaman utama, atau pastikan pesanan belum selesai/batal dan belum masuk rekap vendor.
+                                        Pastikan pesanan belum selesai/batal dan belum masuk rekap vendor aktif.
                                     </p>
                                 </div>
                             <?php endif; ?>
@@ -1186,9 +2331,9 @@ require_once 'navbar.php';
                                         <input type="checkbox"
                                             name="source_ids[]"
                                             value="<?php echo (int)$source['id']; ?>"
-                                            checked
+                                            data-need-date="<?php echo arv_h((string)($source['tanggal_operasional'] ?? '')); ?>"
                                             class="source-check accent-black mt-1"
-                                            onchange="refreshCreateRecapSummary()">
+                                            onchange="handleSourceDateSelection(this)">
 
                                         <div class="min-w-0 flex-1">
                                             <div class="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-1">
@@ -1202,6 +2347,7 @@ require_once 'navbar.php';
                                                             · <?php echo arv_h($source['no_hp']); ?>
                                                         <?php endif; ?>
                                                     </p>
+                                                    <p class="text-[9px] font-black text-gray-500 mt-1">Kebutuhan: <?php echo !empty($source['tanggal_operasional']) ? arv_h(date('d/m/Y', strtotime((string)$source['tanggal_operasional']))) : '-'; ?></p>
                                                 </div>
 
                                                 <p class="text-[9px] font-bold text-blue-600 whitespace-nowrap">
@@ -1276,6 +2422,20 @@ require_once 'navbar.php';
     </div>
 
     <!-- Modal detail -->
+
+    <div id="customerDetailModal" class="modal-wrap fixed inset-0 z-[115] hidden items-center justify-center bg-black/40 p-4">
+        <div class="modal-card w-full max-w-4xl bg-white border border-subtle shadow-xl max-h-[92vh] overflow-hidden">
+            <div class="flex items-center justify-between px-5 md:px-7 py-5 border-b border-subtle bg-white">
+                <div>
+                    <p class="text-[9px] font-bold uppercase tracking-widest text-gray-400">Detail Pesanan Air</p>
+                    <h2 id="customerDetailTitle" class="text-base font-black mt-1">-</h2>
+                </div>
+                <button type="button" onclick="closeModal('customerDetailModal')" class="p-2 hover:bg-gray-100"><i data-lucide="x" class="w-4 h-4"></i></button>
+            </div>
+            <div id="customerDetailBody" class="modal-body max-h-[78vh] overflow-y-auto px-5 md:px-7 py-6"></div>
+        </div>
+    </div>
+
     <div id="detailModal" class="modal-wrap fixed inset-0 z-[110] hidden items-center justify-center bg-black/40 p-4">
         <div class="modal-panel w-full max-w-4xl bg-white overflow-hidden">
             <div class="flex items-center justify-between px-5 md:px-7 py-5 border-b border-subtle">
@@ -1293,13 +2453,13 @@ require_once 'navbar.php';
         <div class="modal-panel w-full max-w-3xl bg-white overflow-hidden">
             <div class="flex items-center justify-between px-5 md:px-7 py-5 border-b border-subtle">
                 <div>
-                    <p class="text-[9px] font-bold uppercase tracking-widest text-gray-400">Konfirmasi dan Penerimaan</p>
+                    <p class="text-[9px] font-bold uppercase tracking-widest text-gray-400">Penerimaan Barang &amp; Catatan Vendor</p>
                     <h2 id="quantityTitle" class="text-base font-black mt-1">-</h2>
                 </div><button onclick="closeModal('quantityModal')" class="p-2 hover:bg-gray-100"><i data-lucide="x" class="w-4 h-4"></i></button>
             </div>
-            <form method="post"><input type="hidden" name="action" value="save_quantities"><input type="hidden" name="vendor_order_id" id="quantityOrderId">
+            <form method="post" enctype="multipart/form-data"><input type="hidden" name="action" value="save_quantities"><input type="hidden" name="vendor_order_id" id="quantityOrderId">
                 <div id="quantityBody" class="modal-body max-h-[72vh] overflow-y-auto px-5 md:px-7 py-6"></div>
-                <div class="px-5 md:px-7 py-5 border-t border-subtle bg-gray-50 flex gap-3"><button type="button" onclick="closeModal('quantityModal')" class="flex-1 py-3 text-xs font-bold uppercase border border-subtle bg-white">Batal</button><button type="submit" class="flex-1 py-3 text-xs font-bold uppercase bg-black text-white">Simpan Jumlah</button></div>
+                <div class="px-5 md:px-7 py-5 border-t border-subtle bg-gray-50 flex gap-3"><button type="button" onclick="closeModal('quantityModal')" class="flex-1 py-3 text-xs font-bold uppercase border border-subtle bg-white">Batal</button><button type="submit" class="flex-1 py-3 text-xs font-bold uppercase bg-black text-white">Simpan Penerimaan</button></div>
             </form>
         </div>
     </div>
@@ -1324,6 +2484,146 @@ require_once 'navbar.php';
         }
         var AVAILABLE_ORDER_PRODUCTS = <?php echo json_encode($availableOrderProducts, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES); ?>;
 
+
+        function openCreateModalForOrder(orderId) {
+            var targetId = Number(orderId || 0);
+
+            document.querySelectorAll('.source-check').forEach(function(el) {
+                el.checked = Number(el.value || 0) === targetId;
+            });
+
+            var checkAll = document.getElementById('checkAllSources');
+            if (checkAll) {
+                checkAll.checked = false;
+            }
+
+            refreshCreateRecapSummary();
+            openModal('createModal');
+        }
+
+        var workflowCurrentPage = 1;
+        var workflowPageSize = 15;
+
+        function getWorkflowFilteredElements(selector) {
+            var search = document.getElementById('workflowSearch');
+            var status = document.getElementById('workflowStatus');
+            var keyword = search ? search.value.toLowerCase().trim() : '';
+            var statusValue = status ? status.value : '';
+
+            return Array.prototype.filter.call(document.querySelectorAll(selector), function(el) {
+                var haystack = String(el.getAttribute('data-search') || '').toLowerCase();
+                var rowStatus = String(el.getAttribute('data-status') || '');
+                return (keyword === '' || haystack.indexOf(keyword) !== -1) &&
+                    (statusValue === '' || rowStatus === statusValue);
+            });
+        }
+
+        function buildWorkflowPageButtons(totalPages) {
+            var wrap = document.getElementById('workflowPageButtons');
+            if (!wrap) return;
+            wrap.innerHTML = '';
+            if (totalPages <= 1) return;
+
+            function addButton(label, page, disabled, active) {
+                var btn = document.createElement('button');
+                btn.type = 'button';
+                btn.className = 'workflow-page-btn' + (active ? ' is-active' : '');
+                btn.textContent = label;
+                btn.disabled = !!disabled;
+                btn.addEventListener('click', function() {
+                    workflowCurrentPage = page;
+                    renderWorkflowPage();
+                    var table = document.getElementById('workflowTableBody');
+                    if (table && window.innerWidth >= 1024) table.closest('section').scrollIntoView({
+                        behavior: 'smooth',
+                        block: 'start'
+                    });
+                });
+                wrap.appendChild(btn);
+            }
+
+            addButton('‹', Math.max(1, workflowCurrentPage - 1), workflowCurrentPage === 1, false);
+            var pages = [];
+            if (totalPages <= 7) {
+                for (var i = 1; i <= totalPages; i++) pages.push(i);
+            } else {
+                pages = [1];
+                var a = Math.max(2, workflowCurrentPage - 1),
+                    b = Math.min(totalPages - 1, workflowCurrentPage + 1);
+                if (a > 2) pages.push('...');
+                for (var j = a; j <= b; j++) pages.push(j);
+                if (b < totalPages - 1) pages.push('...');
+                pages.push(totalPages);
+            }
+            pages.forEach(function(pg) {
+                if (pg === '...') {
+                    var dots = document.createElement('span');
+                    dots.className = 'workflow-page-dots';
+                    dots.textContent = '...';
+                    wrap.appendChild(dots);
+                } else addButton(String(pg), pg, false, pg === workflowCurrentPage);
+            });
+            addButton('›', Math.min(totalPages, workflowCurrentPage + 1), workflowCurrentPage === totalPages, false);
+        }
+
+        function renderWorkflowPage() {
+            var desktopAll = document.querySelectorAll('.workflow-row');
+            var mobileAll = document.querySelectorAll('.workflow-mobile-card');
+            var desktopFiltered = getWorkflowFilteredElements('.workflow-row');
+            var mobileFiltered = getWorkflowFilteredElements('.workflow-mobile-card');
+            var total = desktopFiltered.length || mobileFiltered.length;
+            var totalPages = Math.max(1, Math.ceil(total / workflowPageSize));
+            if (workflowCurrentPage > totalPages) workflowCurrentPage = totalPages;
+            var start = (workflowCurrentPage - 1) * workflowPageSize;
+            var end = Math.min(start + workflowPageSize, total);
+
+            desktopAll.forEach(function(el) {
+                el.style.display = 'none';
+            });
+            mobileAll.forEach(function(el) {
+                el.style.display = 'none';
+            });
+            desktopFiltered.slice(start, end).forEach(function(el) {
+                el.style.display = '';
+            });
+            mobileFiltered.slice(start, end).forEach(function(el) {
+                el.style.display = '';
+            });
+
+            var emptyRow = document.getElementById('workflowEmptyRow');
+            if (emptyRow) emptyRow.classList.toggle('hidden', total > 0);
+            var mobileEmpty = document.getElementById('workflowMobileEmpty');
+            if (mobileEmpty) mobileEmpty.classList.toggle('hidden', total > 0);
+
+            var info = document.getElementById('workflowPageInfo');
+            if (info) info.textContent = total > 0 ? ('Menampilkan ' + (start + 1) + '–' + end + ' dari ' + total + ' data') : 'Menampilkan 0 data';
+            var pagination = document.getElementById('workflowPagination');
+            if (pagination) pagination.style.display = total > 0 ? 'flex' : 'none';
+            buildWorkflowPageButtons(totalPages);
+        }
+
+        function applyWorkflowFilter() {
+            workflowCurrentPage = 1;
+            renderWorkflowPage();
+        }
+
+        var workflowSearch = document.getElementById('workflowSearch');
+        if (workflowSearch) {
+            workflowSearch.addEventListener('input', applyWorkflowFilter);
+            workflowSearch.addEventListener('search', applyWorkflowFilter);
+        }
+        var workflowStatus = document.getElementById('workflowStatus');
+        if (workflowStatus) workflowStatus.addEventListener('change', applyWorkflowFilter);
+        var workflowPageSizeSelect = document.getElementById('workflowPageSize');
+        if (workflowPageSizeSelect) {
+            workflowPageSizeSelect.addEventListener('change', function() {
+                workflowPageSize = parseInt(this.value, 10) || 15;
+                workflowCurrentPage = 1;
+                renderWorkflowPage();
+            });
+        }
+        renderWorkflowPage();
+
         function openCreateModal() {
             refreshCreateRecapSummary();
             openModal('createModal');
@@ -1334,6 +2634,20 @@ require_once 'navbar.php';
                     firstVendorInput.focus();
                 }, 80);
             }
+        }
+
+        function handleSourceDateSelection(changed) {
+            if (changed && changed.checked) {
+                var selectedDate = changed.dataset.needDate || '';
+                document.querySelectorAll('.source-check').forEach(function(el) {
+                    if (el !== changed && el.checked && (el.dataset.needDate || '') !== selectedDate) {
+                        el.checked = false;
+                    }
+                });
+            }
+            var checkAll = document.getElementById('checkAllSources');
+            if (checkAll) checkAll.checked = false;
+            refreshCreateRecapSummary();
         }
 
         function toggleAllSources(checked) {
@@ -1432,6 +2746,41 @@ require_once 'navbar.php';
             return m[v] || v
         }
 
+
+        function formatCustomerDate(value) {
+            if (!value) return '-';
+            var parts = String(value).substring(0, 10).split('-');
+            return parts.length === 3 ? parts[2] + '/' + parts[1] + '/' + parts[0] : value;
+        }
+
+        function openCustomerDetail(order) {
+            if (!order) return;
+            document.getElementById('customerDetailTitle').textContent = order.nomor_pesanan || '-';
+            var locations = Array.isArray(order.locations) ? order.locations : [];
+            var locationHtml = locations.map(function(location, index) {
+                var items = Array.isArray(location.items) ? location.items : [];
+                var itemHtml = items.length ? items.map(function(item) {
+                    return '<div class="flex items-start justify-between gap-3 py-3 border-b border-gray-100 last:border-b-0">' +
+                        '<div class="min-w-0"><p class="text-sm font-bold">' + escapeHtml(item.nama_produk || '-') + '</p>' +
+                        (item.catatan_item ? '<p class="text-[10px] text-gray-400 mt-1">' + escapeHtml(item.catatan_item) + '</p>' : '') + '</div>' +
+                        '<div class="text-right shrink-0"><p class="text-lg font-black">' + Number(item.qty || 0).toLocaleString('id-ID') + '</p><p class="text-[8px] uppercase text-gray-400">' + escapeHtml(item.satuan || 'unit') + '</p></div></div>';
+                }).join('') : '<p class="py-3 text-xs text-gray-400">Belum ada rincian produk.</p>';
+                return '<div class="border border-subtle p-4 mb-3"><div class="flex justify-between gap-3"><div><p class="text-[9px] font-bold uppercase tracking-widest text-gray-400">Lokasi ' + (index + 1) + '</p><p class="text-sm font-black mt-1">' + escapeHtml(location.lokasi || '-') + '</p></div></div>' +
+                    (location.catatan ? '<div class="mt-3 border border-amber-100 bg-amber-50 p-3 text-xs text-amber-700">' + escapeHtml(location.catatan) + '</div>' : '') +
+                    '<div class="mt-2">' + itemHtml + '</div></div>';
+            }).join('');
+            var orderDate = order.tanggal_pemesanan || String(order.created_at || '').substring(0, 10);
+            var html = '<div class="grid grid-cols-1 md:grid-cols-2 gap-3">' +
+                '<div class="border border-subtle bg-gray-50 p-4"><p class="text-[9px] font-bold uppercase tracking-widest text-gray-400">Pemesan</p><p class="text-sm font-black mt-1">' + escapeHtml(order.nama_pemesan || '-') + '</p><p class="text-xs text-gray-500 mt-1">' + escapeHtml(order.no_hp || '-') + '</p></div>' +
+                '<div class="border border-subtle bg-gray-50 p-4"><p class="text-[9px] font-bold uppercase tracking-widest text-gray-400">Jadwal</p><p class="text-sm font-black mt-1">Pesan ' + formatCustomerDate(orderDate) + '</p><p class="text-xs text-gray-500 mt-1">Kirim ' + formatCustomerDate(order.tanggal_kirim) + (order.jam_kirim ? ' · ' + String(order.jam_kirim).substring(0, 5) + ' WIB' : '') + '</p></div></div>' +
+                '<div class="grid grid-cols-2 gap-3 mt-3"><div class="border border-subtle p-4"><p class="text-[9px] font-bold uppercase tracking-widest text-gray-400">Total Lokasi</p><p class="text-xl font-black mt-1">' + Number(order.total_lokasi || locations.length).toLocaleString('id-ID') + '</p></div><div class="border border-subtle p-4"><p class="text-[9px] font-bold uppercase tracking-widest text-gray-400">Total Produk</p><p class="text-xl font-black text-blue-600 mt-1">' + Number(order.total_unit || 0).toLocaleString('id-ID') + ' unit</p></div></div>' +
+                '<div class="mt-5"><p class="text-[10px] font-bold uppercase tracking-widest text-gray-400 mb-3">Rincian Distribusi</p>' + (locationHtml || '<div class="border border-subtle p-5 text-center text-xs text-gray-400">Belum ada rincian lokasi.</div>') + '</div>' +
+                (order.catatan ? '<div class="mt-4 border border-amber-100 bg-amber-50 p-4"><p class="text-[9px] font-bold uppercase tracking-widest text-amber-700">Catatan Pesanan</p><p class="text-xs text-amber-700 mt-1">' + escapeHtml(order.catatan) + '</p></div>' : '');
+            document.getElementById('customerDetailBody').innerHTML = html;
+            openModal('customerDetailModal');
+            if (window.lucide) lucide.createIcons();
+        }
+
         function openDetail(order) {
             document.getElementById('detailTitle').textContent = order.nomor_vendor_order || '-';
             var details = Array.isArray(order.details) ? order.details : [];
@@ -1443,10 +2792,13 @@ require_once 'navbar.php';
             var sourceHtml = sources.map(function(s) {
                 return '<span class="inline-flex border border-gray-200 px-2 py-1 text-[9px] font-bold">' + escapeHtml(s.nomor_pesanan) + ' · ' + escapeHtml(s.nama_pemesan) + '</span>'
             }).join(' ');
-            document.getElementById('detailBody').innerHTML = '<div class="grid grid-cols-1 md:grid-cols-3 gap-3 mb-5"><div class="border border-subtle bg-gray-50 p-4"><p class="text-[9px] font-bold uppercase text-gray-400">Vendor</p><p class="text-sm font-bold mt-1">' + escapeHtml(order.vendor_nama) + '</p><p class="text-xs text-gray-400 mt-1">' + escapeHtml(order.vendor_wa || '-') + '</p></div><div class="border border-subtle bg-gray-50 p-4"><p class="text-[9px] font-bold uppercase text-gray-400">Tanggal Kebutuhan</p><p class="text-sm font-bold mt-1">' + formatDate(order.tanggal_kebutuhan) + '</p></div><div class="border border-subtle bg-gray-50 p-4"><p class="text-[9px] font-bold uppercase text-gray-400">Status</p><p class="text-sm font-bold mt-1">' + escapeHtml(statusLabel(order.status)) + '</p></div></div><div class="border border-subtle overflow-x-auto"><table class="w-full min-w-[760px]"><thead class="bg-gray-50 border-b border-subtle"><tr><th class="px-4 py-3 text-left text-[9px] uppercase text-gray-400">Produk</th><th class="px-4 py-3 text-center text-[9px] uppercase text-gray-400">Diminta</th><th class="px-4 py-3 text-center text-[9px] uppercase text-gray-400">Dipesan</th><th class="px-4 py-3 text-center text-[9px] uppercase text-gray-400">Konfirmasi</th><th class="px-4 py-3 text-center text-[9px] uppercase text-gray-400">Diterima</th><th class="px-4 py-3 text-center text-[9px] uppercase text-gray-400">Kekurangan</th></tr></thead><tbody class="divide-y divide-[#f5f5f5]">' + rows + '</tbody></table></div><div class="mt-5"><p class="text-[9px] font-bold uppercase tracking-widest text-gray-400 mb-2">Sumber Pesanan Pelanggan</p><div class="flex flex-wrap gap-2">' + (sourceHtml || '<span class="text-xs text-gray-400">Tidak ada data.</span>') + '</div></div>' + (order.catatan ? '<div class="mt-5 border border-amber-100 bg-amber-50 p-4 text-xs text-amber-700">' + escapeHtml(order.catatan) + '</div>' : '') + '<form method="post" class="mt-5 grid grid-cols-[1fr_auto] gap-2"><input type="hidden" name="action" value="update_vendor_status"><input type="hidden" name="vendor_order_id" value="' + Number(order.id || 0) + '"><select name="status" class="field"><option value="draft">Draft</option><option value="dikirim">Dikirim ke Vendor</option><option value="dikonfirmasi">Dikonfirmasi</option><option value="diterima">Barang Diterima</option><option value="selesai">Selesai</option><option value="batal">Batal</option></select><button class="btn bg-black text-white">Update Status</button></form>';
-            var sel = document.querySelector('#detailBody select[name="status"]');
-            if (sel) sel.value = order.status || 'draft';
+            document.getElementById('detailBody').innerHTML = '<div class="grid grid-cols-1 md:grid-cols-3 gap-3 mb-5"><div class="border border-subtle bg-gray-50 p-4"><p class="text-[9px] font-bold uppercase text-gray-400">Vendor</p><p class="text-sm font-bold mt-1">' + escapeHtml(order.vendor_nama) + '</p><p class="text-xs text-gray-400 mt-1">' + escapeHtml(order.vendor_wa || '-') + '</p></div><div class="border border-subtle bg-gray-50 p-4"><p class="text-[9px] font-bold uppercase text-gray-400">Tanggal Kebutuhan</p><p class="text-sm font-bold mt-1">' + formatDate(order.tanggal_kebutuhan) + '</p></div><div class="border border-subtle bg-gray-50 p-4"><p class="text-[9px] font-bold uppercase text-gray-400">Status</p><p class="text-sm font-bold mt-1">' + escapeHtml(statusLabel(order.status)) + '</p></div></div><div class="border border-subtle overflow-x-auto"><table class="w-full min-w-[760px]"><thead class="bg-gray-50 border-b border-subtle"><tr><th class="px-4 py-3 text-left text-[9px] uppercase text-gray-400">Produk</th><th class="px-4 py-3 text-center text-[9px] uppercase text-gray-400">Diminta</th><th class="px-4 py-3 text-center text-[9px] uppercase text-gray-400">Dipesan</th><th class="px-4 py-3 text-center text-[9px] uppercase text-gray-400">Konfirmasi</th><th class="px-4 py-3 text-center text-[9px] uppercase text-gray-400">Diterima</th><th class="px-4 py-3 text-center text-[9px] uppercase text-gray-400">Kekurangan</th></tr></thead><tbody class="divide-y divide-[#f5f5f5]">' + rows + '</tbody></table></div><div class="mt-5"><p class="text-[9px] font-bold uppercase tracking-widest text-gray-400 mb-2">Sumber Pesanan Pelanggan</p><div class="flex flex-wrap gap-2">' + (sourceHtml || '<span class="text-xs text-gray-400">Tidak ada data.</span>') + '</div></div>' + (order.catatan ? '<div class="mt-5 border border-amber-100 bg-amber-50 p-4 text-xs text-amber-700">' + escapeHtml(order.catatan) + '</div>' : '') + '<div class="mt-5 flex flex-wrap justify-end gap-2"><button type="button" id="detailVendorWaBtn" class="btn bg-black text-white"><span class="inline-flex items-center gap-2"><i data-lucide="message-circle" class="w-3.5 h-3.5"></i>Kirim WA Vendor</span></button></div>';
+            var waBtn = document.getElementById('detailVendorWaBtn');
+            if (waBtn) waBtn.onclick = function() {
+                sendWhatsApp(order);
+            };
             openModal('detailModal');
+            if (window.lucide) lucide.createIcons();
         }
 
         function openQuantity(order) {
@@ -1457,7 +2809,22 @@ require_once 'navbar.php';
             details.forEach(function(d, i) {
                 html += '<tr><td class="px-4 py-3"><input type="hidden" name="detail_id[]" value="' + Number(d.id || 0) + '"><p class="text-xs font-bold">' + escapeHtml(d.nama_produk) + '</p><p class="text-[9px] text-gray-400">Diminta ' + Number(d.jumlah_diminta || 0).toLocaleString('id-ID') + ' ' + escapeHtml(d.satuan) + '</p></td><td class="px-4 py-3 text-center font-bold text-blue-600">' + Number(d.jumlah_dipesan || 0).toLocaleString('id-ID') + '</td><td class="px-4 py-3"><input type="number" name="jumlah_dikonfirmasi[]" min="0" value="' + Number(d.jumlah_dikonfirmasi || 0) + '" class="field text-center"></td><td class="px-4 py-3"><input type="number" name="jumlah_diterima[]" min="0" value="' + Number(d.jumlah_diterima || 0) + '" class="field text-center"></td></tr>'
             });
-            html += '</tbody></table></div><div class="mt-4 border border-blue-100 bg-blue-50 p-4 text-xs text-blue-700">Isi jumlah yang benar-benar dikonfirmasi dan diterima. Jika ada penerimaan, pesanan pelanggan otomatis menjadi <strong>Siap Dikirim</strong>.</div>';
+            html += '</tbody></table></div>';
+            html += '<div class="mt-4">' +
+                '<label class="block text-[9px] font-bold uppercase tracking-widest text-gray-500 mb-2">Catatan Pengiriman / Catatan Vendor</label>' +
+                '<textarea name="catatan" class="field" rows="4" placeholder="Contoh: barang diterima lengkap, kurang 2 unit, kemasan rusak, atau catatan penerimaan lainnya.">' + escapeHtml(order.catatan || '') + '</textarea>' +
+                '<p class="text-[9px] text-gray-400 mt-2">Catatan disimpan bersamaan dengan jumlah barang yang dikonfirmasi dan diterima.</p>' +
+                '</div>';
+            var existingSuratJalan = String(order.surat_jalan_vendor || '');
+            html += '<div class="mt-4">' +
+                '<label class="block text-[9px] font-bold uppercase tracking-widest text-gray-500 mb-2">Surat Jalan dari Vendor</label>' +
+                '<div class="border border-dashed border-gray-300 bg-gray-50 p-4">' +
+                '<input type="file" name="surat_jalan_vendor" accept="image/jpeg,image/png,image/webp,application/pdf,.jpg,.jpeg,.png,.webp,.pdf" class="block w-full text-xs text-gray-600 file:mr-3 file:border-0 file:bg-black file:px-4 file:py-2.5 file:text-[9px] file:font-bold file:uppercase file:text-white">' +
+                '<p class="mt-2 text-[9px] leading-relaxed text-gray-400">Upload foto/scan surat jalan vendor. Format JPG, PNG, WebP, atau PDF maksimal 8 MB.</p>' +
+                (existingSuratJalan ? '<div class="mt-3 flex flex-wrap items-center gap-2 border-t border-gray-200 pt-3"><span class="text-[9px] font-bold uppercase text-green-700">Surat jalan sudah tersimpan</span><a href="' + escapeHtml(existingSuratJalan) + '" target="_blank" rel="noopener" class="text-[9px] font-bold uppercase text-blue-700 underline">Lihat File</a><span class="text-[9px] text-gray-400">Upload baru untuk mengganti file lama.</span></div>' : '') +
+                '</div>' +
+                '</div>';
+            html += '<div class="mt-4 border border-blue-100 bg-blue-50 p-4 text-xs text-blue-700">Isi jumlah yang benar-benar diterima di lokasi. Karena vendor mengirim langsung ke lokasi tujuan, setelah penerimaan disimpan pesanan otomatis menjadi <strong>Selesai</strong>.</div>';
             document.getElementById('quantityBody').innerHTML = html;
             openModal('quantityModal')
         }
@@ -1478,8 +2845,7 @@ require_once 'navbar.php';
 
             var details = Array.isArray(order.details) ? order.details : [];
             var deliveryLocations = order.delivery_locations && typeof order.delivery_locations === 'object' ?
-                order.delivery_locations :
-                {};
+                order.delivery_locations : {};
 
             var lines = [
                 'Permintaan Air Mineral',
@@ -1538,7 +2904,7 @@ require_once 'navbar.php';
         });
         document.addEventListener('keydown', function(e) {
             if (e.key === 'Escape') {
-                ['createModal', 'detailModal', 'quantityModal'].forEach(closeModal)
+                ['createModal', 'customerDetailModal', 'detailModal', 'quantityModal'].forEach(closeModal)
             }
         });
         if (window.lucide) lucide.createIcons();

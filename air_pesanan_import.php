@@ -486,6 +486,7 @@ $lokasiPilihan = [
     'Kartika',
     'Auditorium',
     'Serba Guna',
+    'GOR',
     'Cakra 1',
     'Cakra 2',
     'Cakra 3',
@@ -935,7 +936,7 @@ require_once 'navbar.php';
                 <div class="mt-6 flex items-center justify-between gap-3">
                     <div>
                         <p class="section-label">Rincian Produk & Lokasi</p>
-                        <p class="text-xs text-gray-400 mt-1">Tambahkan satu atau beberapa baris sesuai data lama. Lokasi dipilih langsung dari daftar yang tersedia.</p>
+                        <p class="text-xs text-gray-400 mt-1">Tambahkan satu atau beberapa baris sesuai data lama. Lokasi menggunakan daftar yang sama seperti form pemesanan air.</p>
                     </div>
                     <button type="button" onclick="addItemRow()" class="btn border border-gray-200 bg-white text-gray-700">
                         <i data-lucide="plus" class="w-4 h-4"></i>
@@ -974,6 +975,7 @@ require_once 'navbar.php';
                         <p class="text-xs text-gray-400 mt-2 leading-5">
                             Satu nomor pesanan boleh memiliki beberapa baris untuk lokasi atau produk yang berbeda.
                             Sistem akan menggabungkan baris dengan nomor pesanan yang sama.
+                            Nama lokasi harus sama dengan daftar lokasi pada form pemesanan air.
                         </p>
 
                         <div class="mt-5 border border-dashed border-gray-300 bg-gray-50 p-5">
@@ -1017,7 +1019,7 @@ require_once 'navbar.php';
             <div>
                 <label class="section-label block mb-2">Lokasi *</label>
                 <select class="field item-location" required>
-                    <option value="">Pilih lokasi pengantaran...</option>
+                    <option value="">Pilih lokasi...</option>
                     <?php foreach ($lokasiPilihan as $lokasi): ?>
                         <option value="<?php echo api_h($lokasi); ?>">
                             <?php echo api_h($lokasi); ?>

@@ -871,23 +871,19 @@ if (has_role('air_mineral', 'admin')) {
                 ? "COALESCE(p.tanggal_pemesanan, DATE(p.created_at))"
                 : "DATE(p.created_at)";
 
-            $stmtAirSummary = $pdo->prepare("\n                SELECT\n                    COUNT(*) AS total,\n                    COALESCE(SUM(CASE WHEN p.status = 'baru' THEN 1 ELSE 0 END),0) AS baru,\n                    COALESCE(SUM(CASE WHEN p.status = 'diproses' THEN 1 ELSE 0 END),0) AS diproses,\n                    COALESCE(SUM(CASE WHEN p.status = 'siap_dikirim' THEN 1 ELSE 0 END),0) AS siap_dikirim,\n                    COALESCE(SUM(CASE WHEN p.status = 'dalam_pengiriman' THEN 1 ELSE 0 END),0) AS dalam_pengiriman,\n                    COALESCE(SUM(CASE WHEN p.status = 'selesai' THEN 1 ELSE 0 END),0) AS selesai,\n                    COALESCE(SUM(CASE WHEN p.status = 'batal' THEN 1 ELSE 0 END),0) AS batal,\n                    COALESCE(SUM((SELECT COALESCE(SUM(d.qty),0) FROM air_pesanan_detail d WHERE d.pesanan_id = p.id)),0) AS total_unit,\n                    COALESCE(SUM((SELECT COUNT(*) FROM air_pesanan_lokasi l WHERE l.pesanan_id = p.id)),0) AS total_lokasi\n                FROM air_pesanan p\n                WHERE $tanggalPesanExpr = :today\n            ");
-            $stmtAirSummary->execute([':today' => $today]);
+            $stmtAirSummary = $pdo->query("\n                SELECT\n                    COALESCE(SUM(CASE WHEN LOWER(TRIM(COALESCE(p.status,''))) <> 'batal' THEN 1 ELSE 0 END),0) AS total,\n                    COALESCE(SUM(CASE WHEN p.status = 'baru' THEN 1 ELSE 0 END),0) AS baru,\n                    COALESCE(SUM(CASE WHEN p.status = 'diproses' THEN 1 ELSE 0 END),0) AS diproses,\n                    COALESCE(SUM(CASE WHEN p.status = 'siap_dikirim' THEN 1 ELSE 0 END),0) AS siap_dikirim,\n                    COALESCE(SUM(CASE WHEN p.status = 'dalam_pengiriman' THEN 1 ELSE 0 END),0) AS dalam_pengiriman,\n                    COALESCE(SUM(CASE WHEN p.status = 'selesai' THEN 1 ELSE 0 END),0) AS selesai,\n                    COALESCE(SUM(CASE WHEN p.status = 'batal' THEN 1 ELSE 0 END),0) AS batal,\n                    COALESCE(SUM(CASE WHEN LOWER(TRIM(COALESCE(p.status,''))) <> 'batal' THEN (SELECT COALESCE(SUM(d.qty),0) FROM air_pesanan_detail d WHERE d.pesanan_id = p.id) ELSE 0 END),0) AS total_unit,\n                    COALESCE(SUM(CASE WHEN LOWER(TRIM(COALESCE(p.status,''))) <> 'batal' THEN (SELECT COUNT(*) FROM air_pesanan_lokasi l WHERE l.pesanan_id = p.id) ELSE 0 END),0) AS total_lokasi\n                FROM air_pesanan p\n            ");
             $airSummary = array_merge($airSummary, $stmtAirSummary->fetch(PDO::FETCH_ASSOC) ?: []);
 
-            $stmtAirLatest = $pdo->prepare("\n                SELECT p.id, p.nomor_pesanan, p.status, p.tanggal_pemesanan, p.tanggal_kirim, p.created_at,\n                       c.nama AS nama_pemesan, c.no_hp,\n                       COALESCE((SELECT SUM(d.qty) FROM air_pesanan_detail d WHERE d.pesanan_id = p.id),0) AS total_unit,\n                       COALESCE((SELECT COUNT(*) FROM air_pesanan_lokasi l WHERE l.pesanan_id = p.id),0) AS total_lokasi,\n                       (SELECT GROUP_CONCAT(l.lokasi ORDER BY l.urutan, l.id SEPARATOR ' • ') FROM air_pesanan_lokasi l WHERE l.pesanan_id = p.id) AS daftar_lokasi\n                FROM air_pesanan p\n                JOIN air_pelanggan c ON c.id = p.pelanggan_id\n                WHERE $tanggalPesanExpr = :today\n                ORDER BY FIELD(p.status,'baru','diproses','siap_dikirim','dalam_pengiriman','selesai','batal'), p.id DESC\n                LIMIT 8\n            ");
-            $stmtAirLatest->execute([':today' => $today]);
+            $stmtAirLatest = $pdo->query("\n                SELECT p.id, p.nomor_pesanan, p.status, p.tanggal_pemesanan, p.tanggal_kirim, p.created_at,\n                       c.nama AS nama_pemesan, c.no_hp,\n                       COALESCE((SELECT SUM(d.qty) FROM air_pesanan_detail d WHERE d.pesanan_id = p.id),0) AS total_unit,\n                       COALESCE((SELECT COUNT(*) FROM air_pesanan_lokasi l WHERE l.pesanan_id = p.id),0) AS total_lokasi,\n                       (SELECT GROUP_CONCAT(l.lokasi ORDER BY l.urutan, l.id SEPARATOR ' • ') FROM air_pesanan_lokasi l WHERE l.pesanan_id = p.id) AS daftar_lokasi\n                FROM air_pesanan p\n                JOIN air_pelanggan c ON c.id = p.pelanggan_id\n                ORDER BY FIELD(p.status,'baru','diproses','siap_dikirim','dalam_pengiriman','selesai','batal'), p.id DESC\n                LIMIT 8\n            ");
             $airPesananTerbaru = $stmtAirLatest->fetchAll(PDO::FETCH_ASSOC);
 
             if (dashboard_has_table($pdo, 'air_pesanan_detail')) {
-                $stmtAirProduk = $pdo->prepare("\n                    SELECT d.nama_produk, COALESCE(SUM(d.qty),0) AS total_qty\n                    FROM air_pesanan_detail d\n                    JOIN air_pesanan p ON p.id = d.pesanan_id\n                    WHERE $tanggalPesanExpr = :today\n                      AND p.status <> 'batal'\n                    GROUP BY d.nama_produk\n                    ORDER BY total_qty DESC, d.nama_produk ASC\n                    LIMIT 6\n                ");
-                $stmtAirProduk->execute([':today' => $today]);
+                $stmtAirProduk = $pdo->query("\n                    SELECT d.nama_produk, COALESCE(SUM(d.qty),0) AS total_qty\n                    FROM air_pesanan_detail d\n                    JOIN air_pesanan p ON p.id = d.pesanan_id\n                    WHERE p.status <> 'batal'\n                    GROUP BY d.nama_produk\n                    ORDER BY total_qty DESC, d.nama_produk ASC\n                    LIMIT 6\n                ");
                 $airRekapProduk = $stmtAirProduk->fetchAll(PDO::FETCH_ASSOC);
             }
 
             if (dashboard_has_table($pdo, 'air_pesanan_lokasi') && dashboard_has_table($pdo, 'air_pesanan_detail')) {
-                $stmtAirLokasi = $pdo->prepare("\n                    SELECT l.lokasi, COALESCE(SUM(d.qty),0) AS total_qty, COUNT(DISTINCT l.pesanan_id) AS total_pesanan\n                    FROM air_pesanan_lokasi l\n                    JOIN air_pesanan p ON p.id = l.pesanan_id\n                    LEFT JOIN air_pesanan_detail d ON d.lokasi_id = l.id\n                    WHERE $tanggalPesanExpr = :today\n                      AND p.status <> 'batal'\n                    GROUP BY l.lokasi\n                    ORDER BY total_qty DESC, l.lokasi ASC\n                    LIMIT 8\n                ");
-                $stmtAirLokasi->execute([':today' => $today]);
+                $stmtAirLokasi = $pdo->query("\n                    SELECT l.lokasi, COALESCE(SUM(d.qty),0) AS total_qty, COUNT(DISTINCT l.pesanan_id) AS total_pesanan\n                    FROM air_pesanan_lokasi l\n                    JOIN air_pesanan p ON p.id = l.pesanan_id\n                    LEFT JOIN air_pesanan_detail d ON d.lokasi_id = l.id\n                    WHERE p.status <> 'batal'\n                    GROUP BY l.lokasi\n                    ORDER BY total_qty DESC, l.lokasi ASC\n                    LIMIT 8\n                ");
                 $airRekapLokasi = $stmtAirLokasi->fetchAll(PDO::FETCH_ASSOC);
             }
         }
@@ -2448,7 +2444,7 @@ $title = 'Dashboard - ' . ($_SESSION['nama'] ?? 'SEJAHUB');
                 <div class="dashboard-section-title flex flex-col md:flex-row md:items-end md:justify-between gap-3">
                     <div>
                         <p class="text-[10px] font-black uppercase tracking-widest text-gray-400">Operasional Air Mineral</p>
-                        <h2 class="text-lg md:text-xl font-black tracking-tight mt-1">Pesanan dan Distribusi Hari Ini</h2>
+                        <h2 class="text-lg md:text-xl font-black tracking-tight mt-1">Pesanan dan Distribusi Keseluruhan</h2>
                         <p class="text-xs text-gray-400 mt-1">Ringkasan pesanan publik, lokasi pengantaran, dan jumlah produk.</p>
                     </div>
                     <a href="air_pesanan.php" class="inline-flex min-h-[42px] items-center justify-center gap-2 bg-black px-4 text-[10px] font-black uppercase tracking-widest text-white">
@@ -2490,7 +2486,7 @@ $title = 'Dashboard - ' . ($_SESSION['nama'] ?? 'SEJAHUB');
                     <div class="kas-monitor-card p-4 col-span-2 md:col-span-1">
                         <p class="text-[9px] font-black uppercase tracking-widest text-gray-400">Total Produk</p>
                         <p class="text-2xl font-black text-blue-600 mt-2"><?php echo number_format((int)$airSummary['total_unit']); ?></p>
-                        <p class="text-[9px] text-gray-400 mt-1"><?php echo number_format((int)$airSummary['total_lokasi']); ?> lokasi</p>
+                        <p class="text-[9px] text-gray-400 mt-1"><?php echo number_format((int)$airSummary['total_lokasi']); ?> lokasi • tidak termasuk pesanan batal</p>
                     </div>
                 </div>
 
@@ -2499,13 +2495,13 @@ $title = 'Dashboard - ' . ($_SESSION['nama'] ?? 'SEJAHUB');
                         <div class="px-5 py-4 border-b border-gray-100 flex items-center justify-between gap-3">
                             <div>
                                 <p class="text-[10px] font-black uppercase tracking-widest text-gray-400">Pesanan Air Terbaru</p>
-                                <p class="text-xs text-gray-400 mt-1">Pesanan yang masuk hari ini</p>
+                                <p class="text-xs text-gray-400 mt-1">Pesanan terbaru dari seluruh data</p>
                             </div>
                             <a href="air_pesanan.php" class="text-[9px] font-black uppercase tracking-widest underline">Lihat Semua</a>
                         </div>
                         <div class="divide-y divide-gray-100">
                             <?php if (empty($airPesananTerbaru)): ?>
-                                <div class="p-10 text-center text-xs font-bold text-gray-400">Belum ada pesanan air hari ini.</div>
+                                <div class="p-10 text-center text-xs font-bold text-gray-400">Belum ada data pesanan air.</div>
                             <?php endif; ?>
                             <?php foreach ($airPesananTerbaru as $order): ?>
                                 <?php $airStatus = strtolower((string)($order['status'] ?? 'baru')); ?>
@@ -2529,7 +2525,7 @@ $title = 'Dashboard - ' . ($_SESSION['nama'] ?? 'SEJAHUB');
                     </div>
 
                     <div class="kas-monitor-card p-5">
-                        <p class="text-[10px] font-black uppercase tracking-widest text-gray-400">Rekap Produk Hari Ini</p>
+                        <p class="text-[10px] font-black uppercase tracking-widest text-gray-400">Rekap Produk Keseluruhan</p>
                         <p class="text-xs text-gray-400 mt-1 mb-4">Jumlah produk seluruh lokasi</p>
                         <div class="space-y-3">
                             <?php if (empty($airRekapProduk)): ?><p class="py-8 text-center text-xs text-gray-400">Belum ada produk dipesan.</p><?php endif; ?>
@@ -2547,7 +2543,7 @@ $title = 'Dashboard - ' . ($_SESSION['nama'] ?? 'SEJAHUB');
                     <div class="flex items-center justify-between gap-3 mb-4">
                         <div>
                             <p class="text-[10px] font-black uppercase tracking-widest text-gray-400">Distribusi per Lokasi</p>
-                            <p class="text-xs text-gray-400 mt-1">Lokasi dengan kebutuhan terbanyak hari ini</p>
+                            <p class="text-xs text-gray-400 mt-1">Lokasi dengan kebutuhan terbanyak dari seluruh data</p>
                         </div>
                         <a href="air_pesanan.php" class="text-[9px] font-black uppercase tracking-widest underline">Detail</a>
                     </div>

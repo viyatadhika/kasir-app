@@ -247,6 +247,7 @@ $lokasiPilihan = [
     'Kartika',
     'Auditorium',
     'Serba Guna',
+    'GOR',
     'Cakra 1',
     'Cakra 2',
     'Cakra 3',

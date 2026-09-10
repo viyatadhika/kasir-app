@@ -27,6 +27,7 @@ if (!isset($activeMenu)) {
         'promo_cafe.php'           => 'promo_cafe',
         'air_pesanan.php'          => 'air_pesanan',
         'air_rekap_vendor.php'     => 'air_rekap_vendor',
+        'air_tagihan_vendor.php'   => 'air_tagihan_vendor',
         'air_kwitansi.php'         => 'air_kwitansi',
         'air_produk.php'           => 'air_produk',
         'produk.php'               => 'produk',
@@ -79,6 +80,24 @@ if (!function_exists('sidebar_can_show')) {
 
         if (function_exists('normalizeRoleName')) {
             $role = normalizeRoleName($role);
+        }
+
+        // Fallback khusus role Air Mineral. Ini mencegah sidebar hanya
+        // menampilkan Dashboard/Laporan ketika nilai role di session memakai
+        // variasi nama seperti "Air Mineral", "petugas air", atau "admin air".
+        if ((string)$role === 'air_mineral') {
+            $airMenus = array(
+                'dashboard',
+                'air_pesanan',
+                'air_rekap_vendor',
+                'air_tagihan_vendor',
+                'air_kwitansi',
+                'air_produk',
+                'laporan',
+            );
+            if (in_array((string)$menu['key'], $airMenus, true)) {
+                return true;
+            }
         }
 
         // Fallback khusus supaya menu kas tetap muncul untuk akun Kasir,
@@ -170,8 +189,9 @@ $menuGroups = array(
         'title' => 'Air Mineral',
         'items' => array(
             array('key' => 'air_pesanan',      'href' => 'air_pesanan.php',      'label' => 'Pemesanan Air'),
-            array('key' => 'air_rekap_vendor', 'href' => 'air_rekap_vendor.php', 'label' => 'Rekap Vendor'),
-            array('key' => 'air_kwitansi',     'href' => 'air_kwitansi.php',     'label' => 'Kwitansi Penagihan'),
+            array('key' => 'air_rekap_vendor',   'href' => 'air_rekap_vendor.php',   'label' => 'Rekap Vendor'),
+            array('key' => 'air_tagihan_vendor', 'href' => 'air_tagihan_vendor.php', 'label' => 'Tagihan Vendor'),
+            array('key' => 'air_kwitansi',       'href' => 'air_kwitansi.php',       'label' => 'Kwitansi Penagihan'),
             array('key' => 'air_produk',       'href' => 'air_produk.php',       'label' => 'Master Produk'),
         ),
     ),

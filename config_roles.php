@@ -47,11 +47,9 @@ define('ROLE_ACCESS', [
             'menu_cafe.php',
             'meja_cafe.php',
             'dapur.php',
-            'promo_cafe.php',
             'kas_harian.php',
             'laporan.php',
             'struk.php',
-            'struk_cafe.php',
         ],
         'menus' => [
             'dashboard',
@@ -59,7 +57,6 @@ define('ROLE_ACCESS', [
             'menu_cafe',
             'meja_cafe',
             'dapur',
-            'promo_cafe',
             'kas_harian',
             'laporan',
         ],
@@ -78,6 +75,7 @@ define('ROLE_ACCESS', [
             'air_pesanan.php',
             'air_pesanan_import.php',
             'air_rekap_vendor.php',
+            'air_tagihan_vendor.php',
             'air_kwitansi.php',
             'air_produk.php',
             'laporan.php',
@@ -86,6 +84,7 @@ define('ROLE_ACCESS', [
             'dashboard',
             'air_pesanan',
             'air_rekap_vendor',
+            'air_tagihan_vendor',
             'air_kwitansi',
             'air_produk',
             'laporan',
@@ -131,7 +130,7 @@ define('ROLE_ACCESS', [
 |--------------------------------------------------------------------------
 | Halaman Publik
 |--------------------------------------------------------------------------
-| pesan_air.php dan lacak_air.php dapat dibuka tanpa login.
+| pesan_air.php dapat dibuka pelanggan tanpa login.
 */
 define('PUBLIC_PAGES', [
     'index.php',

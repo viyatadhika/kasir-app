@@ -15,13 +15,13 @@ $isKasirOnly   = has_role('kasir') && !$isAdmin;
 $isCafeOnly    = has_role('cafe') && !$isAdmin;
 $isMurniRental = has_role('rental') && !$isAdmin;
 $isMurniKsp    = has_role('ksp') && !$isAdmin;
-$isAirOnly      = has_role('air_mineral') && !$isAdmin;
+$isAirOnly      = (has_role('air_mineral') || has_role('air')) && !$isAdmin;
 $showTabs      = $isAdmin; // admin melihat seluruh modul melalui tab
 $isKasir       = has_role('admin', 'kasir');   // admin + kasir toko
 $isCafe        = has_role('admin', 'cafe');    // admin + kasir cafe
 $isRental      = has_role('admin', 'rental');  // admin + rental
 $isKsp         = has_role('admin', 'ksp');     // admin + ksp
-$isAirMineral  = has_role('admin', 'air_mineral'); // admin + petugas air mineral
+$isAirMineral  = has_role('admin', 'air_mineral') || has_role('air'); // admin + petugas air mineral (alias role air didukung)
 
 // ── Helper functions ─────────────────────────────────────────────────────────
 if (!function_exists('rupiah')) {
@@ -117,9 +117,14 @@ if (!function_exists('laporan_table_exists')) {
     function laporan_table_exists(PDO $pdo, string $table): bool
     {
         try {
-            $stmt = $pdo->prepare("SHOW TABLES LIKE :table_name");
+            $stmt = $pdo->prepare("
+                SELECT COUNT(*)
+                FROM INFORMATION_SCHEMA.TABLES
+                WHERE TABLE_SCHEMA = DATABASE()
+                  AND TABLE_NAME = :table_name
+            ");
             $stmt->execute([':table_name' => $table]);
-            return (bool)$stmt->fetchColumn();
+            return (int)$stmt->fetchColumn() > 0;
         } catch (Throwable $e) {
             return false;
         }
@@ -317,6 +322,7 @@ $airSummary = [
     'status_baru' => 0,
     'status_diproses' => 0,
     'status_siap_dikirim' => 0,
+    'status_dalam_pengiriman' => 0,
     'pesanan_selesai' => 0,
     'pesanan_batal' => 0,
     'data_migrasi' => 0,
@@ -338,6 +344,7 @@ $airProduk = [];
 $airLokasi = [];
 $airVendor = [];
 $airKwitansi = [];
+$airLoadErrors = [];
 
 // ════════════════════════════════════════════════════════════════════════════
 // DATA: ADMIN & KASIR — Transaksi POS
@@ -525,93 +532,63 @@ if ($isKasir) {
 
 
 // ════════════════════════════════════════════════════════════════════════════
-// DATA: CAFE — Transaksi POS Cafe
+// DATA: CAFE — transaksi yang SUDAH LUNAS berdasarkan cafe_pesanan.paid_at
 // ════════════════════════════════════════════════════════════════════════════
 if ($isCafe) {
-    $cafeHasSource = transaksi_col_exists($pdo, 'sumber_transaksi');
-    $cafeStatusColumn = transaksi_col_exists($pdo, 'status_transaksi')
-        ? 'status_transaksi'
-        : (transaksi_col_exists($pdo, 'status') ? 'status' : '');
-
-    $cafeWhereStatus = $cafeStatusColumn !== ''
-        ? " AND LOWER(COALESCE(t.`{$cafeStatusColumn}`,'')) NOT IN ('batal','cancel','cancelled','void')"
-        : '';
-
-    /*
-     * Identifikasi transaksi Cafe dibuat fleksibel.
-     *
-     * Sebelumnya laporan hanya membaca t.sumber_transaksi = 'cafe'.
-     * Bahkan jika kolom sumber_transaksi tidak tersedia, kondisi menjadi
-     * AND 1=0 sehingga seluruh laporan Cafe pasti kosong.
-     *
-     * Sekarang transaksi dianggap Cafe jika salah satu benar:
-     * 1. sumber_transaksi = 'cafe';
-     * 2. transaksi sudah terhubung ke cafe_pesanan;
-     * 3. transaksi_detail berisi produk dengan tipe_produk = 'cafe'.
-     */
-    $cafeSourceConditions = [];
-
-    if ($cafeHasSource) {
-        $cafeSourceConditions[] = "LOWER(TRIM(COALESCE(t.sumber_transaksi,''))) = 'cafe'";
-    }
-
-    if (laporan_table_exists($pdo, 'cafe_pesanan')) {
-        $cafeSourceConditions[] = "EXISTS (
-            SELECT 1
-            FROM cafe_pesanan cp_src
-            WHERE cp_src.transaksi_id = t.id
-        )";
-    }
-
-    if (laporan_table_exists($pdo, 'transaksi_detail') && laporan_table_exists($pdo, 'produk')) {
-        $cafeSourceConditions[] = "EXISTS (
-            SELECT 1
-            FROM transaksi_detail td_src
-            LEFT JOIN produk p_src ON p_src.id = td_src.produk_id
-            WHERE td_src.transaksi_id = t.id
-              AND LOWER(TRIM(COALESCE(p_src.tipe_produk,''))) = 'cafe'
-        )";
-    }
-
-    $cafeWhereSource = $cafeSourceConditions
-        ? " AND (" . implode(" OR ", $cafeSourceConditions) . ")"
-        : "";
-
-    /*
-     * Rentang laporan Cafe memakai tanggal transaksi langsung.
-     * Jangan mewajibkan transaksi berada di sesi kas_harian karena:
-     * - pesanan Cafe bisa dibuat sebelum pembayaran;
-     * - pembayaran bisa dilakukan belakangan;
-     * - data lama belum tentu punya pasangan sesi kas_harian.
-     */
-    $cafeWherePeriode = " AND DATE(t.created_at) BETWEEN :awal AND :akhir";
-
-    $cafeMetodeCandidates = [];
-    foreach (['metode_pembayaran', 'payment_method', 'metode', 'jenis_pembayaran', 'tipe_pembayaran'] as $column) {
-        if (transaksi_col_exists($pdo, $column)) {
-            $cafeMetodeCandidates[] = "NULLIF(TRIM(CAST(t.`{$column}` AS CHAR)), '')";
-        }
-    }
-
-    if ($cafeMetodeCandidates) {
-        $cafeNonTunaiCandidates = [];
-        foreach ($cafeMetodeCandidates as $candidateSql) {
-            $cafeNonTunaiCandidates[] = "CASE WHEN LOWER({$candidateSql}) NOT IN ('tunai','cash') THEN {$candidateSql} END";
-        }
-        $cafeMetodeSql = 'COALESCE(' . implode(', ', $cafeNonTunaiCandidates) . ', ' . implode(', ', $cafeMetodeCandidates) . ", 'tunai')";
-    } else {
-        $cafeMetodeSql = "'tunai'";
-    }
-
     try {
+        if (!laporan_table_exists($pdo, 'cafe_pesanan')) {
+            throw new RuntimeException('Tabel cafe_pesanan tidak ditemukan.');
+        }
+        if (!laporan_table_exists($pdo, 'transaksi')) {
+            throw new RuntimeException('Tabel transaksi tidak ditemukan.');
+        }
+
+        // Cafe berbeda dengan POS toko: pesanan dapat dibuat dahulu dan dibayar
+        // kemudian. Karena itu tanggal laporan yang benar adalah paid_at.
+        $cafeWhere = "
+            LOWER(TRIM(COALESCE(cp.status_pembayaran,''))) = 'lunas'
+            AND LOWER(TRIM(COALESCE(cp.status,''))) <> 'batal'
+            AND cp.paid_at IS NOT NULL
+            AND DATE(cp.paid_at) BETWEEN :awal AND :akhir
+        ";
+
+        $cafeStatusColumn = transaksi_col_exists($pdo, 'status_transaksi')
+            ? 'status_transaksi'
+            : (transaksi_col_exists($pdo, 'status') ? 'status' : '');
+        if ($cafeStatusColumn !== '') {
+            $cafeWhere .= " AND LOWER(COALESCE(t.`{$cafeStatusColumn}`,'')) NOT IN ('batal','cancel','cancelled','void')";
+        }
+
+        // Nilai penjualan aktual mengikuti kas harian Cafe: bayar-kembalian,
+        // fallback ke total untuk data lama.
+        $hasBayarCafe = transaksi_col_exists($pdo, 'bayar');
+        $hasKembalianCafe = transaksi_col_exists($pdo, 'kembalian');
+        if ($hasBayarCafe) {
+            $changeExpr = $hasKembalianCafe ? 'COALESCE(t.kembalian,0)' : '0';
+            $cafeSaleExpr = "CASE WHEN (COALESCE(t.bayar,0) <> 0 OR {$changeExpr} <> 0) THEN GREATEST(COALESCE(t.bayar,0)-{$changeExpr},0) ELSE COALESCE(t.total,0) END";
+        } else {
+            $cafeSaleExpr = 'COALESCE(t.total,0)';
+        }
+
+        $cafeMetodeCandidates = [];
+        foreach (['metode_pembayaran', 'payment_method', 'metode', 'jenis_pembayaran', 'tipe_pembayaran'] as $column) {
+            if (transaksi_col_exists($pdo, $column)) {
+                $cafeMetodeCandidates[] = "NULLIF(TRIM(CAST(t.`{$column}` AS CHAR)), '')";
+            }
+        }
+        $cafeMetodeSql = $cafeMetodeCandidates
+            ? 'COALESCE(' . implode(', ', $cafeMetodeCandidates) . ", 'tunai')"
+            : "'tunai'";
+
         $stmtCafe = $pdo->prepare("
             SELECT
-                COUNT(*) AS total_transaksi,
-                COALESCE(SUM(t.total),0) AS omzet,
-                COALESCE(SUM(CASE WHEN LOWER({$cafeMetodeSql}) IN ('tunai','cash') THEN t.total ELSE 0 END),0) AS tunai,
-                COALESCE(SUM(CASE WHEN LOWER({$cafeMetodeSql}) NOT IN ('tunai','cash','') THEN t.total ELSE 0 END),0) AS nontunai
-            FROM transaksi t
-            WHERE 1=1 {$cafeWherePeriode} {$cafeWhereStatus} {$cafeWhereSource}
+                COUNT(DISTINCT t.id) AS total_transaksi,
+                COALESCE(SUM({$cafeSaleExpr}),0) AS omzet,
+                COALESCE(SUM(CASE WHEN LOWER({$cafeMetodeSql}) IN ('tunai','cash','uang tunai') THEN {$cafeSaleExpr} ELSE 0 END),0) AS tunai,
+                COALESCE(SUM(CASE WHEN LOWER({$cafeMetodeSql}) NOT IN ('tunai','cash','uang tunai','') THEN {$cafeSaleExpr} ELSE 0 END),0) AS nontunai
+            FROM cafe_pesanan cp
+            JOIN transaksi t ON t.id = cp.transaksi_id
+            WHERE {$cafeWhere}
         ");
         $stmtCafe->execute([':awal' => $awal, ':akhir' => $akhir]);
         $cafeSummaryRow = $stmtCafe->fetch(PDO::FETCH_ASSOC) ?: [];
@@ -623,12 +600,10 @@ if ($isCafe) {
         $cafeRata = $cafeTotalTransaksi > 0 ? ($cafeOmzet / $cafeTotalTransaksi) : 0;
 
         $cafeTotalPages = max(1, (int)ceil($cafeTotalTransaksi / $cafePerPage));
-        if ($cafePage > $cafeTotalPages) {
-            $cafePage = $cafeTotalPages;
-        }
+        if ($cafePage > $cafeTotalPages) $cafePage = $cafeTotalPages;
         $cafeOffset = ($cafePage - 1) * $cafePerPage;
 
-        // Margin cafe.
+        // Margin hanya transaksi Cafe yang benar-benar lunas pada periode paid_at.
         $hasDetailHargaBeli = false;
         try {
             $detailCols = $pdo->query("SHOW COLUMNS FROM transaksi_detail")->fetchAll(PDO::FETCH_COLUMN);
@@ -638,22 +613,27 @@ if ($isCafe) {
         }
 
         $hargaBeliExpr = $hasDetailHargaBeli
-            ? "COALESCE(td.harga_beli,0)"
-            : (produk_col_exists($pdo, 'harga_beli') ? "COALESCE(p.harga_beli,0)" : "0");
-
+            ? 'COALESCE(td.harga_beli,0)'
+            : (produk_col_exists($pdo, 'harga_beli') ? 'COALESCE(p.harga_beli,0)' : '0');
         $joinProdukMargin = (!$hasDetailHargaBeli && produk_col_exists($pdo, 'harga_beli'))
-            ? " LEFT JOIN produk p ON p.id = td.produk_id "
-            : "";
+            ? ' LEFT JOIN produk p ON p.id = td.produk_id '
+            : '';
+
+        $promoExpr = laporan_column_exists($pdo, 'cafe_pesanan', 'promo_diskon') ? 'COALESCE(cp.promo_diskon,0)' : '0';
+        $pointExpr = transaksi_col_exists($pdo, 'nilai_point_pakai') ? 'COALESCE(t.nilai_point_pakai,0)' : '0';
 
         $stmtCafeMargin = $pdo->prepare("
             SELECT COALESCE(SUM(
-                COALESCE(td.subtotal, COALESCE(td.harga,0) * COALESCE(td.qty,0))
-                - ({$hargaBeliExpr} * COALESCE(td.qty,0))
+                COALESCE(td.subtotal, COALESCE(td.harga,0)*COALESCE(td.qty,0))
+                - ({$hargaBeliExpr}*COALESCE(td.qty,0))
             ),0)
-            FROM transaksi_detail td
-            JOIN transaksi t ON t.id = td.transaksi_id
+            - COALESCE(SUM(DISTINCT {$promoExpr}),0)
+            - COALESCE(SUM(DISTINCT {$pointExpr}),0)
+            FROM cafe_pesanan cp
+            JOIN transaksi t ON t.id = cp.transaksi_id
+            JOIN transaksi_detail td ON td.transaksi_id = t.id
             {$joinProdukMargin}
-            WHERE 1=1 {$cafeWherePeriode} {$cafeWhereStatus} {$cafeWhereSource}
+            WHERE {$cafeWhere}
         ");
         $stmtCafeMargin->execute([':awal' => $awal, ':akhir' => $akhir]);
         $cafeMargin = (float)$stmtCafeMargin->fetchColumn();
@@ -667,64 +647,38 @@ if ($isCafe) {
             'rata' => $cafeRata,
         ];
 
-        $hasCafePesanan = false;
-        try {
-            $hasCafePesanan = (bool)$pdo->query("SHOW TABLES LIKE 'cafe_pesanan'")->fetchColumn();
-        } catch (Throwable $e) {
-            $hasCafePesanan = false;
-        }
-
-        $hasCafeMeja = false;
-        try {
-            $hasCafeMeja = (bool)$pdo->query("SHOW TABLES LIKE 'cafe_meja'")->fetchColumn();
-        } catch (Throwable $e) {
-            $hasCafeMeja = false;
-        }
-
-        $joinCafePesanan = $hasCafePesanan ? " LEFT JOIN cafe_pesanan cp ON cp.transaksi_id = t.id " : "";
-        $joinCafeMeja = ($hasCafePesanan && $hasCafeMeja) ? " LEFT JOIN cafe_meja cm ON cm.id = cp.meja_id " : "";
-
-        $selectCafePesanan = $hasCafePesanan
-            ? "cp.nomor_pesanan, cp.tipe_pesanan, cp.status AS status_pesanan"
-            : "NULL AS nomor_pesanan, NULL AS tipe_pesanan, NULL AS status_pesanan";
-
-        $selectCafeMeja = ($hasCafePesanan && $hasCafeMeja)
-            ? "cm.nomor_meja"
-            : "NULL AS nomor_meja";
+        $hasCafeMeja = laporan_table_exists($pdo, 'cafe_meja');
+        $joinCafeMeja = $hasCafeMeja ? ' LEFT JOIN cafe_meja cm ON cm.id = cp.meja_id ' : '';
+        $selectCafeMeja = $hasCafeMeja ? 'cm.nomor_meja' : 'NULL AS nomor_meja';
 
         $stmtCafeList = $pdo->prepare("
             SELECT
-                t.id,
-                t.invoice,
-                t.created_at,
-                t.total,
-                t.bayar,
-                t.kembalian,
+                t.id, t.invoice,
+                cp.paid_at AS created_at,
+                {$cafeSaleExpr} AS total,
+                t.bayar, t.kembalian,
                 {$cafeMetodeSql} AS metode_pembayaran,
                 u.nama AS kasir,
-                {$selectCafePesanan},
+                cp.nomor_pesanan, cp.tipe_pesanan, cp.status AS status_pesanan,
                 {$selectCafeMeja}
-            FROM transaksi t
+            FROM cafe_pesanan cp
+            JOIN transaksi t ON t.id = cp.transaksi_id
             LEFT JOIN users u ON u.id = t.user_id
-            {$joinCafePesanan}
             {$joinCafeMeja}
-            WHERE 1=1 {$cafeWherePeriode} {$cafeWhereStatus} {$cafeWhereSource}
-            ORDER BY t.created_at DESC, t.id DESC
+            WHERE {$cafeWhere}
+            ORDER BY cp.paid_at DESC, t.id DESC
             LIMIT {$cafePerPage} OFFSET {$cafeOffset}
         ");
         $stmtCafeList->execute([':awal' => $awal, ':akhir' => $akhir]);
         $cafeTransaksi = $stmtCafeList->fetchAll(PDO::FETCH_ASSOC);
 
         $stmtCafeProduk = $pdo->prepare("
-            SELECT
-                td.produk_id,
-                td.nama,
-                MAX(td.kode) AS kode,
-                SUM(td.qty) AS qty,
-                SUM(td.subtotal) AS penjualan
-            FROM transaksi_detail td
-            JOIN transaksi t ON t.id = td.transaksi_id
-            WHERE 1=1 {$cafeWherePeriode} {$cafeWhereStatus} {$cafeWhereSource}
+            SELECT td.produk_id, td.nama, MAX(td.kode) AS kode,
+                   SUM(td.qty) AS qty, SUM(td.subtotal) AS penjualan
+            FROM cafe_pesanan cp
+            JOIN transaksi t ON t.id = cp.transaksi_id
+            JOIN transaksi_detail td ON td.transaksi_id = t.id
+            WHERE {$cafeWhere}
             GROUP BY td.produk_id, td.nama
             ORDER BY qty DESC, penjualan DESC
             LIMIT 20
@@ -734,6 +688,11 @@ if ($isCafe) {
     } catch (Throwable $e) {
         $cafeTransaksi = [];
         $cafeProduk = [];
+        $cafeSummary = ['total_transaksi' => 0, 'omzet' => 0, 'tunai' => 0, 'nontunai' => 0, 'margin' => 0, 'rata' => 0];
+        $cafeTotalTransaksi = 0;
+        $cafeTotalPages = 1;
+        $cafePage = 1;
+        $cafeError = $e->getMessage();
         error_log('LAPORAN CAFE ERROR: ' . $e->getMessage());
     }
 }
@@ -923,16 +882,17 @@ if ($isAirMineral) {
                     SUM(CASE WHEN LOWER(COALESCE(status,'')) = 'baru' THEN 1 ELSE 0 END) AS status_baru,
                     SUM(CASE WHEN LOWER(COALESCE(status,'')) = 'diproses' THEN 1 ELSE 0 END) AS status_diproses,
                     SUM(CASE WHEN LOWER(COALESCE(status,'')) = 'siap_dikirim' THEN 1 ELSE 0 END) AS status_siap_dikirim,
+                    SUM(CASE WHEN LOWER(COALESCE(status,'')) = 'dalam_pengiriman' THEN 1 ELSE 0 END) AS status_dalam_pengiriman,
                     SUM(CASE WHEN LOWER(COALESCE(status,'')) = 'selesai' THEN 1 ELSE 0 END) AS pesanan_selesai,
                     SUM(CASE WHEN LOWER(COALESCE(status,'')) = 'batal' THEN 1 ELSE 0 END) AS pesanan_batal,
                     SUM(CASE WHEN LOWER(COALESCE(status,'')) <> 'batal' AND ({$historicalExpr}) THEN 1 ELSE 0 END) AS data_migrasi
                 FROM air_pesanan
-                WHERE DATE(COALESCE(tanggal_pemesanan, created_at)) BETWEEN :awal AND :akhir
+                WHERE DATE(COALESCE(tanggal_kirim, tanggal_pemesanan, created_at)) BETWEEN :awal AND :akhir
             ");
             $stmt->execute([':awal' => $awal, ':akhir' => $akhir]);
             $row = $stmt->fetch(PDO::FETCH_ASSOC) ?: [];
 
-            foreach (['total_pesanan', 'status_baru', 'status_diproses', 'status_siap_dikirim', 'pesanan_selesai', 'pesanan_batal', 'data_migrasi'] as $key) {
+            foreach (['total_pesanan', 'status_baru', 'status_diproses', 'status_siap_dikirim', 'status_dalam_pengiriman', 'pesanan_selesai', 'pesanan_batal', 'data_migrasi'] as $key) {
                 $airSummary[$key] = (int)($row[$key] ?? 0);
             }
             $airSummary['data_baru'] = max(0, $airSummary['total_pesanan'] - $airSummary['data_migrasi']);
@@ -942,7 +902,7 @@ if ($isAirMineral) {
                     SELECT COUNT(*)
                     FROM air_pesanan_lokasi l
                     JOIN air_pesanan p ON p.id = l.pesanan_id
-                    WHERE DATE(COALESCE(p.tanggal_pemesanan, p.created_at)) BETWEEN :awal AND :akhir
+                    WHERE DATE(COALESCE(p.tanggal_kirim, p.tanggal_pemesanan, p.created_at)) BETWEEN :awal AND :akhir
                       AND LOWER(COALESCE(p.status,'')) <> 'batal'
                 ");
                 $stmt->execute([':awal' => $awal, ':akhir' => $akhir]);
@@ -954,7 +914,7 @@ if ($isAirMineral) {
                     SELECT COALESCE(SUM(d.qty),0)
                     FROM air_pesanan_detail d
                     JOIN air_pesanan p ON p.id = d.pesanan_id
-                    WHERE DATE(COALESCE(p.tanggal_pemesanan, p.created_at)) BETWEEN :awal AND :akhir
+                    WHERE DATE(COALESCE(p.tanggal_kirim, p.tanggal_pemesanan, p.created_at)) BETWEEN :awal AND :akhir
                       AND LOWER(COALESCE(p.status,'')) <> 'batal'
                 ");
                 $stmt->execute([':awal' => $awal, ':akhir' => $akhir]);
@@ -968,7 +928,7 @@ if ($isAirMineral) {
                     FROM air_pesanan_detail d
                     JOIN air_pesanan p ON p.id = d.pesanan_id
                     LEFT JOIN air_produk pr ON pr.id = d.produk_id
-                    WHERE DATE(COALESCE(p.tanggal_pemesanan, p.created_at)) BETWEEN :awal AND :akhir
+                    WHERE DATE(COALESCE(p.tanggal_kirim, p.tanggal_pemesanan, p.created_at)) BETWEEN :awal AND :akhir
                       AND LOWER(COALESCE(p.status,'')) <> 'batal'
                     GROUP BY d.produk_id, d.nama_produk, pr.satuan
                     ORDER BY qty DESC, d.nama_produk ASC
@@ -988,7 +948,7 @@ if ($isAirMineral) {
                         LEFT JOIN air_pesanan_detail d
                           ON d.pesanan_id = p.id
                          AND d.lokasi_id = l.id
-                        WHERE DATE(COALESCE(p.tanggal_pemesanan, p.created_at)) BETWEEN :awal AND :akhir
+                        WHERE DATE(COALESCE(p.tanggal_kirim, p.tanggal_pemesanan, p.created_at)) BETWEEN :awal AND :akhir
                           AND LOWER(COALESCE(p.status,'')) <> 'batal'
                         GROUP BY l.lokasi
                         ORDER BY total_unit DESC, total_pesanan DESC, l.lokasi ASC
@@ -1002,7 +962,7 @@ if ($isAirMineral) {
             $stmtCountAir = $pdo->prepare("
                 SELECT COUNT(*)
                 FROM air_pesanan p
-                WHERE DATE(COALESCE(p.tanggal_pemesanan, p.created_at)) BETWEEN :awal AND :akhir
+                WHERE DATE(COALESCE(p.tanggal_kirim, p.tanggal_pemesanan, p.created_at)) BETWEEN :awal AND :akhir
             ");
             $stmtCountAir->execute([':awal' => $awal, ':akhir' => $akhir]);
             $airTotalRows = (int)$stmtCountAir->fetchColumn();
@@ -1029,8 +989,8 @@ if ($isAirMineral) {
                     p.created_at,
                     {$sourceSelect},
                     {$historicalSelect},
-                    c.nama AS nama_pemesan,
-                    c.no_hp,
+                    COALESCE(c.nama, '-') AS nama_pemesan,
+                    COALESCE(c.no_hp, '-') AS no_hp,
                     COALESCE((
                         SELECT GROUP_CONCAT(DISTINCT l.lokasi ORDER BY l.urutan ASC SEPARATOR ', ')
                         FROM air_pesanan_lokasi l
@@ -1042,8 +1002,8 @@ if ($isAirMineral) {
                         WHERE d.pesanan_id = p.id
                     ),0) AS total_unit
                 FROM air_pesanan p
-                JOIN air_pelanggan c ON c.id = p.pelanggan_id
-                WHERE DATE(COALESCE(p.tanggal_pemesanan, p.created_at)) BETWEEN :awal AND :akhir
+                LEFT JOIN air_pelanggan c ON c.id = p.pelanggan_id
+                WHERE DATE(COALESCE(p.tanggal_kirim, p.tanggal_pemesanan, p.created_at)) BETWEEN :awal AND :akhir
                 ORDER BY COALESCE(p.tanggal_kirim, p.tanggal_pemesanan, p.created_at) DESC, p.id DESC
                 LIMIT {$airPerPage} OFFSET {$airOffset}
             ");
@@ -1054,6 +1014,7 @@ if ($isAirMineral) {
         $airPesanan = [];
         $airProduk = [];
         $airLokasi = [];
+        $airLoadErrors[] = 'Pesanan: ' . $e->getMessage();
         error_log('LAPORAN AIR PESANAN ERROR: ' . $e->getMessage());
     }
 
@@ -1138,6 +1099,7 @@ if ($isAirMineral) {
         }
     } catch (Throwable $e) {
         $airVendor = [];
+        $airLoadErrors[] = 'Vendor: ' . $e->getMessage();
         error_log('LAPORAN AIR VENDOR ERROR: ' . $e->getMessage());
     }
 
@@ -1172,6 +1134,7 @@ if ($isAirMineral) {
         }
     } catch (Throwable $e) {
         $airKwitansi = [];
+        $airLoadErrors[] = 'Kwitansi: ' . $e->getMessage();
         error_log('LAPORAN AIR KWITANSI ERROR: ' . $e->getMessage());
     }
 }
@@ -2749,6 +2712,14 @@ catat_view_once($pdo, 'Laporan Operasional', 'Membuka laporan POS Toko, Cafe, Re
                 <!-- KONTEN AIR MINERAL                                                  -->
                 <!-- ══════════════════════════════════════════════════════════════════ -->
                 <div id="panel-air" class="flex flex-col gap-5 md:gap-6">
+                    <?php if ($airLoadErrors): ?>
+                        <div class="no-print border border-red-200 bg-red-50 px-4 py-3">
+                            <p class="text-xs font-bold text-red-700">Sebagian data Air Mineral gagal dimuat.</p>
+                            <?php foreach ($airLoadErrors as $airLoadError): ?>
+                                <p class="text-[10px] text-red-600 mt-1"><?= e($airLoadError) ?></p>
+                            <?php endforeach; ?>
+                        </div>
+                    <?php endif; ?>
                     <!-- KPI Utama -->
                     <div class="air-kpi-grid">
                         <div class="bg-white border border-subtle p-4 md:p-5">
@@ -2804,6 +2775,10 @@ catat_view_once($pdo, 'Laporan Operasional', 'Membuka laporan POS Toko, Cafe, Re
                             <div class="air-mini-card">
                                 <p class="text-[9px] font-black uppercase tracking-widest text-gray-400">Siap Dikirim</p>
                                 <p class="text-xl font-black text-purple-600 mt-1"><?= angka($airSummary['status_siap_dikirim']) ?></p>
+                            </div>
+                            <div class="air-mini-card">
+                                <p class="text-[9px] font-black uppercase tracking-widest text-gray-400">Dalam Pengiriman</p>
+                                <p class="text-xl font-black text-cyan-600 mt-1"><?= angka($airSummary['status_dalam_pengiriman']) ?></p>
                             </div>
                             <div class="air-mini-card">
                                 <p class="text-[9px] font-black uppercase tracking-widest text-gray-400">Selesai</p>

@@ -1098,6 +1098,44 @@ require_once 'navbar.php';
             font-family: Arial, sans-serif;
         }
 
+        /* Preview dokumen: header tetap terlihat, isi dapat discroll sampai paling bawah. */
+        #printModal {
+            overflow: hidden !important;
+            align-items: stretch !important;
+        }
+
+        #printModal .modal-panel {
+            width: min(100%, 1120px);
+            height: calc(100vh - 32px);
+            max-height: calc(100vh - 32px);
+            margin: 0 auto;
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+        }
+
+        #printModal .print-controls {
+            position: sticky;
+            top: 0;
+            z-index: 30;
+            flex: 0 0 auto;
+        }
+
+        #printBody {
+            flex: 1 1 auto;
+            min-height: 0;
+            overflow-y: auto;
+            overflow-x: auto;
+            overscroll-behavior: contain;
+            padding: 18px;
+            background: #f3f4f6;
+            scrollbar-gutter: stable;
+        }
+
+        #printBody .print-sheet {
+            box-shadow: 0 1px 4px rgba(0, 0, 0, .08);
+        }
+
         @media (min-width: 1024px) {
             .air-main {
                 margin-left: 220px;
@@ -1145,6 +1183,82 @@ require_once 'navbar.php';
 
             .mobile-grid {
                 grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+            }
+        }
+
+        /* ============================================================
+           RESPONSIVE PREVIEW DOKUMEN - TABLET & MOBILE
+           Hanya memengaruhi preview layar, hasil print tetap A4.
+           ============================================================ */
+        @media (max-width: 1023px) {
+            #printModal {
+                padding: 0 !important;
+                background: rgba(17, 24, 39, .58) !important;
+            }
+
+            #printModal .modal-panel {
+                width: 100% !important;
+                max-width: none !important;
+                height: 100dvh !important;
+                max-height: 100dvh !important;
+                border: 0 !important;
+            }
+
+            #printModal .print-controls {
+                position: sticky !important;
+                top: 0 !important;
+                z-index: 40 !important;
+                padding: 12px 14px !important;
+                gap: 10px !important;
+                box-shadow: 0 1px 0 rgba(0, 0, 0, .06);
+            }
+
+            #printModal .print-controls>div:first-child {
+                min-width: 0;
+            }
+
+            #printModal .print-controls>div:last-child {
+                flex: 0 0 auto;
+            }
+
+            #printBody {
+                width: 100% !important;
+                padding: 14px !important;
+                overflow-y: auto !important;
+                overflow-x: hidden !important;
+                -webkit-overflow-scrolling: touch;
+                background: #eef1f5 !important;
+            }
+
+            #printBody .print-sheet {
+                width: 100% !important;
+                max-width: 820px !important;
+                min-height: 0 !important;
+                margin: 0 auto !important;
+                padding: 24px !important;
+                box-shadow: 0 2px 12px rgba(15, 23, 42, .10) !important;
+                overflow: hidden;
+            }
+
+            #printBody .print-sheet>div[style*="grid-template-columns:160px"] {
+                grid-template-columns: 132px minmax(0, 1fr) !important;
+                column-gap: 12px !important;
+                row-gap: 7px !important;
+            }
+
+            #printBody .print-sheet>div[style*="gap:80px"] {
+                gap: 36px !important;
+            }
+
+            #printBody .print-sheet table {
+                width: 100% !important;
+                table-layout: fixed !important;
+            }
+
+            #printBody .print-sheet th,
+            #printBody .print-sheet td {
+                overflow-wrap: anywhere;
+                word-break: normal;
             }
         }
 
@@ -1219,20 +1333,136 @@ require_once 'navbar.php';
                 grid-template-columns: 1fr;
             }
 
-            .print-controls {
-                flex-direction: column;
+            #printModal .print-controls {
+                flex-direction: column !important;
                 align-items: stretch !important;
+                padding: 10px 12px !important;
+                gap: 8px !important;
             }
 
-            .print-controls>div {
+            #printModal .print-controls>div:first-child {
+                width: 100%;
+            }
+
+            #printModal .print-controls>div:first-child>div {
+                display: flex !important;
+                gap: 6px !important;
+                overflow-x: auto;
+                padding-bottom: 2px;
+                scrollbar-width: none;
+            }
+
+            #printModal .print-controls>div:first-child>div::-webkit-scrollbar {
+                display: none;
+            }
+
+            #printModal .print-controls>div:first-child>div .btn {
+                flex: 0 0 auto;
+                min-height: 34px;
+                padding: 0 10px;
+                font-size: 8px;
+            }
+
+            #printModal .print-controls>div:last-child {
                 display: grid !important;
-                grid-template-columns: 1fr;
+                grid-template-columns: minmax(0, 1fr) auto !important;
+                gap: 6px !important;
+                width: 100%;
             }
 
-            .print-sheet {
+            #printModal .print-controls>div:last-child .btn {
+                min-height: 38px;
+                padding: 0 12px;
+                font-size: 8px;
+            }
+
+            #printModal .modal-panel {
+                height: 100dvh !important;
+                max-height: 100dvh !important;
+            }
+
+            #printBody {
+                padding: 8px !important;
+                overflow-x: hidden !important;
+                -webkit-overflow-scrolling: touch;
+            }
+
+            #printBody .print-sheet {
                 width: 100% !important;
                 min-height: auto !important;
-                padding: 16px !important;
+                padding: 14px 12px !important;
+                font-size: 10px !important;
+            }
+
+            #printBody .print-sheet>div:first-child {
+                flex-direction: column !important;
+                gap: 10px !important;
+                padding-bottom: 10px !important;
+            }
+
+            #printBody .print-sheet>div:first-child>div:last-child {
+                text-align: left !important;
+            }
+
+            #printBody .print-sheet>div:first-child p:first-child {
+                font-size: 16px !important;
+                line-height: 1.2 !important;
+            }
+
+            #printBody .print-sheet>div[style*="grid-template-columns:160px"] {
+                grid-template-columns: 96px minmax(0, 1fr) !important;
+                gap: 5px 8px !important;
+                margin-top: 14px !important;
+                font-size: 9px !important;
+            }
+
+            #printBody .print-sheet>div[style*="grid-template-columns:160px"]>div {
+                min-width: 0;
+                overflow-wrap: anywhere;
+            }
+
+            #printBody .print-sheet table {
+                margin-top: 14px !important;
+                font-size: 8px !important;
+                table-layout: fixed !important;
+            }
+
+            #printBody .print-sheet th,
+            #printBody .print-sheet td {
+                padding: 5px 4px !important;
+                line-height: 1.35 !important;
+                overflow-wrap: anywhere !important;
+                word-break: break-word !important;
+            }
+
+            #printBody .print-sheet th[style*="width:140px"],
+            #printBody .print-sheet td:last-child {
+                width: 23% !important;
+            }
+
+            #printBody .print-sheet th[style*="width:130px"] {
+                width: 21% !important;
+            }
+
+            #printBody .print-sheet th[style*="width:110px"],
+            #printBody .print-sheet th[style*="width:150px"] {
+                width: 18% !important;
+            }
+
+            #printBody .print-sheet th[style*="width:40px"],
+            #printBody .print-sheet th[style*="width:35px"] {
+                width: 28px !important;
+            }
+
+            #printBody .print-sheet>div[style*="gap:80px"] {
+                grid-template-columns: 1fr 1fr !important;
+                gap: 14px !important;
+                margin-top: 30px !important;
+                font-size: 9px !important;
+            }
+
+            #printBody .print-sheet>div[style*="gap:80px"] div[style*="height:70px"] {
+                height: 48px !important;
             }
         }
 
@@ -1264,6 +1494,17 @@ require_once 'navbar.php';
                 height: auto !important;
                 max-height: none !important;
                 overflow: visible !important;
+                box-shadow: none !important;
+            }
+
+            #printBody {
+                display: block !important;
+                overflow: visible !important;
+                padding: 0 !important;
+                background: #fff !important;
+            }
+
+            #printBody .print-sheet {
                 box-shadow: none !important;
             }
 
@@ -1508,7 +1749,7 @@ require_once 'navbar.php';
                                             <button type="button"
                                                 onclick='openPrint(<?php echo json_encode($row, JSON_UNESCAPED_UNICODE | JSON_HEX_APOS | JSON_HEX_QUOT); ?>)'
                                                 class="action-btn hover:text-purple-600 hover:bg-purple-50"
-                                                title="Cetak">
+                                                title="Dokumen">
                                                 <i data-lucide="printer" class="w-4 h-4"></i>
                                             </button>
 
@@ -1900,7 +2141,14 @@ require_once 'navbar.php';
     <div id="printModal" class="modal-wrap fixed inset-0 z-[130] hidden items-start justify-center bg-black/50 p-4 overflow-y-auto">
         <div class="modal-panel">
             <div class="print-controls modal-header">
-                <p class="text-xs font-black uppercase tracking-widest">Preview Kwitansi</p>
+                <div>
+                    <p id="printPreviewTitle" class="text-xs font-black uppercase tracking-widest">Preview Kwitansi</p>
+                    <div class="flex flex-wrap gap-1 mt-2">
+                        <button type="button" onclick="renderDocument('surat_jalan')" class="btn border border-gray-200 bg-white">Surat Jalan</button>
+                        <button type="button" onclick="renderDocument('faktur')" class="btn border border-gray-200 bg-white">Faktur</button>
+                        <button type="button" onclick="renderDocument('kwitansi')" class="btn border border-gray-200 bg-white">Kwitansi</button>
+                    </div>
+                </div>
 
                 <div class="flex gap-2">
                     <button type="button" onclick="window.print()" class="btn bg-black text-white">
@@ -2188,109 +2436,102 @@ require_once 'navbar.php';
             }
         }
 
-        function openPrint(row) {
-            var details = Array.isArray(row.details) ? row.details : [];
-            var sources = Array.isArray(row.sources) ? row.sources : [];
+        var currentPrintRow = null;
+        var currentDocumentType = 'kwitansi';
 
-            var detailRows = details.map(function(item, index) {
-                return '' +
-                    '<tr>' +
-                    '<td style="border:1px solid #bbb;padding:8px;text-align:center;">' + (index + 1) + '</td>' +
+        function documentHeader(title, subtitle) {
+            return '<div style="display:flex;justify-content:space-between;align-items:flex-start;border-bottom:3px solid #111;padding-bottom:14px;">' +
+                '<div><p style="font-size:22px;font-weight:800;margin:0;">SEJAHUB</p><p style="font-size:11px;margin:4px 0 0;">Koperasi / Sistem Layanan Terpadu</p></div>' +
+                '<div style="text-align:right;"><p style="font-size:18px;font-weight:800;margin:0;">' + escapeHtml(title) + '</p><p style="font-size:11px;margin:4px 0 0;">' + escapeHtml(subtitle || 'AIR MINERAL') + '</p></div>' +
+                '</div>';
+        }
+
+        function productRows(details, showPrice) {
+            return details.map(function(item, index) {
+                var row = '<tr><td style="border:1px solid #bbb;padding:8px;text-align:center;">' + (index + 1) + '</td>' +
                     '<td style="border:1px solid #bbb;padding:8px;">' + escapeHtml(item.nama_produk) + '</td>' +
-                    '<td style="border:1px solid #bbb;padding:8px;text-align:center;">' +
-                    Number(item.qty || 0).toLocaleString('id-ID') + ' ' + escapeHtml(item.satuan) +
-                    '</td>' +
-                    '<td style="border:1px solid #bbb;padding:8px;text-align:right;">' + formatRupiah(item.harga_satuan) + '</td>' +
-                    '<td style="border:1px solid #bbb;padding:8px;text-align:right;font-weight:700;">' + formatRupiah(item.subtotal) + '</td>' +
-                    '</tr>';
+                    '<td style="border:1px solid #bbb;padding:8px;text-align:center;">' + Number(item.qty || 0).toLocaleString('id-ID') + ' ' + escapeHtml(item.satuan) + '</td>';
+                if (showPrice) {
+                    row += '<td style="border:1px solid #bbb;padding:8px;text-align:right;">' + formatRupiah(item.harga_satuan) + '</td>' +
+                        '<td style="border:1px solid #bbb;padding:8px;text-align:right;font-weight:700;">' + formatRupiah(item.subtotal) + '</td>';
+                }
+                return row + '</tr>';
             }).join('');
+        }
 
-            var sourceRows = sources.map(function(source, index) {
-                return '' +
-                    '<tr>' +
-                    '<td style="border:1px solid #ddd;padding:7px;text-align:center;">' + (index + 1) + '</td>' +
+        function sourceRowsHtml(sources) {
+            return sources.map(function(source, index) {
+                return '<tr><td style="border:1px solid #ddd;padding:7px;text-align:center;">' + (index + 1) + '</td>' +
                     '<td style="border:1px solid #ddd;padding:7px;">' + escapeHtml(source.nomor_pesanan) + '</td>' +
                     '<td style="border:1px solid #ddd;padding:7px;">' + escapeHtml(source.nama_pemesan) + '</td>' +
-                    '<td style="border:1px solid #ddd;padding:7px;">' + escapeHtml(source.lokasi || '-') + '</td>' +
-                    '</tr>';
+                    '<td style="border:1px solid #ddd;padding:7px;">' + escapeHtml(source.lokasi || '-') + '</td></tr>';
             }).join('');
+        }
 
-            document.getElementById('printBody').innerHTML =
-                '<div class="print-sheet">' +
-                '<div style="display:flex;justify-content:space-between;align-items:flex-start;border-bottom:3px solid #111;padding-bottom:14px;">' +
-                '<div>' +
-                '<p style="font-size:22px;font-weight:800;margin:0;">SEJAHUB</p>' +
-                '<p style="font-size:11px;margin:4px 0 0;">Sistem Layanan Terpadu</p>' +
-                '</div>' +
-                '<div style="text-align:right;">' +
-                '<p style="font-size:18px;font-weight:800;margin:0;">KWITANSI PENAGIHAN</p>' +
-                '<p style="font-size:11px;margin:4px 0 0;">AIR MINERAL</p>' +
-                '</div>' +
-                '</div>' +
+        function signatureBlock(leftLabel, leftName, rightLabel, rightName) {
+            return '<div style="display:grid;grid-template-columns:1fr 1fr;gap:80px;margin-top:48px;text-align:center;font-size:11px;">' +
+                '<div><p>' + escapeHtml(leftLabel) + '</p><div style="height:70px;"></div><p style="border-top:1px solid #111;padding-top:6px;">' + escapeHtml(leftName || '________________') + '</p></div>' +
+                '<div><p>' + escapeHtml(rightLabel) + '</p><div style="height:70px;"></div><p style="border-top:1px solid #111;padding-top:6px;">' + escapeHtml(rightName || currentUserName) + '</p></div></div>';
+        }
 
-                '<div style="margin-top:22px;display:grid;grid-template-columns:160px 1fr;gap:7px;font-size:12px;">' +
-                '<div>Nomor Kwitansi</div><div>: <strong>' + escapeHtml(row.nomor_kwitansi) + '</strong></div>' +
-                '<div>Tanggal</div><div>: ' + formatDate(row.tanggal_kwitansi) + '</div>' +
-                '<div>Periode Tagihan</div><div>: ' + formatDate(row.tanggal_awal) + ' s.d. ' + formatDate(row.tanggal_akhir) + '</div>' +
-                '<div>Ditagihkan kepada</div><div>: <strong>' + escapeHtml(row.nama_instansi) + '</strong></div>' +
-                '<div>Penerima Tagihan</div><div>: ' + escapeHtml(row.penerima_tagihan || '-') + '</div>' +
-                '<div>Alamat</div><div>: ' + escapeHtml(row.alamat_instansi || '-') + '</div>' +
-                '</div>' +
+        function renderDocument(type) {
+            if (!currentPrintRow) return;
+            currentDocumentType = type || 'kwitansi';
+            var row = currentPrintRow;
+            var details = Array.isArray(row.details) ? row.details : [];
+            var sources = Array.isArray(row.sources) ? row.sources : [];
+            var sourceRows = sourceRowsHtml(sources);
+            var body = '';
 
-                '<table style="width:100%;border-collapse:collapse;margin-top:22px;font-size:11px;">' +
-                '<thead>' +
-                '<tr style="background:#f3f4f6;">' +
-                '<th style="border:1px solid #bbb;padding:8px;width:40px;">No</th>' +
-                '<th style="border:1px solid #bbb;padding:8px;text-align:left;">Uraian</th>' +
-                '<th style="border:1px solid #bbb;padding:8px;width:110px;">Jumlah</th>' +
-                '<th style="border:1px solid #bbb;padding:8px;width:130px;text-align:right;">Harga Satuan</th>' +
-                '<th style="border:1px solid #bbb;padding:8px;width:140px;text-align:right;">Subtotal</th>' +
-                '</tr>' +
-                '</thead>' +
-                '<tbody>' + detailRows + '</tbody>' +
-                '<tfoot>' +
-                '<tr>' +
-                '<td colspan="4" style="border:1px solid #bbb;padding:10px;text-align:right;font-weight:800;">TOTAL TAGIHAN</td>' +
-                '<td style="border:1px solid #bbb;padding:10px;text-align:right;font-weight:800;">' + formatRupiah(row.total_tagihan) + '</td>' +
-                '</tr>' +
-                '</tfoot>' +
-                '</table>' +
+            if (currentDocumentType === 'surat_jalan') {
+                document.getElementById('printPreviewTitle').textContent = 'Preview Surat Jalan';
+                body = '<div class="print-sheet">' + documentHeader('SURAT JALAN', 'PENGIRIMAN AIR MINERAL') +
+                    '<div style="margin-top:22px;display:grid;grid-template-columns:160px 1fr;gap:7px;font-size:12px;">' +
+                    '<div>Nomor Dokumen</div><div>: <strong>SJ-' + escapeHtml(row.nomor_kwitansi) + '</strong></div>' +
+                    '<div>Tanggal</div><div>: ' + formatDate(row.tanggal_kwitansi) + '</div>' +
+                    '<div>Tujuan</div><div>: <strong>' + escapeHtml(row.nama_instansi) + '</strong></div>' +
+                    '<div>Penerima</div><div>: ' + escapeHtml(row.penerima_tagihan || '-') + '</div>' +
+                    '<div>Alamat</div><div>: ' + escapeHtml(row.alamat_instansi || '-') + '</div></div>' +
+                    '<table style="width:100%;border-collapse:collapse;margin-top:22px;font-size:11px;"><thead><tr style="background:#f3f4f6;"><th style="border:1px solid #bbb;padding:8px;width:40px;">No</th><th style="border:1px solid #bbb;padding:8px;text-align:left;">Nama Barang</th><th style="border:1px solid #bbb;padding:8px;width:150px;">Jumlah Dikirim</th></tr></thead><tbody>' + productRows(details, false) + '</tbody></table>' +
+                    '<p style="font-size:10px;margin-top:16px;">Barang tersebut di atas telah dikirim berdasarkan pesanan yang menjadi sumber tagihan.</p>' +
+                    '<p style="font-size:10px;margin-top:16px;font-weight:700;">Referensi Pesanan</p><table style="width:100%;border-collapse:collapse;margin-top:6px;font-size:9px;"><thead><tr style="background:#f9fafb;"><th style="border:1px solid #ddd;padding:7px;width:35px;">No</th><th style="border:1px solid #ddd;padding:7px;text-align:left;">Nomor Pesanan</th><th style="border:1px solid #ddd;padding:7px;text-align:left;">Pemesan</th><th style="border:1px solid #ddd;padding:7px;text-align:left;">Lokasi</th></tr></thead><tbody>' + sourceRows + '</tbody></table>' +
+                    signatureBlock('Penerima Barang', row.penerima_tagihan, 'Petugas SEJAHUB', currentUserName) + '</div>';
+            } else if (currentDocumentType === 'faktur') {
+                document.getElementById('printPreviewTitle').textContent = 'Preview Faktur';
+                body = '<div class="print-sheet">' + documentHeader('FAKTUR PENJUALAN', 'AIR MINERAL') +
+                    '<div style="margin-top:22px;display:grid;grid-template-columns:160px 1fr;gap:7px;font-size:12px;">' +
+                    '<div>Nomor Faktur</div><div>: <strong>INV-' + escapeHtml(row.nomor_kwitansi) + '</strong></div>' +
+                    '<div>Tanggal Faktur</div><div>: ' + formatDate(row.tanggal_kwitansi) + '</div>' +
+                    '<div>Periode</div><div>: ' + formatDate(row.tanggal_awal) + ' s.d. ' + formatDate(row.tanggal_akhir) + '</div>' +
+                    '<div>Kepada</div><div>: <strong>' + escapeHtml(row.nama_instansi) + '</strong></div>' +
+                    '<div>Alamat</div><div>: ' + escapeHtml(row.alamat_instansi || '-') + '</div></div>' +
+                    '<table style="width:100%;border-collapse:collapse;margin-top:22px;font-size:11px;"><thead><tr style="background:#f3f4f6;"><th style="border:1px solid #bbb;padding:8px;width:40px;">No</th><th style="border:1px solid #bbb;padding:8px;text-align:left;">Uraian</th><th style="border:1px solid #bbb;padding:8px;width:110px;">Jumlah</th><th style="border:1px solid #bbb;padding:8px;width:130px;text-align:right;">Harga Satuan</th><th style="border:1px solid #bbb;padding:8px;width:140px;text-align:right;">Subtotal</th></tr></thead><tbody>' + productRows(details, true) + '</tbody><tfoot><tr><td colspan="4" style="border:1px solid #bbb;padding:10px;text-align:right;font-weight:800;">TOTAL FAKTUR</td><td style="border:1px solid #bbb;padding:10px;text-align:right;font-weight:800;">' + formatRupiah(row.total_tagihan) + '</td></tr></tfoot></table>' +
+                    '<div style="margin-top:14px;border:1px solid #bbb;padding:10px;font-size:11px;"><strong>Terbilang:</strong> ' + escapeHtml(row.terbilang || '-') + '</div>' +
+                    (row.catatan ? '<div style="margin-top:14px;font-size:10px;"><strong>Catatan:</strong> ' + escapeHtml(row.catatan) + '</div>' : '') +
+                    signatureBlock('Penerima Faktur', row.penerima_tagihan, 'Petugas SEJAHUB', currentUserName) + '</div>';
+            } else {
+                document.getElementById('printPreviewTitle').textContent = 'Preview Kwitansi';
+                body = '<div class="print-sheet">' + documentHeader('KWITANSI PENAGIHAN', 'AIR MINERAL') +
+                    '<div style="margin-top:22px;display:grid;grid-template-columns:160px 1fr;gap:7px;font-size:12px;">' +
+                    '<div>Nomor Kwitansi</div><div>: <strong>' + escapeHtml(row.nomor_kwitansi) + '</strong></div>' +
+                    '<div>Tanggal</div><div>: ' + formatDate(row.tanggal_kwitansi) + '</div>' +
+                    '<div>Periode Tagihan</div><div>: ' + formatDate(row.tanggal_awal) + ' s.d. ' + formatDate(row.tanggal_akhir) + '</div>' +
+                    '<div>Ditagihkan kepada</div><div>: <strong>' + escapeHtml(row.nama_instansi) + '</strong></div>' +
+                    '<div>Penerima Tagihan</div><div>: ' + escapeHtml(row.penerima_tagihan || '-') + '</div>' +
+                    '<div>Alamat</div><div>: ' + escapeHtml(row.alamat_instansi || '-') + '</div></div>' +
+                    '<table style="width:100%;border-collapse:collapse;margin-top:22px;font-size:11px;"><thead><tr style="background:#f3f4f6;"><th style="border:1px solid #bbb;padding:8px;width:40px;">No</th><th style="border:1px solid #bbb;padding:8px;text-align:left;">Uraian</th><th style="border:1px solid #bbb;padding:8px;width:110px;">Jumlah</th><th style="border:1px solid #bbb;padding:8px;width:130px;text-align:right;">Harga Satuan</th><th style="border:1px solid #bbb;padding:8px;width:140px;text-align:right;">Subtotal</th></tr></thead><tbody>' + productRows(details, true) + '</tbody><tfoot><tr><td colspan="4" style="border:1px solid #bbb;padding:10px;text-align:right;font-weight:800;">TOTAL TAGIHAN</td><td style="border:1px solid #bbb;padding:10px;text-align:right;font-weight:800;">' + formatRupiah(row.total_tagihan) + '</td></tr></tfoot></table>' +
+                    '<div style="margin-top:14px;border:1px solid #bbb;padding:10px;font-size:11px;"><strong>Terbilang:</strong> ' + escapeHtml(row.terbilang || '-') + '</div>' +
+                    '<p style="font-size:10px;margin-top:18px;font-weight:700;">Rincian Sumber Pesanan</p><table style="width:100%;border-collapse:collapse;margin-top:6px;font-size:9px;"><thead><tr style="background:#f9fafb;"><th style="border:1px solid #ddd;padding:7px;width:35px;">No</th><th style="border:1px solid #ddd;padding:7px;text-align:left;">Nomor Pesanan</th><th style="border:1px solid #ddd;padding:7px;text-align:left;">Pemesan</th><th style="border:1px solid #ddd;padding:7px;text-align:left;">Lokasi</th></tr></thead><tbody>' + sourceRows + '</tbody></table>' +
+                    (row.catatan ? '<div style="margin-top:14px;font-size:10px;"><strong>Catatan:</strong> ' + escapeHtml(row.catatan) + '</div>' : '') +
+                    signatureBlock('Penerima Tagihan', row.penerima_tagihan, 'Petugas SEJAHUB', currentUserName) + '</div>';
+            }
+            document.getElementById('printBody').innerHTML = body;
+            if (window.lucide) lucide.createIcons();
+        }
 
-                '<div style="margin-top:14px;border:1px solid #bbb;padding:10px;font-size:11px;">' +
-                '<strong>Terbilang:</strong> ' + escapeHtml(row.terbilang || '-') +
-                '</div>' +
-
-                '<p style="font-size:10px;margin-top:18px;font-weight:700;">Rincian Sumber Pesanan</p>' +
-                '<table style="width:100%;border-collapse:collapse;margin-top:6px;font-size:9px;">' +
-                '<thead>' +
-                '<tr style="background:#f9fafb;">' +
-                '<th style="border:1px solid #ddd;padding:7px;width:35px;">No</th>' +
-                '<th style="border:1px solid #ddd;padding:7px;text-align:left;">Nomor Pesanan</th>' +
-                '<th style="border:1px solid #ddd;padding:7px;text-align:left;">Pemesan</th>' +
-                '<th style="border:1px solid #ddd;padding:7px;text-align:left;">Lokasi</th>' +
-                '</tr>' +
-                '</thead>' +
-                '<tbody>' + sourceRows + '</tbody>' +
-                '</table>' +
-
-                (row.catatan ?
-                    '<div style="margin-top:14px;font-size:10px;"><strong>Catatan:</strong> ' + escapeHtml(row.catatan) + '</div>' :
-                    '') +
-
-                '<div style="display:grid;grid-template-columns:1fr 1fr;gap:80px;margin-top:48px;text-align:center;font-size:11px;">' +
-                '<div>' +
-                '<p>Penerima Tagihan</p>' +
-                '<div style="height:70px;"></div>' +
-                '<p style="border-top:1px solid #111;padding-top:6px;">' + escapeHtml(row.penerima_tagihan || '________________') + '</p>' +
-                '</div>' +
-                '<div>' +
-                '<p>Petugas SEJAHUB</p>' +
-                '<div style="height:70px;"></div>' +
-                '<p style="border-top:1px solid #111;padding-top:6px;">' + escapeHtml(currentUserName) + '</p>' +
-                '</div>' +
-                '</div>' +
-                '</div>';
-
+        function openPrint(row, type) {
+            currentPrintRow = row;
+            renderDocument(type || 'kwitansi');
             openModal('printModal');
         }
 

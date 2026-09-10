@@ -521,25 +521,41 @@ if ($statusFilter === '') {
     $params[':status'] = $statusFilter;
 }
 
+/*
+ * Tanggal operasional air diseragamkan dengan Rekap Vendor:
+ * tanggal_kirim -> tanggal_pemesanan -> created_at.
+ * Dengan aturan tunggal ini, filter Pesanan Air dan Rekap Vendor membaca
+ * pesanan pada tanggal kebutuhan yang sama.
+ */
+$operationalDateExpr = "COALESCE(p.tanggal_kirim, p.tanggal_pemesanan, DATE(p.created_at))";
+
 if ($dateStart !== '') {
-    $where[] = "COALESCE(p.tanggal_pemesanan, DATE(p.created_at)) >= :start_date";
+    $where[] = "$operationalDateExpr >= :start_date";
     $params[':start_date'] = $dateStart;
 }
 
 if ($dateEnd !== '') {
-    $where[] = "COALESCE(p.tanggal_pemesanan, DATE(p.created_at)) <= :end_date";
+    $where[] = "$operationalDateExpr <= :end_date";
     $params[':end_date'] = $dateEnd;
 }
 
 if ($q !== '') {
+    // Gunakan placeholder unik. PDO MySQL native prepare tidak aman
+    // menggunakan named placeholder yang sama berulang kali dalam satu query
+    // dan dapat memicu SQLSTATE[HY093]: Invalid parameter number.
     $where[] = "(
-        p.nomor_pesanan LIKE :q
-        OR c.nama LIKE :q
-        OR c.no_hp LIKE :q
-        OR COALESCE(p.nama_penerima, '') LIKE :q
-        OR COALESCE(p.no_hp_penerima, '') LIKE :q
+        p.nomor_pesanan LIKE :q_nomor
+        OR c.nama LIKE :q_nama
+        OR c.no_hp LIKE :q_hp
+        OR COALESCE(p.nama_penerima, '') LIKE :q_penerima
+        OR COALESCE(p.no_hp_penerima, '') LIKE :q_hp_penerima
     )";
-    $params[':q'] = '%' . $q . '%';
+    $searchLike = '%' . $q . '%';
+    $params[':q_nomor'] = $searchLike;
+    $params[':q_nama'] = $searchLike;
+    $params[':q_hp'] = $searchLike;
+    $params[':q_penerima'] = $searchLike;
+    $params[':q_hp_penerima'] = $searchLike;
 }
 
 
@@ -579,6 +595,7 @@ try {
     $stmtOrders = $pdo->prepare("
         SELECT
             p.*,
+            COALESCE(p.tanggal_kirim, p.tanggal_pemesanan, DATE(p.created_at)) AS tanggal_operasional,
             c.nama AS nama_pemesan,
             c.no_hp,
             c.alamat AS alamat_pelanggan,
@@ -605,8 +622,7 @@ try {
         JOIN air_pelanggan c ON c.id = p.pelanggan_id
         WHERE $whereSql
         ORDER BY
-            FIELD(p.status, 'baru', 'diproses', 'siap_dikirim', 'selesai', 'batal'),
-            COALESCE(p.tanggal_kirim, p.tanggal_pemesanan, DATE(p.created_at)) ASC,
+            COALESCE(p.tanggal_kirim, p.tanggal_pemesanan, DATE(p.created_at)) DESC,
             p.created_at DESC,
             p.id DESC
         LIMIT :limit OFFSET :offset
@@ -1432,7 +1448,7 @@ require_once 'navbar.php';
             <p class="text-[9px] font-black uppercase tracking-widest text-blue-700">Antrian Pesanan Aktif</p>
             <p class="text-xs text-blue-700 mt-1">
                 Secara default halaman menampilkan semua pesanan yang belum selesai atau dibatalkan dari seluruh tanggal.
-                Gunakan filter tanggal bila ingin melihat periode tertentu.
+                Filter tanggal memakai tanggal operasional yang sama dengan Rekap Vendor: tanggal kirim, lalu tanggal pemesanan, lalu tanggal input.
             </p>
         </div>
 
@@ -1476,12 +1492,12 @@ require_once 'navbar.php';
                 </div>
 
                 <div class="filter-field-group">
-                    <label class="filter-label">Dari Tanggal <span class="font-medium normal-case tracking-normal">(opsional)</span></label>
+                    <label class="filter-label">Dari Tanggal Operasional <span class="font-medium normal-case tracking-normal">(opsional)</span></label>
                     <input type="date" name="start" value="<?php echo air_h($dateStart); ?>" class="field">
                 </div>
 
                 <div class="filter-field-group">
-                    <label class="filter-label">Sampai Tanggal <span class="font-medium normal-case tracking-normal">(opsional)</span></label>
+                    <label class="filter-label">Sampai Tanggal Operasional <span class="font-medium normal-case tracking-normal">(opsional)</span></label>
                     <input type="date" name="end" value="<?php echo air_h($dateEnd); ?>" class="field">
                 </div>
             </div>
@@ -1521,7 +1537,7 @@ require_once 'navbar.php';
                         <tr>
                             <th class="w-[18%]">Pesanan</th>
                             <th class="w-[13%]">Pemesan</th>
-                            <th class="w-[11%]">Tanggal Pemesanan</th>
+                            <th class="w-[11%]">Tanggal Operasional</th>
                             <th class="w-[11%]">Tanggal Kirim</th>
                             <th class="w-[15%]">Lokasi</th>
                             <th class="w-[8%] text-center">Produk</th>
@@ -1533,8 +1549,8 @@ require_once 'navbar.php';
                         <?php foreach ($orders as $order): ?>
                             <?php
                             $status = (string)($order['status'] ?? 'baru');
-                            $orderDate = $order['tanggal_pemesanan']
-                                ?: date('Y-m-d', strtotime((string)$order['created_at']));
+                            $orderDate = $order['tanggal_operasional']
+                                ?: ($order['tanggal_pemesanan'] ?: date('Y-m-d', strtotime((string)$order['created_at'])));
                             $locationNames = !empty($order['daftar_lokasi'])
                                 ? explode('||', (string)$order['daftar_lokasi'])
                                 : [];
@@ -1626,8 +1642,8 @@ require_once 'navbar.php';
             <?php foreach ($orders as $order): ?>
                 <?php
                 $status = (string)($order['status'] ?? 'baru');
-                $orderDate = $order['tanggal_pemesanan']
-                    ?: date('Y-m-d', strtotime((string)$order['created_at']));
+                $orderDate = $order['tanggal_operasional']
+                    ?: ($order['tanggal_pemesanan'] ?: date('Y-m-d', strtotime((string)$order['created_at'])));
                 $locationNames = !empty($order['daftar_lokasi'])
                     ? explode('||', (string)$order['daftar_lokasi'])
                     : [];
@@ -1657,7 +1673,7 @@ require_once 'navbar.php';
 
                     <div class="grid grid-cols-3 gap-2 mt-4">
                         <div class="bg-gray-50 border border-gray-100 p-3">
-                            <p class="text-[8px] font-black uppercase tracking-widest text-gray-400">Tanggal Pesan</p>
+                            <p class="text-[8px] font-black uppercase tracking-widest text-gray-400">Tanggal Operasional</p>
                             <p class="text-[11px] font-black mt-1"><?php echo air_h(date('d/m/Y', strtotime($orderDate))); ?></p>
                         </div>
                         <div class="bg-gray-50 border border-gray-100 p-3">
