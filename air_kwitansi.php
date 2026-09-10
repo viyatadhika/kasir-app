@@ -2441,7 +2441,12 @@ require_once 'navbar.php';
 
         function documentHeader(title, subtitle) {
             return '<div style="display:flex;justify-content:space-between;align-items:flex-start;border-bottom:3px solid #111;padding-bottom:14px;">' +
-                '<div><p style="font-size:22px;font-weight:800;margin:0;">SEJAHUB</p><p style="font-size:11px;margin:4px 0 0;">Koperasi / Sistem Layanan Terpadu</p></div>' +
+                '<div style="max-width:64%;line-height:1.35;">' +
+                '<p style="font-size:17px;font-weight:800;margin:0;letter-spacing:.2px;">KOPERASI BSDK SEJAHTERA</p>' +
+                '<p style="font-size:9.5px;font-weight:700;margin:4px 0 0;">BADAN HUKUM NOMOR: AHU-0000282.AH.01.29.TAHUN 2025</p>' +
+                '<p style="font-size:9.5px;font-weight:600;margin:3px 0 0;">d/a KAMPUS BSDK MAHKAMAH AGUNG CORPORATE UNIVERSITY</p>' +
+                '<p style="font-size:9.5px;margin:3px 0 0;">Jalan Cikopo Selatan, Desa Sukamaju, Kec. Megamendung - Kab. Bogor</p>' +
+                '</div>' +
                 '<div style="text-align:right;"><p style="font-size:18px;font-weight:800;margin:0;">' + escapeHtml(title) + '</p><p style="font-size:11px;margin:4px 0 0;">' + escapeHtml(subtitle || 'AIR MINERAL') + '</p></div>' +
                 '</div>';
         }
@@ -2495,7 +2500,7 @@ require_once 'navbar.php';
                     '<table style="width:100%;border-collapse:collapse;margin-top:22px;font-size:11px;"><thead><tr style="background:#f3f4f6;"><th style="border:1px solid #bbb;padding:8px;width:40px;">No</th><th style="border:1px solid #bbb;padding:8px;text-align:left;">Nama Barang</th><th style="border:1px solid #bbb;padding:8px;width:150px;">Jumlah Dikirim</th></tr></thead><tbody>' + productRows(details, false) + '</tbody></table>' +
                     '<p style="font-size:10px;margin-top:16px;">Barang tersebut di atas telah dikirim berdasarkan pesanan yang menjadi sumber tagihan.</p>' +
                     '<p style="font-size:10px;margin-top:16px;font-weight:700;">Referensi Pesanan</p><table style="width:100%;border-collapse:collapse;margin-top:6px;font-size:9px;"><thead><tr style="background:#f9fafb;"><th style="border:1px solid #ddd;padding:7px;width:35px;">No</th><th style="border:1px solid #ddd;padding:7px;text-align:left;">Nomor Pesanan</th><th style="border:1px solid #ddd;padding:7px;text-align:left;">Pemesan</th><th style="border:1px solid #ddd;padding:7px;text-align:left;">Lokasi</th></tr></thead><tbody>' + sourceRows + '</tbody></table>' +
-                    signatureBlock('Penerima Barang', row.penerima_tagihan, 'Petugas SEJAHUB', currentUserName) + '</div>';
+                    signatureBlock('Penerima Barang', row.penerima_tagihan, 'Bendahara Koperasi', 'Nurma Saofiane') + '</div>';
             } else if (currentDocumentType === 'faktur') {
                 document.getElementById('printPreviewTitle').textContent = 'Preview Faktur';
                 body = '<div class="print-sheet">' + documentHeader('FAKTUR PENJUALAN', 'AIR MINERAL') +
@@ -2508,7 +2513,7 @@ require_once 'navbar.php';
                     '<table style="width:100%;border-collapse:collapse;margin-top:22px;font-size:11px;"><thead><tr style="background:#f3f4f6;"><th style="border:1px solid #bbb;padding:8px;width:40px;">No</th><th style="border:1px solid #bbb;padding:8px;text-align:left;">Uraian</th><th style="border:1px solid #bbb;padding:8px;width:110px;">Jumlah</th><th style="border:1px solid #bbb;padding:8px;width:130px;text-align:right;">Harga Satuan</th><th style="border:1px solid #bbb;padding:8px;width:140px;text-align:right;">Subtotal</th></tr></thead><tbody>' + productRows(details, true) + '</tbody><tfoot><tr><td colspan="4" style="border:1px solid #bbb;padding:10px;text-align:right;font-weight:800;">TOTAL FAKTUR</td><td style="border:1px solid #bbb;padding:10px;text-align:right;font-weight:800;">' + formatRupiah(row.total_tagihan) + '</td></tr></tfoot></table>' +
                     '<div style="margin-top:14px;border:1px solid #bbb;padding:10px;font-size:11px;"><strong>Terbilang:</strong> ' + escapeHtml(row.terbilang || '-') + '</div>' +
                     (row.catatan ? '<div style="margin-top:14px;font-size:10px;"><strong>Catatan:</strong> ' + escapeHtml(row.catatan) + '</div>' : '') +
-                    signatureBlock('Penerima Faktur', row.penerima_tagihan, 'Petugas SEJAHUB', currentUserName) + '</div>';
+                    signatureBlock('Penerima Faktur', row.penerima_tagihan, 'Bendahara Koperasi', 'Nurma Saofiane') + '</div>';
             } else {
                 document.getElementById('printPreviewTitle').textContent = 'Preview Kwitansi';
                 body = '<div class="print-sheet">' + documentHeader('KWITANSI PENAGIHAN', 'AIR MINERAL') +
@@ -2523,7 +2528,7 @@ require_once 'navbar.php';
                     '<div style="margin-top:14px;border:1px solid #bbb;padding:10px;font-size:11px;"><strong>Terbilang:</strong> ' + escapeHtml(row.terbilang || '-') + '</div>' +
                     '<p style="font-size:10px;margin-top:18px;font-weight:700;">Rincian Sumber Pesanan</p><table style="width:100%;border-collapse:collapse;margin-top:6px;font-size:9px;"><thead><tr style="background:#f9fafb;"><th style="border:1px solid #ddd;padding:7px;width:35px;">No</th><th style="border:1px solid #ddd;padding:7px;text-align:left;">Nomor Pesanan</th><th style="border:1px solid #ddd;padding:7px;text-align:left;">Pemesan</th><th style="border:1px solid #ddd;padding:7px;text-align:left;">Lokasi</th></tr></thead><tbody>' + sourceRows + '</tbody></table>' +
                     (row.catatan ? '<div style="margin-top:14px;font-size:10px;"><strong>Catatan:</strong> ' + escapeHtml(row.catatan) + '</div>' : '') +
-                    signatureBlock('Penerima Tagihan', row.penerima_tagihan, 'Petugas SEJAHUB', currentUserName) + '</div>';
+                    signatureBlock('Penerima Tagihan', row.penerima_tagihan, 'Bendahara Koperasi', 'Nurma Saofiane') + '</div>';
             }
             document.getElementById('printBody').innerHTML = body;
             if (window.lucide) lucide.createIcons();

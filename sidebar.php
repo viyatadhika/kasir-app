@@ -345,7 +345,7 @@ $badge = isset($roleBadge[$currentRole])
         scrollbar-width: none;
     }
 
-    @media (min-width: 1024px) {
+    @media (min-width: 1400px) {
 
         .app-header,
         .page-header,
@@ -366,7 +366,7 @@ $badge = isset($roleBadge[$currentRole])
         }
     }
 
-    @media (max-width: 1023px) {
+    @media (max-width: 1399px) {
         body {
             padding-bottom: 0;
         }
@@ -400,9 +400,74 @@ $badge = isset($roleBadge[$currentRole])
             padding: 9px 0;
         }
     }
+
+
+    /* =========================================================
+       RESPONSIVE SIDEBAR DESKTOP
+       - >= 1400px : sidebar tetap tampil seperti desktop normal
+       - 1024-1399px: sidebar disembunyikan dan memakai drawer
+       - < 1024px   : tetap memakai drawer mobile/tablet
+       ========================================================= */
+    #desktopSidebar {
+        display: none;
+    }
+
+    #compactDesktopMenuButton {
+        display: none;
+    }
+
+    @media (min-width: 1400px) {
+        #desktopSidebar {
+            display: flex;
+        }
+    }
+
+    @media (min-width: 1024px) and (max-width: 1399px) {
+        #desktopSidebar {
+            display: none !important;
+        }
+
+        #compactDesktopMenuButton {
+            display: inline-flex !important;
+            position: fixed;
+            top: 16px;
+            left: 16px;
+            z-index: 90;
+            width: 42px;
+            height: 42px;
+            align-items: center;
+            justify-content: center;
+            border: 1px solid #e5e7eb;
+            background: #fff;
+            color: #111827;
+            box-shadow: 0 8px 24px rgba(0, 0, 0, .06);
+            cursor: pointer;
+        }
+
+        #compactDesktopMenuButton:hover {
+            background: #f9fafb;
+        }
+
+        #mobileMenuContent {
+            width: min(360px, 86vw) !important;
+            max-width: min(360px, 86vw) !important;
+        }
+    }
 </style>
 
-<div id="mobileMenuOverlay" class="fixed inset-0 bg-black/40 z-[100] opacity-0 invisible lg:hidden">
+<button type="button"
+    id="compactDesktopMenuButton"
+    onclick="toggleMobileMenu()"
+    aria-label="Buka menu navigasi"
+    title="Buka menu">
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+        <path d="M4 6h16"></path>
+        <path d="M4 12h16"></path>
+        <path d="M4 18h16"></path>
+    </svg>
+</button>
+
+<div id="mobileMenuOverlay" class="fixed inset-0 bg-black/40 z-[100] opacity-0 invisible">
     <div id="mobileMenuContent" class="ml-auto w-[280px] max-w-[82vw] bg-white h-full translate-x-full shadow-2xl flex flex-col">
         <div class="px-6 py-5 border-b border-gray-100 flex items-center justify-between">
             <div>
@@ -436,7 +501,7 @@ $badge = isset($roleBadge[$currentRole])
     </div>
 </div>
 
-<aside class="sidebar hidden lg:flex flex-col fixed inset-y-0 left-0 border-r border-gray-100 bg-white p-8 z-30">
+<aside id="desktopSidebar" class="sidebar flex-col fixed inset-y-0 left-0 border-r border-gray-100 bg-white p-8 z-30">
     <div class="mb-10">
         <span class="text-sm font-bold tracking-tighter border-b-2 border-black pb-1">SEJAHUB</span>
     </div>
