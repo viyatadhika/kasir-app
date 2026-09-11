@@ -1011,6 +1011,27 @@ require_once 'navbar.php';
             width: min(100%, 520px);
         }
 
+        /* Form di dalam modal harus menjadi flex container agar body dapat di-scroll. */
+        .modal-panel>form {
+            display: flex;
+            flex: 1 1 auto;
+            min-height: 0;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        #createModal .modal-panel {
+            height: min(92vh, 920px);
+        }
+
+        #createModal .modal-body {
+            flex: 1 1 auto;
+            min-height: 0;
+            overflow-y: auto;
+            -webkit-overflow-scrolling: touch;
+            overscroll-behavior: contain;
+        }
+
         .modal-header {
             position: sticky;
             top: 0;
@@ -1317,6 +1338,20 @@ require_once 'navbar.php';
                 padding: 16px !important;
                 max-height: none !important;
                 flex: 1 1 auto;
+                min-height: 0 !important;
+                overflow-y: auto !important;
+                -webkit-overflow-scrolling: touch;
+            }
+
+            #createModal .modal-panel {
+                height: 100dvh !important;
+                max-height: 100dvh !important;
+            }
+
+            #createModal .modal-panel>form {
+                min-height: 0 !important;
+                flex: 1 1 auto !important;
+                overflow: hidden !important;
             }
 
             .modal-footer {
@@ -1894,12 +1929,12 @@ require_once 'navbar.php';
 
                             <div>
                                 <label class="block text-[10px] font-black uppercase tracking-widest text-gray-500 mb-2">Periode Awal</label>
-                                <input type="date" name="tanggal_awal" value="<?php echo akw_h($periodStart); ?>" class="field">
+                                <input type="date" name="tanggal_awal" id="createPeriodStart" value="<?php echo akw_h($periodStart); ?>" class="field" onchange="filterCreateOrdersByPeriod()">
                             </div>
 
                             <div>
                                 <label class="block text-[10px] font-black uppercase tracking-widest text-gray-500 mb-2">Periode Akhir</label>
-                                <input type="date" name="tanggal_akhir" value="<?php echo akw_h($periodEnd); ?>" class="field">
+                                <input type="date" name="tanggal_akhir" id="createPeriodEnd" value="<?php echo akw_h($periodEnd); ?>" class="field" onchange="filterCreateOrdersByPeriod()">
                             </div>
                         </div>
                     </div>
@@ -1926,14 +1961,22 @@ require_once 'navbar.php';
 
                     <div class="modal-section">
                         <div class="flex items-center justify-between gap-3 mb-2">
-                            <label class="text-[10px] font-black uppercase tracking-widest text-gray-500">Pesanan Selesai</label>
+                            <label class="text-[10px] font-black uppercase tracking-widest text-gray-500">Pesanan Sesuai Periode</label>
                             <label class="text-xs font-bold cursor-pointer">
                                 <input type="checkbox" id="checkAllSources" checked onchange="toggleAllSources(this.checked)" class="accent-black">
                                 Pilih Semua
                             </label>
                         </div>
 
-                        <div class="border border-[#f0f0f0] divide-y divide-[#f5f5f5] max-h-60 overflow-y-auto">
+                        <div id="createPeriodInfo" class="mb-2 border border-blue-100 bg-blue-50 px-3 py-2 text-[10px] text-blue-700">
+                            Menampilkan pesanan selesai yang belum ditagihkan sesuai periode yang dipilih.
+                        </div>
+
+                        <div id="createOrderList" class="border border-[#f0f0f0] divide-y divide-[#f5f5f5] max-h-60 overflow-y-auto">
+                            <div id="createNoOrdersInPeriod" class="hidden p-5 text-center bg-gray-50">
+                                <p class="text-xs font-black text-gray-600">Tidak ada pesanan yang dapat ditagihkan pada periode ini.</p>
+                                <p class="text-[10px] text-gray-400 mt-2">Ubah Periode Awal / Periode Akhir untuk menampilkan pesanan lainnya.</p>
+                            </div>
                             <?php if (!$availableOrders): ?>
                                 <div class="p-5 text-center bg-gray-50">
                                     <p class="text-xs font-black text-gray-600">Belum ada pesanan selesai yang bisa ditagihkan.</p>
@@ -1943,8 +1986,17 @@ require_once 'navbar.php';
                                 </div>
                             <?php endif; ?>
                             <?php foreach ($availableOrders as $source): ?>
-                                <?php $alreadyBilled = (int)($source['sudah_ditagihkan'] ?? 0) === 1; ?>
-                                <label class="flex items-center gap-3 p-3 <?php echo $alreadyBilled ? 'bg-gray-50 opacity-70 cursor-not-allowed' : 'hover:bg-gray-50 cursor-pointer'; ?>">
+                                <?php
+                                $alreadyBilled = (int)($source['sudah_ditagihkan'] ?? 0) === 1;
+                                $sourcePeriodDate = !empty($source['tanggal_kirim'])
+                                    ? substr((string)$source['tanggal_kirim'], 0, 10)
+                                    : (!empty($source['tanggal_pemesanan'])
+                                        ? substr((string)$source['tanggal_pemesanan'], 0, 10)
+                                        : substr((string)$source['created_at'], 0, 10));
+                                ?>
+                                <label class="create-order-row flex items-center gap-3 p-3 <?php echo $alreadyBilled ? 'bg-gray-50 opacity-70 cursor-not-allowed' : 'hover:bg-gray-50 cursor-pointer'; ?>"
+                                    data-order-date="<?php echo akw_h($sourcePeriodDate); ?>"
+                                    data-already-billed="<?php echo $alreadyBilled ? '1' : '0'; ?>">
                                     <input type="checkbox"
                                         name="source_ids[]"
                                         value="<?php echo (int)$source['id']; ?>"
@@ -1969,7 +2021,8 @@ require_once 'navbar.php';
                                             <?php endif; ?>
                                         </div>
                                         <p class="text-[9px] text-gray-400 mt-1">
-                                            <?php echo akw_h($source['no_hp'] ?: '-'); ?>
+                                            <?php echo akw_h(date('d/m/Y', strtotime($sourcePeriodDate))); ?>
+                                            · <?php echo akw_h($source['no_hp'] ?: '-'); ?>
                                             · <?php echo akw_h($source['lokasi'] ?: '-'); ?>
                                             · <?php echo number_format((int)$source['total_unit']); ?> unit
                                         </p>
@@ -2204,13 +2257,76 @@ require_once 'navbar.php';
         }
 
         function openCreateModal() {
-            updateCreatePreview();
+            filterCreateOrdersByPeriod();
             openModal('createModal');
         }
 
+        function getCreatePeriod() {
+            var startEl = document.getElementById('createPeriodStart');
+            var endEl = document.getElementById('createPeriodEnd');
+            var start = startEl ? String(startEl.value || '') : '';
+            var end = endEl ? String(endEl.value || '') : '';
+            if (start && end && start > end) {
+                var tmp = start;
+                start = end;
+                end = tmp;
+                if (startEl) startEl.value = start;
+                if (endEl) endEl.value = end;
+            }
+            return {
+                start: start,
+                end: end
+            };
+        }
+
+        function filterCreateOrdersByPeriod() {
+            var period = getCreatePeriod();
+            var visibleBillable = 0;
+            var visibleAll = 0;
+
+            document.querySelectorAll('.create-order-row').forEach(function(row) {
+                var orderDate = String(row.getAttribute('data-order-date') || '');
+                var inPeriod = true;
+                if (period.start && orderDate && orderDate < period.start) inPeriod = false;
+                if (period.end && orderDate && orderDate > period.end) inPeriod = false;
+
+                row.style.display = inPeriod ? '' : 'none';
+                if (inPeriod) visibleAll++;
+
+                var input = row.querySelector('.source-check');
+                var alreadyBilled = row.getAttribute('data-already-billed') === '1';
+                if (input && !alreadyBilled) {
+                    input.checked = inPeriod;
+                    if (inPeriod) visibleBillable++;
+                }
+            });
+
+            var empty = document.getElementById('createNoOrdersInPeriod');
+            if (empty) empty.classList.toggle('hidden', visibleAll > 0);
+
+            var checkAll = document.getElementById('checkAllSources');
+            if (checkAll) {
+                checkAll.checked = visibleBillable > 0;
+                checkAll.disabled = visibleBillable === 0;
+            }
+
+            var info = document.getElementById('createPeriodInfo');
+            if (info) {
+                var labelStart = period.start ? formatDate(period.start) : '-';
+                var labelEnd = period.end ? formatDate(period.end) : '-';
+                info.innerHTML = '<strong>' + visibleBillable.toLocaleString('id-ID') + ' pesanan siap ditagihkan</strong>' +
+                    ' pada periode ' + labelStart + ' s.d. ' + labelEnd + '. ' +
+                    'Pesanan di luar periode otomatis disembunyikan.';
+            }
+
+            updateCreatePreview();
+        }
+
         function toggleAllSources(checked) {
-            document.querySelectorAll('.source-check:not(:disabled)').forEach(function(input) {
-                input.checked = checked;
+            document.querySelectorAll('.create-order-row').forEach(function(row) {
+                if (row.style.display === 'none') return;
+                var input = row.querySelector('.source-check:not(:disabled)');
+                if (input) input.checked = checked;
             });
             updateCreatePreview();
         }
@@ -2475,8 +2591,14 @@ require_once 'navbar.php';
 
         function signatureBlock(leftLabel, leftName, rightLabel, rightName) {
             return '<div style="display:grid;grid-template-columns:1fr 1fr;gap:80px;margin-top:48px;text-align:center;font-size:11px;">' +
-                '<div><p>' + escapeHtml(leftLabel) + '</p><div style="height:70px;"></div><p style="border-top:1px solid #111;padding-top:6px;">' + escapeHtml(leftName || '________________') + '</p></div>' +
+                '<div><p>' + escapeHtml(leftLabel) + '</p><div style="height:70px;"></div><p style="border-top:1px solid #111;padding-top:6px;">' + escapeHtml(leftName || '________________').replace(/\n/g, '<br>') + '</p></div>' +
                 '<div><p>' + escapeHtml(rightLabel) + '</p><div style="height:70px;"></div><p style="border-top:1px solid #111;padding-top:6px;">' + escapeHtml(rightName || currentUserName) + '</p></div></div>';
+        }
+
+        function signatureBlockSingle(label, name) {
+            return '<div style="width:55%;margin:48px auto 0;text-align:center;font-size:11px;">' +
+                '<p>' + escapeHtml(label) + '</p><div style="height:70px;"></div>' +
+                '<p style="border-top:1px solid #111;padding-top:6px;line-height:1.45;">' + escapeHtml(name || '________________').replace(/\n/g, '<br>') + '</p></div>';
         }
 
         function renderDocument(type) {
@@ -2495,12 +2617,12 @@ require_once 'navbar.php';
                     '<div>Nomor Dokumen</div><div>: <strong>SJ-' + escapeHtml(row.nomor_kwitansi) + '</strong></div>' +
                     '<div>Tanggal</div><div>: ' + formatDate(row.tanggal_kwitansi) + '</div>' +
                     '<div>Tujuan</div><div>: <strong>' + escapeHtml(row.nama_instansi) + '</strong></div>' +
-                    '<div>Penerima</div><div>: ' + escapeHtml(row.penerima_tagihan || '-') + '</div>' +
+                    '<div>Penerima</div><div>: <strong>Kasub. Perlengkapan dan Rumah Tangga</strong><br>Sekretariat Badan Strajak Diklat Kumdil Mahkamah Agung RI</div>' +
                     '<div>Alamat</div><div>: ' + escapeHtml(row.alamat_instansi || '-') + '</div></div>' +
                     '<table style="width:100%;border-collapse:collapse;margin-top:22px;font-size:11px;"><thead><tr style="background:#f3f4f6;"><th style="border:1px solid #bbb;padding:8px;width:40px;">No</th><th style="border:1px solid #bbb;padding:8px;text-align:left;">Nama Barang</th><th style="border:1px solid #bbb;padding:8px;width:150px;">Jumlah Dikirim</th></tr></thead><tbody>' + productRows(details, false) + '</tbody></table>' +
                     '<p style="font-size:10px;margin-top:16px;">Barang tersebut di atas telah dikirim berdasarkan pesanan yang menjadi sumber tagihan.</p>' +
                     '<p style="font-size:10px;margin-top:16px;font-weight:700;">Referensi Pesanan</p><table style="width:100%;border-collapse:collapse;margin-top:6px;font-size:9px;"><thead><tr style="background:#f9fafb;"><th style="border:1px solid #ddd;padding:7px;width:35px;">No</th><th style="border:1px solid #ddd;padding:7px;text-align:left;">Nomor Pesanan</th><th style="border:1px solid #ddd;padding:7px;text-align:left;">Pemesan</th><th style="border:1px solid #ddd;padding:7px;text-align:left;">Lokasi</th></tr></thead><tbody>' + sourceRows + '</tbody></table>' +
-                    signatureBlock('Penerima Barang', row.penerima_tagihan, 'Bendahara Koperasi', 'Nurma Saofiane') + '</div>';
+                    signatureBlockSingle('Penerima Barang', 'Kasub. Perlengkapan dan Rumah Tangga\nSekretariat Badan Strajak Diklat Kumdil Mahkamah Agung RI') + '</div>';
             } else if (currentDocumentType === 'faktur') {
                 document.getElementById('printPreviewTitle').textContent = 'Preview Faktur';
                 body = '<div class="print-sheet">' + documentHeader('FAKTUR PENJUALAN', 'AIR MINERAL') +

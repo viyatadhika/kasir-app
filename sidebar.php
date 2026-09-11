@@ -26,6 +26,7 @@ if (!isset($activeMenu)) {
         'dapur.php'                => 'dapur',
         'promo_cafe.php'           => 'promo_cafe',
         'air_pesanan.php'          => 'air_pesanan',
+        'air_tracking.php'         => 'air_tracking',
         'air_rekap_vendor.php'     => 'air_rekap_vendor',
         'air_tagihan_vendor.php'   => 'air_tagihan_vendor',
         'air_kwitansi.php'         => 'air_kwitansi',
@@ -90,6 +91,7 @@ if (!function_exists('sidebar_can_show')) {
                 'dashboard',
                 'air_pesanan',
                 'air_rekap_vendor',
+                'air_tracking',
                 'air_tagihan_vendor',
                 'air_kwitansi',
                 'air_produk',
@@ -188,11 +190,12 @@ $menuGroups = array(
     array(
         'title' => 'Air Mineral',
         'items' => array(
-            array('key' => 'air_pesanan',      'href' => 'air_pesanan.php',      'label' => 'Pemesanan Air'),
-            array('key' => 'air_rekap_vendor',   'href' => 'air_rekap_vendor.php',   'label' => 'Rekap Vendor'),
-            array('key' => 'air_tagihan_vendor', 'href' => 'air_tagihan_vendor.php', 'label' => 'Tagihan Vendor'),
-            array('key' => 'air_kwitansi',       'href' => 'air_kwitansi.php',       'label' => 'Kwitansi Penagihan'),
-            array('key' => 'air_produk',       'href' => 'air_produk.php',       'label' => 'Master Produk'),
+            array('key' => 'air_pesanan',        'href' => 'air_pesanan.php',        'label' => 'Pemesanan Air'),
+            array('key' => 'air_rekap_vendor',    'href' => 'air_rekap_vendor.php',    'label' => 'Rekap Vendor'),
+            array('key' => 'air_tagihan_vendor',  'href' => 'air_tagihan_vendor.php',  'label' => 'Tagihan Vendor'),
+            array('key' => 'air_kwitansi',        'href' => 'air_kwitansi.php',        'label' => 'Kwitansi Penagihan'),
+            array('key' => 'air_tracking',        'href' => 'air_tracking.php',        'label' => 'Tracking Pemesanan'),
+            array('key' => 'air_produk',          'href' => 'air_produk.php',          'label' => 'Master Produk'),
         ),
     ),
     array(
