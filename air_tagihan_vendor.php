@@ -35,6 +35,28 @@ if (!function_exists('atv_rp')) {
     }
 }
 
+
+if (!defined('ATV_PPN_PERSEN')) {
+    define('ATV_PPN_PERSEN', 0.0);
+}
+
+if (!function_exists('atv_ppn_value')) {
+    /** @param mixed $dpp */
+    function atv_ppn_value($dpp): float
+    {
+        return 0.0;
+    }
+}
+
+if (!function_exists('atv_total_with_ppn')) {
+    /** @param mixed $dpp */
+    function atv_total_with_ppn($dpp): float
+    {
+        $dpp = max(0, (float)($dpp ?? 0));
+        return $dpp;
+    }
+}
+
 if (!function_exists('atv_date')) {
     /**
      * @param mixed $value
@@ -126,9 +148,28 @@ if (!function_exists('atv_ensure_schema')) {
         if (!atv_column_exists($pdo, 'air_vendor_pembayaran', 'bukti_pembayaran')) {
             $pdo->exec("ALTER TABLE air_vendor_pembayaran ADD COLUMN bukti_pembayaran VARCHAR(255) NULL AFTER catatan");
         }
+        if (!atv_column_exists($pdo, 'air_vendor_pembayaran', 'is_historical')) {
+            $pdo->exec("ALTER TABLE air_vendor_pembayaran ADD COLUMN is_historical TINYINT(1) NOT NULL DEFAULT 0 AFTER bukti_pembayaran");
+        }
         if (!atv_column_exists($pdo, 'air_vendor_tagihan', 'invoice_vendor_file')) {
             $pdo->exec("ALTER TABLE air_vendor_tagihan ADD COLUMN invoice_vendor_file VARCHAR(255) NULL AFTER nomor_invoice_vendor");
         }
+        if (!atv_column_exists($pdo, 'air_vendor_tagihan', 'nilai_dpp')) {
+            $pdo->exec("ALTER TABLE air_vendor_tagihan ADD COLUMN nilai_dpp DECIMAL(15,2) NULL AFTER jatuh_tempo");
+        }
+        if (!atv_column_exists($pdo, 'air_vendor_tagihan', 'ppn_persen')) {
+            $pdo->exec("ALTER TABLE air_vendor_tagihan ADD COLUMN ppn_persen DECIMAL(5,2) NOT NULL DEFAULT 0.00 AFTER nilai_dpp");
+        }
+        if (!atv_column_exists($pdo, 'air_vendor_tagihan', 'ppn_nilai')) {
+            $pdo->exec("ALTER TABLE air_vendor_tagihan ADD COLUMN ppn_nilai DECIMAL(15,2) NOT NULL DEFAULT 0 AFTER ppn_persen");
+        }
+        $pdo->exec("
+            UPDATE air_vendor_tagihan
+            SET nilai_dpp = COALESCE(nilai_dpp, nilai_tagihan),
+                ppn_persen = 0.00,
+                ppn_nilai = 0.00,
+                nilai_tagihan = COALESCE(nilai_dpp, nilai_tagihan)
+        ");
     }
 }
 
@@ -220,6 +261,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $flash === '') {
             if (!$order) {
                 throw new RuntimeException('Rekap vendor tidak ditemukan.');
             }
+
+            $stmtSourceStatus = $pdo->prepare("
+                SELECT
+                    COUNT(*) AS total_source,
+                    SUM(CASE WHEN LOWER(TRIM(COALESCE(p.status,''))) = 'selesai' THEN 1 ELSE 0 END) AS total_selesai
+                FROM air_vendor_order_source s
+                JOIN air_pesanan p ON p.id = s.pesanan_id
+                WHERE s.vendor_order_id = :id
+            ");
+            $stmtSourceStatus->execute([':id' => $vendorOrderId]);
+            $sourceStatus = $stmtSourceStatus->fetch(PDO::FETCH_ASSOC) ?: [];
+            if ((int)($sourceStatus['total_source'] ?? 0) <= 0 || (int)($sourceStatus['total_source'] ?? 0) !== (int)($sourceStatus['total_selesai'] ?? 0)) {
+                throw new RuntimeException('Tagihan vendor hanya dapat dibuat jika seluruh pesanan pelanggan pada rekap ini sudah berstatus selesai.');
+            }
             if ((int)$order['total_diterima'] <= 0) {
                 throw new RuntimeException('Tagihan belum dapat dibuat karena jumlah pemesanan masih 0.');
             }
@@ -234,14 +289,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $flash === '') {
                 throw new RuntimeException('Rincian jumlah pemesanan tidak ditemukan.');
             }
 
-            $nilaiTagihan = 0.0;
+            $nilaiDpp = 0.0;
             foreach ($details as $d) {
-                $nilaiTagihan += ((int)$d['jumlah_diterima']) * ((float)$d['harga_vendor']);
+                $nilaiDpp += ((int)$d['jumlah_diterima']) * ((float)$d['harga_vendor']);
             }
+            $ppnNilai = 0.0;
+            $nilaiTagihan = $nilaiDpp;
 
             $pdo->beginTransaction();
             $nomorTagihan = 'TV-AIR-' . date('Ymd') . '-' . str_pad((string)$vendorOrderId, 4, '0', STR_PAD_LEFT);
-            $stmt = $pdo->prepare("\n                INSERT INTO air_vendor_tagihan\n                    (vendor_order_id, nomor_tagihan, nomor_invoice_vendor, vendor_nama, tanggal_tagihan, jatuh_tempo, nilai_tagihan, total_dibayar, status, catatan, created_at)\n                VALUES\n                    (:vendor_order_id, :nomor_tagihan, :invoice_vendor, :vendor_nama, :tanggal_tagihan, :jatuh_tempo, :nilai_tagihan, 0, 'belum_bayar', :catatan, NOW())\n            ");
+            $stmt = $pdo->prepare("\n                INSERT INTO air_vendor_tagihan\n                    (vendor_order_id, nomor_tagihan, nomor_invoice_vendor, vendor_nama, tanggal_tagihan, jatuh_tempo, nilai_dpp, ppn_persen, ppn_nilai, nilai_tagihan, total_dibayar, status, catatan, created_at)\n                VALUES\n                    (:vendor_order_id, :nomor_tagihan, :invoice_vendor, :vendor_nama, :tanggal_tagihan, :jatuh_tempo, :nilai_dpp, :ppn_persen, :ppn_nilai, :nilai_tagihan, 0, 'belum_bayar', :catatan, NOW())\n            ");
             $stmt->execute([
                 ':vendor_order_id' => $vendorOrderId,
                 ':nomor_tagihan' => $nomorTagihan,
@@ -249,6 +306,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $flash === '') {
                 ':vendor_nama' => (string)$order['vendor_nama'],
                 ':tanggal_tagihan' => $tanggalTagihan,
                 ':jatuh_tempo' => $jatuhTempo !== '' ? $jatuhTempo : null,
+                ':nilai_dpp' => $nilaiDpp,
+                ':ppn_persen' => ATV_PPN_PERSEN,
+                ':ppn_nilai' => $ppnNilai,
                 ':nilai_tagihan' => $nilaiTagihan,
                 ':catatan' => $catatan,
             ]);
@@ -311,6 +371,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $flash === '') {
         }
 
 
+
+
         if ($action === 'bulk_payment') {
             $vendorOrderIds = isset($_POST['vendor_order_ids']) && is_array($_POST['vendor_order_ids'])
                 ? array_values(array_unique(array_filter(array_map('intval', $_POST['vendor_order_ids']))))
@@ -352,7 +414,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $flash === '') {
              */
             if ($historicalOrderIds) {
                 $histPlaceholders = implode(',', array_fill(0, count($historicalOrderIds), '?'));
-                $historicalWhere = "p.id IN ($histPlaceholders) AND LOWER(TRIM(COALESCE(p.status,''))) <> 'batal'";
+                $historicalWhere = "p.id IN ($histPlaceholders) AND LOWER(TRIM(COALESCE(p.status,''))) = 'selesai'";
                 $historicalMarkers = ["UPPER(TRIM(COALESCE(p.nomor_pesanan,''))) LIKE 'AIR-LAMA-%'"];
                 if (atv_column_exists($pdo, 'air_pesanan', 'is_historical')) {
                     $historicalMarkers[] = "COALESCE(p.is_historical,0)=1";
@@ -375,7 +437,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $flash === '') {
                 $historicalRows = $stmtHist->fetchAll(PDO::FETCH_ASSOC);
 
                 if (count($historicalRows) !== count($historicalOrderIds)) {
-                    throw new RuntimeException('Sebagian data lama dibatalkan atau tidak lagi tersedia. Muat ulang halaman lalu pilih kembali.');
+                    throw new RuntimeException('Sebagian data lama belum berstatus selesai atau tidak lagi tersedia. Muat ulang halaman lalu pilih kembali.');
                 }
 
                 $stmtHistDetails = $pdo->prepare("
@@ -409,9 +471,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $flash === '') {
                 ");
                 $stmtCreateHistBill = $pdo->prepare("
                     INSERT INTO air_vendor_tagihan
-                        (vendor_order_id, nomor_tagihan, nomor_invoice_vendor, invoice_vendor_file, vendor_nama, tanggal_tagihan, jatuh_tempo, nilai_tagihan, total_dibayar, status, catatan, created_at)
+                        (vendor_order_id, nomor_tagihan, nomor_invoice_vendor, invoice_vendor_file, vendor_nama, tanggal_tagihan, jatuh_tempo, nilai_dpp, ppn_persen, ppn_nilai, nilai_tagihan, total_dibayar, status, catatan, created_at)
                     VALUES
-                        (:vendor_order_id, :nomor_tagihan, NULL, :invoice_vendor_file, :vendor_nama, :tanggal_tagihan, NULL, :nilai_tagihan, 0, 'belum_bayar', :catatan, NOW())
+                        (:vendor_order_id, :nomor_tagihan, NULL, :invoice_vendor_file, :vendor_nama, :tanggal_tagihan, NULL, :nilai_dpp, :ppn_persen, :ppn_nilai, :nilai_tagihan, 0, 'belum_bayar', :catatan, NOW())
                 ");
                 $stmtCreateHistBillDetail = $pdo->prepare("
                     INSERT INTO air_vendor_tagihan_detail
@@ -435,8 +497,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $flash === '') {
                     $manualHistNominal = isset($historicalNominal[(string)$hist['id']])
                         ? (float)$historicalNominal[(string)$hist['id']]
                         : 0.0;
-                    $nilaiTagihanHist = $nilaiHist > 0 ? $nilaiHist : max(0, $manualHistNominal);
-                    if ($nilaiTagihanHist <= 0) {
+                    $nilaiDppHist = $nilaiHist > 0 ? $nilaiHist : max(0, $manualHistNominal);
+                    $ppnNilaiHist = 0.0;
+                    $nilaiTagihanHist = $nilaiDppHist;
+                    if ($nilaiDppHist <= 0) {
                         throw new RuntimeException('Isi nominal tagihan untuk data lama ' . (string)$hist['nomor_pesanan'] . '. Data ini berasal dari sebelum aplikasi sehingga nilai vendor tidak dapat dihitung otomatis.');
                     }
 
@@ -490,6 +554,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $flash === '') {
                         ':invoice_vendor_file' => $invoiceVendorFile,
                         ':vendor_nama' => $historicalVendorName,
                         ':tanggal_tagihan' => $tanggalBayar,
+                        ':nilai_dpp' => $nilaiDppHist,
+                        ':ppn_persen' => ATV_PPN_PERSEN,
+                        ':ppn_nilai' => $ppnNilaiHist,
                         ':nilai_tagihan' => $nilaiTagihanHist,
                         ':catatan' => 'Tagihan historis otomatis dari ' . (string)$hist['nomor_pesanan'],
                     ]);
@@ -516,8 +583,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $flash === '') {
                             ':nama_produk' => 'Tagihan historis ' . (string)$hist['nomor_pesanan'],
                             ':satuan' => 'tagihan',
                             ':jumlah_diterima' => 1,
-                            ':harga_vendor' => $nilaiTagihanHist,
-                            ':subtotal' => $nilaiTagihanHist,
+                            ':harga_vendor' => $nilaiDppHist,
+                            ':subtotal' => $nilaiDppHist,
                         ]);
                     }
                     $vendorOrderIds[] = $histVendorOrderId;
@@ -526,12 +593,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $flash === '') {
             }
 
             $placeholders = implode(',', array_fill(0, count($vendorOrderIds), '?'));
-            $stmtOrders = $pdo->prepare("\n                SELECT vo.id, vo.nomor_vendor_order, vo.vendor_nama, vo.status\n                FROM air_vendor_order vo\n                WHERE vo.id IN ($placeholders)\n                  AND vo.status <> 'batal'\n                FOR UPDATE\n            ");
+            $stmtOrders = $pdo->prepare("\n                SELECT vo.id, vo.nomor_vendor_order, vo.vendor_nama, vo.status\n                FROM air_vendor_order vo\n                WHERE vo.id IN ($placeholders)\n                  AND vo.status <> 'batal'\n                  AND EXISTS (SELECT 1 FROM air_vendor_order_source src_done JOIN air_pesanan p_done ON p_done.id = src_done.pesanan_id WHERE src_done.vendor_order_id = vo.id)\n                  AND NOT EXISTS (SELECT 1 FROM air_vendor_order_source src_wait JOIN air_pesanan p_wait ON p_wait.id = src_wait.pesanan_id WHERE src_wait.vendor_order_id = vo.id AND LOWER(TRIM(COALESCE(p_wait.status,''))) <> 'selesai')\n                FOR UPDATE\n            ");
             $stmtOrders->execute($vendorOrderIds);
             $selectedOrders = $stmtOrders->fetchAll(PDO::FETCH_ASSOC);
 
             if (count($selectedOrders) !== count($vendorOrderIds)) {
-                throw new RuntimeException('Sebagian pemesanan yang dipilih tidak ditemukan atau sudah dibatalkan.');
+                throw new RuntimeException('Sebagian pemesanan yang dipilih belum berstatus selesai, tidak ditemukan, atau sudah dibatalkan.');
             }
 
             $vendors = array_values(array_unique(array_map(function ($o) {
@@ -543,7 +610,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $flash === '') {
 
             $stmtExistingBill = $pdo->prepare("SELECT * FROM air_vendor_tagihan WHERE vendor_order_id = :order_id LIMIT 1");
             $stmtOrderDetails = $pdo->prepare("\n                SELECT vd.produk_id, vd.nama_produk, vd.satuan, (CASE WHEN COALESCE(vd.jumlah_diterima,0) > 0 THEN vd.jumlah_diterima WHEN COALESCE(vd.jumlah_dipesan,0) > 0 THEN vd.jumlah_dipesan WHEN COALESCE(vd.jumlah_dikonfirmasi,0) > 0 THEN vd.jumlah_dikonfirmasi ELSE COALESCE(vd.jumlah_diminta,0) END) AS jumlah_diterima,\n                       COALESCE(ap.harga_vendor,0) AS harga_vendor\n                FROM air_vendor_order_detail vd\n                LEFT JOIN air_produk ap ON ap.id = vd.produk_id\n                WHERE vd.vendor_order_id = :order_id\n                  AND (CASE WHEN COALESCE(vd.jumlah_diterima,0) > 0 THEN vd.jumlah_diterima WHEN COALESCE(vd.jumlah_dipesan,0) > 0 THEN vd.jumlah_dipesan WHEN COALESCE(vd.jumlah_dikonfirmasi,0) > 0 THEN vd.jumlah_dikonfirmasi ELSE COALESCE(vd.jumlah_diminta,0) END) > 0\n                ORDER BY vd.id ASC\n            ");
-            $stmtCreateBill = $pdo->prepare("\n                INSERT INTO air_vendor_tagihan\n                    (vendor_order_id, nomor_tagihan, nomor_invoice_vendor, vendor_nama, tanggal_tagihan, jatuh_tempo, nilai_tagihan, total_dibayar, status, catatan, created_at)\n                VALUES\n                    (:vendor_order_id, :nomor_tagihan, NULL, :vendor_nama, :tanggal_tagihan, NULL, :nilai_tagihan, 0, 'belum_bayar', :catatan, NOW())\n            ");
+            $stmtCreateBill = $pdo->prepare("\n                INSERT INTO air_vendor_tagihan\n                    (vendor_order_id, nomor_tagihan, nomor_invoice_vendor, invoice_vendor_file, vendor_nama, tanggal_tagihan, jatuh_tempo, nilai_dpp, ppn_persen, ppn_nilai, nilai_tagihan, total_dibayar, status, catatan, created_at)\n                VALUES\n                    (:vendor_order_id, :nomor_tagihan, NULL, :invoice_vendor_file, :vendor_nama, :tanggal_tagihan, NULL, :nilai_dpp, :ppn_persen, :ppn_nilai, :nilai_tagihan, 0, 'belum_bayar', :catatan, NOW())\n            ");
             $stmtCreateDetail = $pdo->prepare("\n                INSERT INTO air_vendor_tagihan_detail\n                    (tagihan_id, produk_id, nama_produk, satuan, jumlah_diterima, harga_vendor, subtotal, created_at)\n                VALUES\n                    (:tagihan_id, :produk_id, :nama_produk, :satuan, :jumlah_diterima, :harga_vendor, :subtotal, NOW())\n            ");
             $stmtPay = $pdo->prepare("\n                INSERT INTO air_vendor_pembayaran\n                    (tagihan_id, tanggal_bayar, nominal, metode, nomor_referensi, catatan, bukti_pembayaran, created_by, created_at)\n                VALUES\n                    (:tagihan_id, :tanggal_bayar, :nominal, :metode, :referensi, :catatan, :bukti, :created_by, NOW())\n            ");
 
@@ -571,10 +638,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $flash === '') {
                         throw new RuntimeException('Pemesanan ' . (string)$order['nomor_vendor_order'] . ' belum memiliki jumlah pemesanan yang dapat ditagihkan.');
                     }
 
-                    $nilaiTagihan = 0.0;
+                    $nilaiDpp = 0.0;
                     foreach ($details as $d) {
-                        $nilaiTagihan += ((int)$d['jumlah_diterima']) * ((float)$d['harga_vendor']);
+                        $nilaiDpp += ((int)$d['jumlah_diterima']) * ((float)$d['harga_vendor']);
                     }
+                    $ppnNilai = 0.0;
+                    $nilaiTagihan = $nilaiDpp;
                     if ($nilaiTagihan <= 0) {
                         throw new RuntimeException('Nilai tagihan untuk ' . (string)$order['nomor_vendor_order'] . ' masih Rp 0. Lengkapi Harga Vendor pada Master Produk.');
                     }
@@ -586,6 +655,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $flash === '') {
                         ':invoice_vendor_file' => $invoiceVendorFile,
                         ':vendor_nama' => (string)$order['vendor_nama'],
                         ':tanggal_tagihan' => $tanggalBayar,
+                        ':nilai_dpp' => $nilaiDpp,
+                        ':ppn_persen' => ATV_PPN_PERSEN,
+                        ':ppn_nilai' => $ppnNilai,
                         ':nilai_tagihan' => $nilaiTagihan,
                         ':catatan' => 'Tagihan dibuat otomatis saat pembayaran vendor',
                     ]);
@@ -676,7 +748,6 @@ $summary = [
     'belum_bayar' => 0,
     'sebagian' => 0,
     'lunas' => 0,
-    'belum_ditagihkan' => 0,
 ];
 $rows = [];
 $billableOrders = [];
@@ -704,11 +775,12 @@ try {
         if (array_key_exists($k, $summary)) $summary[$k] = $v;
     }
 
-    $summary['belum_ditagihkan'] = (int)$pdo->query("\n        SELECT COUNT(*)\n        FROM air_vendor_order vo\n        WHERE vo.status <> 'batal'\n          AND EXISTS (SELECT 1 FROM air_vendor_order_detail d WHERE d.vendor_order_id = vo.id AND (CASE WHEN COALESCE(d.jumlah_diterima,0) > 0 THEN d.jumlah_diterima WHEN COALESCE(d.jumlah_dipesan,0) > 0 THEN d.jumlah_dipesan WHEN COALESCE(d.jumlah_dikonfirmasi,0) > 0 THEN d.jumlah_dikonfirmasi ELSE COALESCE(d.jumlah_diminta,0) END) > 0)\n          AND NOT EXISTS (SELECT 1 FROM air_vendor_tagihan t WHERE t.vendor_order_id = vo.id)\n    ")->fetchColumn();
+    $billableOrders = $pdo->query("\n        SELECT vo.id, vo.nomor_vendor_order, vo.vendor_nama, vo.tanggal_kebutuhan, vo.status,\n               COALESCE(SUM((CASE WHEN COALESCE(vd.jumlah_diterima,0) > 0 THEN vd.jumlah_diterima WHEN COALESCE(vd.jumlah_dipesan,0) > 0 THEN vd.jumlah_dipesan WHEN COALESCE(vd.jumlah_dikonfirmasi,0) > 0 THEN vd.jumlah_dikonfirmasi ELSE COALESCE(vd.jumlah_diminta,0) END)),0) AS total_diterima,\n               COALESCE(SUM((CASE WHEN COALESCE(vd.jumlah_diterima,0) > 0 THEN vd.jumlah_diterima WHEN COALESCE(vd.jumlah_dipesan,0) > 0 THEN vd.jumlah_dipesan WHEN COALESCE(vd.jumlah_dikonfirmasi,0) > 0 THEN vd.jumlah_dikonfirmasi ELSE COALESCE(vd.jumlah_diminta,0) END) * COALESCE(ap.harga_vendor,0)),0) AS estimasi_tagihan\n        FROM air_vendor_order vo\n        JOIN air_vendor_order_detail vd ON vd.vendor_order_id = vo.id\n        LEFT JOIN air_produk ap ON ap.id = vd.produk_id\n        WHERE vo.status <> 'batal'\n          AND EXISTS (SELECT 1 FROM air_vendor_order_source src_done JOIN air_pesanan p_done ON p_done.id = src_done.pesanan_id WHERE src_done.vendor_order_id = vo.id)\n          AND NOT EXISTS (SELECT 1 FROM air_vendor_order_source src_wait JOIN air_pesanan p_wait ON p_wait.id = src_wait.pesanan_id WHERE src_wait.vendor_order_id = vo.id AND LOWER(TRIM(COALESCE(p_wait.status,''))) <> 'selesai')\n          AND (CASE WHEN COALESCE(vd.jumlah_diterima,0) > 0 THEN vd.jumlah_diterima WHEN COALESCE(vd.jumlah_dipesan,0) > 0 THEN vd.jumlah_dipesan WHEN COALESCE(vd.jumlah_dikonfirmasi,0) > 0 THEN vd.jumlah_dikonfirmasi ELSE COALESCE(vd.jumlah_diminta,0) END) > 0\n          AND NOT EXISTS (SELECT 1 FROM air_vendor_tagihan t WHERE t.vendor_order_id = vo.id)\n        GROUP BY vo.id, vo.nomor_vendor_order, vo.vendor_nama, vo.tanggal_kebutuhan, vo.status\n        ORDER BY vo.tanggal_kebutuhan DESC, vo.id DESC\n        LIMIT 50\n    ")->fetchAll(PDO::FETCH_ASSOC);
 
-    $billableOrders = $pdo->query("\n        SELECT vo.id, vo.nomor_vendor_order, vo.vendor_nama, vo.tanggal_kebutuhan, vo.status,\n               COALESCE(SUM((CASE WHEN COALESCE(vd.jumlah_diterima,0) > 0 THEN vd.jumlah_diterima WHEN COALESCE(vd.jumlah_dipesan,0) > 0 THEN vd.jumlah_dipesan WHEN COALESCE(vd.jumlah_dikonfirmasi,0) > 0 THEN vd.jumlah_dikonfirmasi ELSE COALESCE(vd.jumlah_diminta,0) END)),0) AS total_diterima,\n               COALESCE(SUM((CASE WHEN COALESCE(vd.jumlah_diterima,0) > 0 THEN vd.jumlah_diterima WHEN COALESCE(vd.jumlah_dipesan,0) > 0 THEN vd.jumlah_dipesan WHEN COALESCE(vd.jumlah_dikonfirmasi,0) > 0 THEN vd.jumlah_dikonfirmasi ELSE COALESCE(vd.jumlah_diminta,0) END) * COALESCE(ap.harga_vendor,0)),0) AS estimasi_tagihan\n        FROM air_vendor_order vo\n        JOIN air_vendor_order_detail vd ON vd.vendor_order_id = vo.id\n        LEFT JOIN air_produk ap ON ap.id = vd.produk_id\n        WHERE vo.status <> 'batal'\n          AND (CASE WHEN COALESCE(vd.jumlah_diterima,0) > 0 THEN vd.jumlah_diterima WHEN COALESCE(vd.jumlah_dipesan,0) > 0 THEN vd.jumlah_dipesan WHEN COALESCE(vd.jumlah_dikonfirmasi,0) > 0 THEN vd.jumlah_dikonfirmasi ELSE COALESCE(vd.jumlah_diminta,0) END) > 0\n          AND NOT EXISTS (SELECT 1 FROM air_vendor_tagihan t WHERE t.vendor_order_id = vo.id)\n        GROUP BY vo.id, vo.nomor_vendor_order, vo.vendor_nama, vo.tanggal_kebutuhan, vo.status\n        ORDER BY vo.tanggal_kebutuhan DESC, vo.id DESC\n        LIMIT 50\n    ")->fetchAll(PDO::FETCH_ASSOC);
-
-    $where = ['1=1'];
+    $where = [
+        "EXISTS (SELECT 1 FROM air_vendor_order_source src_done JOIN air_pesanan p_done ON p_done.id = src_done.pesanan_id WHERE src_done.vendor_order_id = vo.id)",
+        "NOT EXISTS (SELECT 1 FROM air_vendor_order_source src_wait JOIN air_pesanan p_wait ON p_wait.id = src_wait.pesanan_id WHERE src_wait.vendor_order_id = vo.id AND LOWER(TRIM(COALESCE(p_wait.status,''))) <> 'selesai')"
+    ];
     $params = [];
     if ($q !== '') {
         $where[] = '(t.nomor_tagihan LIKE :q OR t.nomor_invoice_vendor LIKE :q OR t.vendor_nama LIKE :q OR vo.nomor_vendor_order LIKE :q)';
@@ -752,7 +824,7 @@ try {
 
 $payableOrders = [];
 try {
-    $payableOrders = $pdo->query("\n        SELECT\n            vo.id AS vendor_order_id,\n            vo.nomor_vendor_order,\n            vo.vendor_nama,\n            vo.tanggal_kebutuhan,\n            COALESCE(SUM((CASE WHEN COALESCE(vd.jumlah_diterima,0) > 0 THEN vd.jumlah_diterima WHEN COALESCE(vd.jumlah_dipesan,0) > 0 THEN vd.jumlah_dipesan WHEN COALESCE(vd.jumlah_dikonfirmasi,0) > 0 THEN vd.jumlah_dikonfirmasi ELSE COALESCE(vd.jumlah_diminta,0) END)),0) AS total_diterima,\n            COALESCE(SUM((CASE WHEN COALESCE(vd.jumlah_diterima,0) > 0 THEN vd.jumlah_diterima WHEN COALESCE(vd.jumlah_dipesan,0) > 0 THEN vd.jumlah_dipesan WHEN COALESCE(vd.jumlah_dikonfirmasi,0) > 0 THEN vd.jumlah_dikonfirmasi ELSE COALESCE(vd.jumlah_diminta,0) END) * COALESCE(ap.harga_vendor,0)),0) AS nilai_order,\n            t.id AS tagihan_id,\n            t.nomor_tagihan,\n            t.tanggal_tagihan,\n            COALESCE(t.nilai_tagihan, COALESCE(SUM((CASE WHEN COALESCE(vd.jumlah_diterima,0) > 0 THEN vd.jumlah_diterima WHEN COALESCE(vd.jumlah_dipesan,0) > 0 THEN vd.jumlah_dipesan WHEN COALESCE(vd.jumlah_dikonfirmasi,0) > 0 THEN vd.jumlah_dikonfirmasi ELSE COALESCE(vd.jumlah_diminta,0) END) * COALESCE(ap.harga_vendor,0)),0)) AS nilai_tagihan,\n            COALESCE(t.total_dibayar,0) AS total_dibayar,\n            GREATEST(\n                COALESCE(t.nilai_tagihan, COALESCE(SUM((CASE WHEN COALESCE(vd.jumlah_diterima,0) > 0 THEN vd.jumlah_diterima WHEN COALESCE(vd.jumlah_dipesan,0) > 0 THEN vd.jumlah_dipesan WHEN COALESCE(vd.jumlah_dikonfirmasi,0) > 0 THEN vd.jumlah_dikonfirmasi ELSE COALESCE(vd.jumlah_diminta,0) END) * COALESCE(ap.harga_vendor,0)),0)) - COALESCE(t.total_dibayar,0),\n                0\n            ) AS sisa_tagihan,\n            CASE\n                WHEN t.id IS NULL THEN 'belum_bayar'\n                ELSE t.status\n            END AS status_pembayaran,\n            CASE\n                WHEN SUM(CASE WHEN COALESCE(vd.jumlah_diterima,0) > 0 THEN 1 ELSE 0 END) > 0 THEN 'penerimaan'\n                ELSE 'data_lama'\n            END AS sumber_jumlah\n        FROM air_vendor_order vo\n        JOIN air_vendor_order_detail vd ON vd.vendor_order_id = vo.id\n        LEFT JOIN air_produk ap ON ap.id = vd.produk_id\n        LEFT JOIN air_vendor_tagihan t ON t.vendor_order_id = vo.id\n        WHERE vo.status <> 'batal'\n          AND (CASE WHEN COALESCE(vd.jumlah_diterima,0) > 0 THEN vd.jumlah_diterima WHEN COALESCE(vd.jumlah_dipesan,0) > 0 THEN vd.jumlah_dipesan WHEN COALESCE(vd.jumlah_dikonfirmasi,0) > 0 THEN vd.jumlah_dikonfirmasi ELSE COALESCE(vd.jumlah_diminta,0) END) > 0\n        GROUP BY\n            vo.id, vo.nomor_vendor_order, vo.vendor_nama, vo.tanggal_kebutuhan,\n            t.id, t.nomor_tagihan, t.tanggal_tagihan, t.nilai_tagihan, t.total_dibayar, t.status\n        HAVING sisa_tagihan > 0\n        ORDER BY vo.vendor_nama ASC, vo.tanggal_kebutuhan ASC, vo.id ASC\n    ")->fetchAll(PDO::FETCH_ASSOC);
+    $payableOrders = $pdo->query("\n        SELECT\n            vo.id AS vendor_order_id,\n            vo.nomor_vendor_order,\n            vo.vendor_nama,\n            vo.tanggal_kebutuhan,\n            COALESCE(SUM((CASE WHEN COALESCE(vd.jumlah_diterima,0) > 0 THEN vd.jumlah_diterima WHEN COALESCE(vd.jumlah_dipesan,0) > 0 THEN vd.jumlah_dipesan WHEN COALESCE(vd.jumlah_dikonfirmasi,0) > 0 THEN vd.jumlah_dikonfirmasi ELSE COALESCE(vd.jumlah_diminta,0) END)),0) AS total_diterima,\n            COALESCE(SUM((CASE WHEN COALESCE(vd.jumlah_diterima,0) > 0 THEN vd.jumlah_diterima WHEN COALESCE(vd.jumlah_dipesan,0) > 0 THEN vd.jumlah_dipesan WHEN COALESCE(vd.jumlah_dikonfirmasi,0) > 0 THEN vd.jumlah_dikonfirmasi ELSE COALESCE(vd.jumlah_diminta,0) END) * COALESCE(ap.harga_vendor,0)),0) AS nilai_order,\n            t.id AS tagihan_id,\n            t.nomor_tagihan,\n            t.tanggal_tagihan,\n            COALESCE(t.nilai_tagihan, COALESCE(SUM((CASE WHEN COALESCE(vd.jumlah_diterima,0) > 0 THEN vd.jumlah_diterima WHEN COALESCE(vd.jumlah_dipesan,0) > 0 THEN vd.jumlah_dipesan WHEN COALESCE(vd.jumlah_dikonfirmasi,0) > 0 THEN vd.jumlah_dikonfirmasi ELSE COALESCE(vd.jumlah_diminta,0) END) * COALESCE(ap.harga_vendor,0)),0)) AS nilai_tagihan,\n            COALESCE(t.total_dibayar,0) AS total_dibayar,\n            GREATEST(\n                COALESCE(t.nilai_tagihan, COALESCE(SUM((CASE WHEN COALESCE(vd.jumlah_diterima,0) > 0 THEN vd.jumlah_diterima WHEN COALESCE(vd.jumlah_dipesan,0) > 0 THEN vd.jumlah_dipesan WHEN COALESCE(vd.jumlah_dikonfirmasi,0) > 0 THEN vd.jumlah_dikonfirmasi ELSE COALESCE(vd.jumlah_diminta,0) END) * COALESCE(ap.harga_vendor,0)),0)) - COALESCE(t.total_dibayar,0),\n                0\n            ) AS sisa_tagihan,\n            CASE\n                WHEN t.id IS NULL THEN 'belum_bayar'\n                ELSE t.status\n            END AS status_pembayaran,\n            CASE\n                WHEN SUM(CASE WHEN COALESCE(vd.jumlah_diterima,0) > 0 THEN 1 ELSE 0 END) > 0 THEN 'penerimaan'\n                ELSE 'data_lama'\n            END AS sumber_jumlah\n        FROM air_vendor_order vo\n        JOIN air_vendor_order_detail vd ON vd.vendor_order_id = vo.id\n        LEFT JOIN air_produk ap ON ap.id = vd.produk_id\n        LEFT JOIN air_vendor_tagihan t ON t.vendor_order_id = vo.id\n        WHERE vo.status <> 'batal'\n          AND EXISTS (SELECT 1 FROM air_vendor_order_source src_done JOIN air_pesanan p_done ON p_done.id = src_done.pesanan_id WHERE src_done.vendor_order_id = vo.id)\n          AND NOT EXISTS (SELECT 1 FROM air_vendor_order_source src_wait JOIN air_pesanan p_wait ON p_wait.id = src_wait.pesanan_id WHERE src_wait.vendor_order_id = vo.id AND LOWER(TRIM(COALESCE(p_wait.status,''))) <> 'selesai')\n          AND (CASE WHEN COALESCE(vd.jumlah_diterima,0) > 0 THEN vd.jumlah_diterima WHEN COALESCE(vd.jumlah_dipesan,0) > 0 THEN vd.jumlah_dipesan WHEN COALESCE(vd.jumlah_dikonfirmasi,0) > 0 THEN vd.jumlah_dikonfirmasi ELSE COALESCE(vd.jumlah_diminta,0) END) > 0\n        GROUP BY\n            vo.id, vo.nomor_vendor_order, vo.vendor_nama, vo.tanggal_kebutuhan,\n            t.id, t.nomor_tagihan, t.tanggal_tagihan, t.nilai_tagihan, t.total_dibayar, t.status\n        HAVING sisa_tagihan > 0\n        ORDER BY vo.vendor_nama ASC, vo.tanggal_kebutuhan ASC, vo.id ASC\n    ")->fetchAll(PDO::FETCH_ASSOC);
 } catch (Throwable $e) {
     $payableOrders = [];
 }
@@ -784,7 +856,7 @@ try {
         ? 'p.pelanggan_id'
         : 'NULL';
 
-    $stmtHistBase = $pdo->query("\n        SELECT\n            p.id AS pesanan_id,\n            p.nomor_pesanan,\n            {$tanggalPemesananSelect} AS tanggal_pemesanan,\n            {$tanggalKirimSelect} AS tanggal_kirim,\n            {$pelangganIdSelect} AS pelanggan_id\n        FROM air_pesanan p\n        WHERE UPPER(TRIM(COALESCE(p.nomor_pesanan,''))) LIKE 'AIR-LAMA-%'\n          AND LOWER(TRIM(COALESCE(p.status,''))) <> 'batal'\n        ORDER BY COALESCE({$tanggalKirimSelect}, {$tanggalPemesananSelect}, DATE(p.created_at)) ASC, p.id ASC\n    ");
+    $stmtHistBase = $pdo->query("\n        SELECT\n            p.id AS pesanan_id,\n            p.nomor_pesanan,\n            {$tanggalPemesananSelect} AS tanggal_pemesanan,\n            {$tanggalKirimSelect} AS tanggal_kirim,\n            {$pelangganIdSelect} AS pelanggan_id\n        FROM air_pesanan p\n        WHERE UPPER(TRIM(COALESCE(p.nomor_pesanan,''))) LIKE 'AIR-LAMA-%'\n          AND LOWER(TRIM(COALESCE(p.status,''))) = 'selesai'\n        ORDER BY COALESCE({$tanggalKirimSelect}, {$tanggalPemesananSelect}, DATE(p.created_at)) ASC, p.id ASC\n    ");
     $histBaseRows = $stmtHistBase->fetchAll(PDO::FETCH_ASSOC);
 
     $stmtCustomerName = null;
@@ -880,10 +952,8 @@ try {
  * - Nilai Tagihan   : nilai bruto seluruh kewajiban yang masih belum lunas.
  * - Sudah Dibayar   : pembayaran yang sudah masuk untuk kewajiban tersebut.
  * - Sisa Hutang     : nilai yang masih harus dibayar.
- * - Belum Bayar     : kewajiban yang belum mempunyai pembayaran sama sekali.
+ * - Belum Dibayar   : kewajiban yang belum mempunyai pembayaran sama sekali.
  * - Sebagian        : kewajiban yang sudah dibayar sebagian.
- * - Belum Ditagihkan: kewajiban yang belum mempunyai row air_vendor_tagihan,
- *                     termasuk data historis AIR-LAMA-* yang belum direkap.
  */
 try {
     $derivedSummary = [
@@ -894,7 +964,6 @@ try {
         'belum_bayar' => 0,
         'sebagian' => 0,
         'lunas' => 0,
-        'belum_ditagihkan' => 0,
     ];
 
     // Pesanan yang sudah mempunyai rekap vendor aktif tidak boleh dihitung lagi
@@ -928,10 +997,6 @@ try {
         } else {
             $derivedSummary['sebagian']++;
         }
-
-        if (empty($po['tagihan_id'])) {
-            $derivedSummary['belum_ditagihkan']++;
-        }
     }
 
     foreach ($historicalPayableOrders as $hp) {
@@ -942,7 +1007,7 @@ try {
             continue;
         }
 
-        $nilaiHist = max(0, (float)($hp['nilai_vendor'] ?? 0));
+        $nilaiHist = atv_total_with_ppn($hp['nilai_vendor'] ?? 0);
 
         // Data lama yang belum direkap tetap merupakan kewajiban meskipun nilai
         // historisnya belum dapat dihitung otomatis. Nominalnya nanti dapat diisi
@@ -951,7 +1016,6 @@ try {
         $derivedSummary['nilai_tagihan'] += $nilaiHist;
         $derivedSummary['sisa_hutang'] += $nilaiHist;
         $derivedSummary['belum_bayar']++;
-        $derivedSummary['belum_ditagihkan']++;
     }
 
     // Gunakan ringkasan berbasis kewajiban yang belum lunas sebagai sumber card.
@@ -1424,7 +1488,7 @@ require_once 'navbar.php';
             </div>
         </div>
 
-        <div class="grid grid-cols-2 md:grid-cols-4 xl:grid-cols-7 gap-3 mb-6">
+        <div class="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-5 gap-3 mb-6">
             <div class="card summary-card p-4">
                 <p class="text-[9px] font-bold uppercase tracking-widest text-gray-400">Total Tagihan</p>
                 <p class="text-2xl font-bold mt-2"><?= number_format((int)$summary['total_tagihan']) ?></p>
@@ -1445,16 +1509,8 @@ require_once 'navbar.php';
                 <p class="text-[9px] text-gray-400 mt-1">Tagihan dikurangi pembayaran</p>
             </div>
             <div class="card summary-card p-4">
-                <p class="text-[9px] font-bold uppercase tracking-widest text-orange-600">Belum Bayar</p>
+                <p class="text-[9px] font-bold uppercase tracking-widest text-orange-600">Belum Dibayar</p>
                 <p class="text-2xl font-bold text-orange-700 mt-2"><?= number_format((int)$summary['belum_bayar']) ?></p>
-            </div>
-            <div class="card summary-card p-4">
-                <p class="text-[9px] font-bold uppercase tracking-widest text-purple-600">Sebagian</p>
-                <p class="text-2xl font-bold text-purple-700 mt-2"><?= number_format((int)$summary['sebagian']) ?></p>
-            </div>
-            <div class="card summary-card p-4">
-                <p class="text-[9px] font-bold uppercase tracking-widest text-amber-600">Belum Ditagihkan</p>
-                <p class="text-2xl font-bold text-amber-700 mt-2"><?= number_format((int)$summary['belum_ditagihkan']) ?></p>
             </div>
         </div>
 
@@ -1473,7 +1529,7 @@ require_once 'navbar.php';
                 </div>
                 <div><label class="block text-[9px] font-bold uppercase tracking-widest text-gray-400 mb-2">Status</label><select name="status" class="field">
                         <option value="">Semua Status</option>
-                        <option value="belum_bayar" <?= $status === 'belum_bayar' ? 'selected' : '' ?>>Belum Bayar</option>
+                        <option value="belum_bayar" <?= $status === 'belum_bayar' ? 'selected' : '' ?>>Belum Dibayar</option>
                         <option value="sebagian" <?= $status === 'sebagian' ? 'selected' : '' ?>>Sebagian</option>
                         <option value="lunas" <?= $status === 'lunas' ? 'selected' : '' ?>>Lunas</option>
                     </select></div>
@@ -1498,7 +1554,8 @@ require_once 'navbar.php';
                             <th class="px-4 py-3 text-[9px] uppercase text-gray-400">Vendor</th>
                             <th class="px-4 py-3 text-[9px] uppercase text-gray-400">Rekap Vendor</th>
                             <th class="px-4 py-3 text-[9px] uppercase text-gray-400 text-center">Unit</th>
-                            <th class="px-4 py-3 text-[9px] uppercase text-gray-400 text-right">Nilai Tagihan</th>
+                            <th class="px-4 py-3 text-[9px] uppercase text-gray-400 text-right">Nilai</th>
+                            <th class="px-4 py-3 text-[9px] uppercase text-gray-400 text-right">Total Tagihan</th>
                             <th class="px-4 py-3 text-[9px] uppercase text-gray-400 text-right">Dibayar</th>
                             <th class="px-4 py-3 text-[9px] uppercase text-gray-400 text-right">Sisa</th>
                             <th class="px-4 py-3 text-[9px] uppercase text-gray-400 text-center">Status</th>
@@ -1507,7 +1564,7 @@ require_once 'navbar.php';
                     </thead>
                     <tbody class="divide-y divide-gray-100">
                         <?php if (!$rows): ?><tr>
-                                <td colspan="9" class="py-16 text-center text-xs text-gray-400">Belum ada tagihan vendor.</td>
+                                <td colspan="11" class="py-16 text-center text-xs text-gray-400">Belum ada tagihan vendor.</td>
                             </tr><?php endif; ?>
                         <?php foreach ($rows as $r): ?>
                             <?php $badge = $r['status'] === 'lunas' ? 'border-green-200 bg-green-50 text-green-700' : ($r['status'] === 'sebagian' ? 'border-purple-200 bg-purple-50 text-purple-700' : 'border-orange-200 bg-orange-50 text-orange-700'); ?>
@@ -1522,10 +1579,11 @@ require_once 'navbar.php';
                                     <p class="text-[9px] text-gray-400 mt-1">Kebutuhan <?= atv_date($r['tanggal_kebutuhan']) ?></p>
                                 </td>
                                 <td class="px-4 py-4 text-center font-bold"><?= number_format((int)$r['total_unit']) ?></td>
+                                <td class="px-4 py-4 text-right"><?= atv_rp($r['nilai_tagihan'] ?? $r['nilai_dpp'] ?? 0) ?></td>
                                 <td class="px-4 py-4 text-right font-bold"><?= atv_rp($r['nilai_tagihan']) ?></td>
                                 <td class="px-4 py-4 text-right font-bold text-green-700"><?= atv_rp($r['total_dibayar']) ?></td>
                                 <td class="px-4 py-4 text-right font-bold text-red-700"><?= atv_rp($r['sisa_tagihan']) ?></td>
-                                <td class="px-4 py-4 text-center"><span class="status-badge <?= $badge ?>"><?= atv_h($r['status'] === 'belum_bayar' ? 'Belum Bayar' : ucfirst($r['status'])) ?></span></td>
+                                <td class="px-4 py-4 text-center"><span class="status-badge <?= $badge ?>"><?= atv_h($r['status'] === 'belum_bayar' ? 'Belum Dibayar' : ucfirst($r['status'])) ?></span></td>
                                 <td class="px-4 py-4">
                                     <div class="flex items-center gap-1.5"><button type="button" class="btn" onclick='openDetail(<?= json_encode($r, JSON_UNESCAPED_UNICODE | JSON_HEX_APOS | JSON_HEX_QUOT) ?>)'><i data-lucide="eye" class="w-3.5 h-3.5"></i> Detail</button><?php if ($r['status'] !== 'lunas'): ?><button type="button" class="btn btn-dark" onclick='openPayment(<?= json_encode($r, JSON_UNESCAPED_UNICODE | JSON_HEX_APOS | JSON_HEX_QUOT) ?>)'><i data-lucide="wallet-cards" class="w-3.5 h-3.5"></i> Bayar</button><?php endif; ?></div>
                                 </td>
@@ -1549,7 +1607,7 @@ require_once 'navbar.php';
                             <div>
                                 <p class="text-xs font-bold"><?= atv_h($r['nomor_tagihan']) ?></p>
                                 <p class="text-[10px] text-gray-400 mt-1"><?= atv_h($r['vendor_nama']) ?></p>
-                            </div><span class="status-badge <?= $badge ?>"><?= atv_h($r['status'] === 'belum_bayar' ? 'Belum Bayar' : ucfirst($r['status'])) ?></span>
+                            </div><span class="status-badge <?= $badge ?>"><?= atv_h($r['status'] === 'belum_bayar' ? 'Belum Dibayar' : ucfirst($r['status'])) ?></span>
                         </div>
                         <div class="grid grid-cols-2 gap-3 mt-4">
                             <div>
@@ -1661,7 +1719,7 @@ require_once 'navbar.php';
                 <div>
                     <p class="text-[9px] uppercase font-bold text-gray-400">Pembayaran Vendor</p>
                     <h2 class="text-base font-bold mt-1">Buat Pembayaran Vendor</h2>
-                    <p class="text-[10px] text-gray-400 mt-1">Pilih satu atau beberapa pemesanan yang belum dibayar dari vendor yang sama.</p>
+                    <p class="text-[10px] text-gray-400 mt-1">Pilih satu atau beberapa pemesanan berstatus selesai yang belum dibayar dari vendor yang sama.</p>
                 </div>
                 <button type="button" class="modal-close" onclick="closeModal('bulkPaymentModal')" aria-label="Tutup">&times;</button>
             </div>
@@ -1671,8 +1729,8 @@ require_once 'navbar.php';
                     <div class="border border-gray-200">
                         <div class="p-3 border-b bg-gray-50 flex items-center justify-between gap-3">
                             <div>
-                                <p class="text-[9px] uppercase font-bold text-gray-400">Pemesanan Belum Dibayar</p>
-                                <p id="bulkVendorHint" class="text-[10px] text-gray-500 mt-1">Pilih pemesanan dari satu vendor. Data lama AIR-LAMA yang belum pernah masuk rekap vendor aktif muncul langsung pada daftar ini.</p>
+                                <p class="text-[9px] uppercase font-bold text-gray-400">Pemesanan Selesai & Belum Dibayar</p>
+                                <p id="bulkVendorHint" class="text-[10px] text-gray-500 mt-1">Hanya pesanan berstatus selesai yang dapat dibayarkan ke vendor. Data baru maupun AIR-LAMA mengikuti aturan yang sama.</p>
                             </div>
                             <label class="text-[10px] font-bold cursor-pointer"><input type="checkbox" id="modalCheckAll" class="accent-black" onchange="toggleModalAll(this.checked)"> Pilih Semua Vendor Ini</label>
                         </div>
@@ -1694,20 +1752,20 @@ require_once 'navbar.php';
                             <?php endforeach; ?>
                             <?php foreach ($historicalPayableOrders as $hp): ?>
                                 <label class="payment-source historical-source flex items-center gap-3 p-3 hover:bg-amber-50 cursor-pointer" data-vendor="__HISTORICAL__">
-                                    <input type="checkbox" id="histCheck<?= (int)$hp['pesanan_id'] ?>" name="historical_order_ids[]" value="<?= (int)$hp['pesanan_id'] ?>" class="modal-bill-check historical-bill-check accent-black" data-historical="1" data-remaining="<?= (float)$hp['nilai_vendor'] ?>" data-bill="<?= atv_h($hp['nomor_pesanan']) ?>" onchange="updatePaymentPreview(this)">
+                                    <input type="checkbox" id="histCheck<?= (int)$hp['pesanan_id'] ?>" name="historical_order_ids[]" value="<?= (int)$hp['pesanan_id'] ?>" class="modal-bill-check historical-bill-check accent-black" data-historical="1" data-remaining="<?= (float)atv_total_with_ppn($hp['nilai_vendor']) ?>" data-bill="<?= atv_h($hp['nomor_pesanan']) ?>" onchange="updatePaymentPreview(this)">
                                     <div class="min-w-0 flex-1">
                                         <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-1">
                                             <div class="flex flex-wrap items-center gap-2">
                                                 <p class="text-xs font-bold"><?= atv_h($hp['nomor_pesanan']) ?></p><span class="text-[8px] px-2 py-0.5 border border-amber-200 bg-amber-50 text-amber-700 font-bold uppercase">Data Lama</span>
                                             </div>
-                                            <p class="text-xs font-bold text-red-700"><?= (float)$hp['nilai_vendor'] > 0 ? atv_rp($hp['nilai_vendor']) : 'Isi nominal' ?></p>
+                                            <p class="text-xs font-bold text-red-700"><?= (float)$hp['nilai_vendor'] > 0 ? atv_rp(atv_total_with_ppn($hp['nilai_vendor'])) : 'Isi Nominal' ?></p>
                                         </div>
                                         <p class="text-[10px] text-gray-400 mt-1"><?= atv_h($hp['nama_pemesan']) ?> · <?= number_format((int)$hp['total_unit']) ?> unit · <?= atv_date($hp['tanggal_kirim'] ?: $hp['tanggal_pemesanan']) ?> · Belum pernah masuk rekap vendor aktif</p>
                                         <?php if ((float)$hp['nilai_vendor'] <= 0): ?>
                                             <div class="mt-2" onclick="event.stopPropagation()">
-                                                <label class="text-[8px] uppercase font-bold text-amber-700">Nominal Tagihan Historis</label>
+                                                <label class="text-[8px] uppercase font-bold text-amber-700">Nominal Pembayaran Vendor</label>
                                                 <input type="number" min="1" step="1" name="historical_nominal[<?= (int)$hp['pesanan_id'] ?>]" id="histNominal<?= (int)$hp['pesanan_id'] ?>" class="field mt-1 historical-nominal" placeholder="Contoh: 750000" data-check-id="histCheck<?= (int)$hp['pesanan_id'] ?>" oninput="updateHistoricalAmount(this)">
-                                                <p class="text-[8px] text-amber-700 mt-1">Data sebelum aplikasi: isi nominal yang benar-benar menjadi tagihan vendor.</p>
+                                                <p class="text-[8px] text-amber-700 mt-1">Data sebelum aplikasi: isi nilai pembayaran vendor jika nilai otomatis belum sesuai.</p>
                                             </div>
                                         <?php endif; ?>
                                     </div>
@@ -1735,7 +1793,7 @@ require_once 'navbar.php';
                         </div>
                     <?php endif; ?>
 
-                    <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                    <div class="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-3">
                         <div class="border bg-gray-50 p-3">
                             <p class="text-[8px] uppercase font-bold text-gray-400">Vendor</p>
                             <p id="bulkModalVendor" class="text-xs font-bold mt-1">-</p>
@@ -1745,7 +1803,7 @@ require_once 'navbar.php';
                             <p id="bulkModalCount" class="text-base font-bold mt-1">0</p>
                         </div>
                         <div class="border bg-blue-50 border-blue-100 p-3">
-                            <p class="text-[8px] uppercase font-bold text-blue-600">Total Akan Dibayar</p>
+                            <p class="text-[8px] uppercase font-bold text-blue-600">Total Pembayaran</p>
                             <p id="bulkModalTotal" class="text-base font-bold text-blue-700 mt-1">Rp 0</p>
                         </div>
                     </div>
@@ -1979,6 +2037,8 @@ require_once 'navbar.php';
             updatePaymentPreview();
         }
 
+
+
         function openBulkPayment() {
             resetPaymentModal();
             showModal('bulkPaymentModal');
@@ -2009,9 +2069,10 @@ require_once 'navbar.php';
             }).join('');
             var prows = pays.map(function(p) {
                 var proof = p.bukti_pembayaran ? '<a class="text-blue-600 font-bold hover:underline" href="' + escapeHtml(p.bukti_pembayaran) + '" target="_blank">Lihat Bukti</a>' : '-';
-                return '<tr><td class="px-3 py-3 text-xs">' + escapeHtml(p.tanggal_bayar || '-') + '</td><td class="px-3 py-3 text-xs">' + escapeHtml(p.metode || '-') + '</td><td class="px-3 py-3 text-xs">' + escapeHtml(p.nomor_referensi || '-') + '</td><td class="px-3 py-3 text-xs">' + proof + '</td><td class="px-3 py-3 text-right text-xs font-bold text-green-700">' + rp(p.nominal) + '</td></tr>'
+                var historical = Number(p.is_historical || 0) === 1 ? ' <span class="ml-1 text-[8px] font-bold uppercase text-amber-700">Historis</span>' : '';
+                return '<tr><td class="px-3 py-3 text-xs">' + escapeHtml(p.tanggal_bayar || '-') + historical + '</td><td class="px-3 py-3 text-xs">' + escapeHtml(p.metode || '-') + '</td><td class="px-3 py-3 text-xs">' + escapeHtml(p.nomor_referensi || '-') + '</td><td class="px-3 py-3 text-xs">' + proof + '</td><td class="px-3 py-3 text-right text-xs font-bold text-green-700">' + rp(p.nominal) + '</td></tr>'
             }).join('');
-            document.getElementById('detailBody').innerHTML = '<div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-5"><div class="border bg-gray-50 p-3"><p class="text-[8px] uppercase font-bold text-gray-400">Vendor</p><p class="text-xs font-bold mt-1">' + escapeHtml(r.vendor_nama) + '</p></div><div class="border bg-gray-50 p-3"><p class="text-[8px] uppercase font-bold text-gray-400">Invoice Vendor</p><p class="text-xs font-bold mt-1">' + escapeHtml(r.nomor_invoice_vendor || '-') + '</p></div><div class="border bg-gray-50 p-3"><p class="text-[8px] uppercase font-bold text-gray-400">Tagihan</p><p class="text-xs font-bold mt-1">' + rp(r.nilai_tagihan) + '</p></div><div class="border bg-gray-50 p-3"><p class="text-[8px] uppercase font-bold text-gray-400">Sisa</p><p class="text-xs font-bold text-red-700 mt-1">' + rp(r.sisa_tagihan) + '</p></div></div><p class="text-[9px] uppercase font-bold text-gray-400 mb-2">Rincian Barang</p><div class="border overflow-x-auto"><table class="w-full min-w-[620px]"><thead class="bg-gray-50"><tr><th class="px-3 py-3 text-left text-[8px] uppercase text-gray-400">Produk</th><th class="px-3 py-3 text-center text-[8px] uppercase text-gray-400">Diterima</th><th class="px-3 py-3 text-right text-[8px] uppercase text-gray-400">Harga Vendor</th><th class="px-3 py-3 text-right text-[8px] uppercase text-gray-400">Subtotal</th></tr></thead><tbody class="divide-y">' + (drows || '<tr><td colspan="4" class="py-8 text-center text-xs text-gray-400">Tidak ada rincian</td></tr>') + '</tbody></table></div><p class="text-[9px] uppercase font-bold text-gray-400 mt-5 mb-2">Riwayat Pembayaran</p><div class="border overflow-x-auto"><table class="w-full min-w-[680px]"><thead class="bg-gray-50"><tr><th class="px-3 py-3 text-left text-[8px] uppercase text-gray-400">Tanggal</th><th class="px-3 py-3 text-left text-[8px] uppercase text-gray-400">Metode</th><th class="px-3 py-3 text-left text-[8px] uppercase text-gray-400">Referensi</th><th class="px-3 py-3 text-left text-[8px] uppercase text-gray-400">Bukti</th><th class="px-3 py-3 text-right text-[8px] uppercase text-gray-400">Nominal</th></tr></thead><tbody class="divide-y">' + (prows || '<tr><td colspan="5" class="py-8 text-center text-xs text-gray-400">Belum ada pembayaran</td></tr>') + '</tbody></table></div>';
+            document.getElementById('detailBody').innerHTML = '<div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-5"><div class="border bg-gray-50 p-3"><p class="text-[8px] uppercase font-bold text-gray-400">Vendor</p><p class="text-xs font-bold mt-1">' + escapeHtml(r.vendor_nama) + '</p></div><div class="border bg-gray-50 p-3"><p class="text-[8px] uppercase font-bold text-gray-400">Invoice Vendor</p><p class="text-xs font-bold mt-1">' + escapeHtml(r.nomor_invoice_vendor || '-') + '</p></div><div class="border bg-gray-50 p-3"><p class="text-[8px] uppercase font-bold text-gray-400">Total Tagihan</p><p class="text-xs font-bold mt-1">' + rp(r.nilai_tagihan) + '</p></div><div class="border bg-gray-50 p-3"><p class="text-[8px] uppercase font-bold text-gray-400">Sisa</p><p class="text-xs font-bold text-red-700 mt-1">' + rp(r.sisa_tagihan) + '</p></div></div><p class="text-[9px] uppercase font-bold text-gray-400 mb-2">Rincian Barang</p><div class="border overflow-x-auto"><table class="w-full min-w-[620px]"><thead class="bg-gray-50"><tr><th class="px-3 py-3 text-left text-[8px] uppercase text-gray-400">Produk</th><th class="px-3 py-3 text-center text-[8px] uppercase text-gray-400">Diterima</th><th class="px-3 py-3 text-right text-[8px] uppercase text-gray-400">Harga Vendor</th><th class="px-3 py-3 text-right text-[8px] uppercase text-gray-400">Subtotal</th></tr></thead><tbody class="divide-y">' + (drows || '<tr><td colspan="4" class="py-8 text-center text-xs text-gray-400">Tidak ada rincian</td></tr>') + '</tbody></table></div><p class="text-[9px] uppercase font-bold text-gray-400 mt-5 mb-2">Riwayat Pembayaran</p><div class="border overflow-x-auto"><table class="w-full min-w-[680px]"><thead class="bg-gray-50"><tr><th class="px-3 py-3 text-left text-[8px] uppercase text-gray-400">Tanggal</th><th class="px-3 py-3 text-left text-[8px] uppercase text-gray-400">Metode</th><th class="px-3 py-3 text-left text-[8px] uppercase text-gray-400">Referensi</th><th class="px-3 py-3 text-left text-[8px] uppercase text-gray-400">Bukti</th><th class="px-3 py-3 text-right text-[8px] uppercase text-gray-400">Nominal</th></tr></thead><tbody class="divide-y">' + (prows || '<tr><td colspan="5" class="py-8 text-center text-xs text-gray-400">Belum ada pembayaran</td></tr>') + '</tbody></table></div>';
             showModal('detailModal');
             if (window.lucide) lucide.createIcons()
         }

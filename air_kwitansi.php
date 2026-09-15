@@ -1502,6 +1502,16 @@ require_once 'navbar.php';
         }
 
         @media print {
+
+            html,
+            body {
+                width: 100% !important;
+                height: auto !important;
+                margin: 0 !important;
+                padding: 0 !important;
+                background: #fff !important;
+            }
+
             body * {
                 visibility: hidden !important;
             }
@@ -1512,11 +1522,16 @@ require_once 'navbar.php';
             }
 
             #printModal {
-                position: absolute !important;
-                inset: 0 !important;
+                position: static !important;
+                inset: auto !important;
                 display: block !important;
-                background: #fff !important;
+                width: 100% !important;
+                height: auto !important;
+                min-height: 0 !important;
+                margin: 0 !important;
                 padding: 0 !important;
+                overflow: visible !important;
+                background: #fff !important;
             }
 
             #printModal .print-controls {
@@ -1524,34 +1539,110 @@ require_once 'navbar.php';
             }
 
             #printModal .modal-panel {
-                width: auto !important;
+                position: static !important;
+                display: block !important;
+                width: 100% !important;
                 max-width: none !important;
                 height: auto !important;
+                min-height: 0 !important;
                 max-height: none !important;
+                margin: 0 !important;
+                padding: 0 !important;
                 overflow: visible !important;
+                border: 0 !important;
                 box-shadow: none !important;
             }
 
             #printBody {
                 display: block !important;
-                overflow: visible !important;
+                width: 100% !important;
+                height: auto !important;
+                min-height: 0 !important;
+                margin: 0 !important;
                 padding: 0 !important;
+                overflow: visible !important;
                 background: #fff !important;
             }
 
             #printBody .print-sheet {
+                box-sizing: border-box !important;
+                width: 100% !important;
+                min-height: 0 !important;
+                height: auto !important;
+                margin: 0 !important;
+                padding: 8mm 10mm !important;
                 box-shadow: none !important;
+                page-break-before: auto !important;
+                page-break-after: auto !important;
+                break-before: auto !important;
+                break-after: auto !important;
             }
 
-            .print-sheet {
-                width: 210mm !important;
-                min-height: 297mm !important;
-                padding: 16mm !important;
+            /* Padatkan dokumen agar Surat Jalan, Faktur dan Kwitansi normal muat 1 lembar A4. */
+            #printBody .print-sheet>div:first-child {
+                padding-bottom: 8px !important;
+            }
+
+            #printBody .print-sheet>div[style*="grid-template-columns:160px"] {
+                margin-top: 12px !important;
+                gap: 4px 10px !important;
+                font-size: 10px !important;
+            }
+
+            #printBody .print-sheet table {
+                margin-top: 10px !important;
+                font-size: 9px !important;
+                table-layout: fixed !important;
+            }
+
+            #printBody .print-sheet th,
+            #printBody .print-sheet td {
+                padding: 4px 5px !important;
+                line-height: 1.2 !important;
+                overflow-wrap: anywhere !important;
+                word-break: break-word !important;
+            }
+
+            #printBody .print-sheet p {
+                line-height: 1.25 !important;
+            }
+
+            #printBody .print-sheet>div[style*="gap:80px"] {
+                margin-top: 22px !important;
+                gap: 28px !important;
+                font-size: 9px !important;
+                break-inside: avoid !important;
+                page-break-inside: avoid !important;
+            }
+
+            #printBody .print-sheet>div[style*="gap:80px"] div[style*="height:70px"] {
+                height: 36px !important;
+            }
+
+            /* Tanda tangan tunggal Surat Jalan. */
+            #printBody .print-sheet>div[style*="width:55%"] {
+                margin-top: 22px !important;
+                font-size: 9px !important;
+                break-inside: avoid !important;
+                page-break-inside: avoid !important;
+            }
+
+            #printBody .print-sheet>div[style*="width:55%"] div[style*="height:70px"] {
+                height: 36px !important;
+            }
+
+            #printBody table tr,
+            #printBody table td,
+            #printBody table th,
+            #printBody table thead,
+            #printBody table tfoot {
+                break-inside: avoid !important;
+                page-break-inside: avoid !important;
             }
 
             @page {
-                size: A4;
-                margin: 0;
+                size: A4 portrait;
+                margin: 6mm;
             }
         }
     </style>
@@ -2204,7 +2295,7 @@ require_once 'navbar.php';
                 </div>
 
                 <div class="flex gap-2">
-                    <button type="button" onclick="window.print()" class="btn bg-black text-white">
+                    <button type="button" onclick="printCurrentDocument()" class="btn bg-black text-white">
                         <i data-lucide="printer" class="w-4 h-4"></i>
                         Cetak / Simpan PDF
                     </button>
@@ -2660,6 +2751,155 @@ require_once 'navbar.php';
             currentPrintRow = row;
             renderDocument(type || 'kwitansi');
             openModal('printModal');
+        }
+
+        function printCurrentDocument() {
+            var body = document.getElementById('printBody');
+            if (!body) return;
+
+            var printable = body.innerHTML;
+            var printWin = window.open('', '_blank', 'width=980,height=900');
+            if (!printWin) {
+                alert('Popup untuk cetak diblokir browser. Izinkan popup untuk halaman ini lalu coba lagi.');
+                return;
+            }
+
+            var css = `
+                @page { size: A4 portrait; margin: 8mm; }
+                * { box-sizing: border-box; }
+                html, body {
+                    margin: 0 !important;
+                    padding: 0 !important;
+                    background: #fff !important;
+                    color: #111 !important;
+                    font-family: Arial, Helvetica, sans-serif !important;
+                    width: 100% !important;
+                }
+                body {
+                    overflow: visible !important;
+                }
+                .print-sheet {
+                    width: 190mm !important;
+                    max-width: 190mm !important;
+                    min-height: 0 !important;
+                    height: auto !important;
+                    margin: 0 auto !important;
+                    padding: 0 !important;
+                    background: #fff !important;
+                    box-shadow: none !important;
+                    overflow: visible !important;
+                    page-break-after: avoid !important;
+                    break-after: avoid-page !important;
+                    font-size: 10.5px !important;
+                }
+                .print-sheet > div:first-child {
+                    padding-bottom: 10px !important;
+                }
+                .print-sheet table {
+                    width: 100% !important;
+                    max-width: 100% !important;
+                    border-collapse: collapse !important;
+                    table-layout: fixed !important;
+                    page-break-inside: auto !important;
+                    break-inside: auto !important;
+                }
+                .print-sheet thead { display: table-header-group !important; }
+                .print-sheet tfoot { display: table-row-group !important; }
+                .print-sheet tr {
+                    page-break-inside: avoid !important;
+                    break-inside: avoid-page !important;
+                }
+                .print-sheet th, .print-sheet td {
+                    padding: 6px 5px !important;
+                    line-height: 1.3 !important;
+                    font-size: 10px !important;
+                    overflow-wrap: anywhere !important;
+                    word-break: break-word !important;
+                    vertical-align: top !important;
+                }
+                /* Pastikan total lebar kolom tidak melewati area cetak A4. */
+                .print-sheet th[style*="width:40px"],
+                .print-sheet th[style*="width:35px"] { width: 7% !important; }
+                .print-sheet th[style*="width:110px"] { width: 14% !important; }
+                .print-sheet th[style*="width:130px"] { width: 20% !important; }
+                .print-sheet th[style*="width:140px"] { width: 21% !important; }
+                .print-sheet th[style*="width:150px"] { width: 20% !important; }
+                .print-sheet p {
+                    line-height: 1.35 !important;
+                }
+                .print-sheet > div[style*="margin-top:22px"] {
+                    margin-top: 14px !important;
+                    gap: 5px 10px !important;
+                    font-size: 10.5px !important;
+                    grid-template-columns: 130px minmax(0, 1fr) !important;
+                }
+                .print-sheet > div[style*="margin-top:14px"] {
+                    margin-top: 10px !important;
+                    padding: 8px !important;
+                    font-size: 10px !important;
+                }
+                .print-sheet > p[style*="margin-top:18px"],
+                .print-sheet > p[style*="margin-top:16px"] {
+                    margin-top: 10px !important;
+                    font-size: 9.5px !important;
+                }
+                /* Blok tanda tangan dua kolom dibuat lebih lega dan lebih besar. */
+                .print-sheet > div[style*="gap:80px"] {
+                    grid-template-columns: 1fr 1fr !important;
+                    gap: 28px !important;
+                    margin-top: 28px !important;
+                    font-size: 10.5px !important;
+                    page-break-inside: avoid !important;
+                    break-inside: avoid-page !important;
+                }
+                .print-sheet > div[style*="gap:80px"] div[style*="height:70px"] {
+                    height: 52px !important;
+                }
+                /* Tanda tangan tunggal Surat Jalan dibuat lebih besar. */
+                .print-sheet > div[style*="width:55%"] {
+                    width: 72% !important;
+                    margin: 28px auto 0 !important;
+                    font-size: 10.5px !important;
+                    page-break-inside: avoid !important;
+                    break-inside: avoid-page !important;
+                }
+                .print-sheet > div[style*="width:55%"] div[style*="height:70px"] {
+                    height: 52px !important;
+                }
+                .print-sheet img {
+                    max-width: 100% !important;
+                    height: auto !important;
+                }
+                @media print {
+                    html, body { width: 100% !important; }
+                    .print-sheet {
+                        transform: none !important;
+                        zoom: 1 !important;
+                    }
+                }
+            `;
+
+            printWin.document.open();
+            printWin.document.write('<!doctype html><html><head><meta charset="utf-8"><title>Cetak Dokumen</title><style>' + css + '</style></head><body>' + printable + '</body></html>');
+            printWin.document.close();
+            printWin.focus();
+
+            var doPrint = function() {
+                try {
+                    printWin.focus();
+                    printWin.print();
+                } catch (e) {
+                    console.error(e);
+                }
+            };
+
+            if (printWin.document.readyState === 'complete') {
+                setTimeout(doPrint, 250);
+            } else {
+                printWin.onload = function() {
+                    setTimeout(doPrint, 250);
+                };
+            }
         }
 
         document.querySelectorAll('.modal-wrap').forEach(function(modal) {
