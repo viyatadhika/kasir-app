@@ -59,6 +59,31 @@ function tanggal_short($v): string
     return $v ? date('d M Y', strtotime((string)$v)) : '-';
 }
 
+
+if (!function_exists('member_ensure_notifikasi_admin_schema')) {
+    function member_ensure_notifikasi_admin_schema(PDO $pdo): void
+    {
+        $pdo->exec("\n            CREATE TABLE IF NOT EXISTS notifikasi_admin (\n                id INT AUTO_INCREMENT PRIMARY KEY,\n                event_key VARCHAR(190) NOT NULL,\n                judul VARCHAR(180) NOT NULL,\n                pesan TEXT NULL,\n                tipe VARCHAR(50) NOT NULL DEFAULT 'info',\n                ref_tipe VARCHAR(50) NULL,\n                ref_id INT NULL,\n                target_url VARCHAR(255) NULL,\n                is_read TINYINT(1) NOT NULL DEFAULT 0,\n                read_at DATETIME NULL,\n                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,\n                updated_at DATETIME NULL,\n                UNIQUE KEY uq_notifikasi_admin_event (event_key),\n                INDEX idx_notifikasi_admin_read (is_read),\n                INDEX idx_notifikasi_admin_created (created_at),\n                INDEX idx_notifikasi_admin_ref (ref_tipe, ref_id)\n            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4\n        ");
+    }
+}
+
+if (!function_exists('member_push_notifikasi_admin')) {
+    function member_push_notifikasi_admin(PDO $pdo, string $eventKey, string $judul, string $pesan, string $tipe, string $refTipe, int $refId, string $targetUrl): void
+    {
+        member_ensure_notifikasi_admin_schema($pdo);
+        $stmt = $pdo->prepare("\n            INSERT INTO notifikasi_admin\n                (event_key, judul, pesan, tipe, ref_tipe, ref_id, target_url, is_read, read_at, created_at, updated_at)\n            VALUES\n                (:event_key, :judul, :pesan, :tipe, :ref_tipe, :ref_id, :target_url, 0, NULL, NOW(), NOW())\n            ON DUPLICATE KEY UPDATE\n                judul = VALUES(judul),\n                pesan = VALUES(pesan),\n                tipe = VALUES(tipe),\n                target_url = VALUES(target_url),\n                is_read = 0,\n                read_at = NULL,\n                updated_at = NOW()\n        ");
+        $stmt->execute([
+            ':event_key' => $eventKey,
+            ':judul' => $judul,
+            ':pesan' => $pesan,
+            ':tipe' => $tipe,
+            ':ref_tipe' => $refTipe,
+            ':ref_id' => $refId,
+            ':target_url' => $targetUrl,
+        ]);
+    }
+}
+
 /**
  * @param mixed $name
  */
@@ -218,6 +243,8 @@ function pinjaman_status_class_member($status): string
 
 $memberId = (int)$_SESSION['member_id'];
 $transportTarif = get_transport_tarif_from_driver($pdo);
+$transaksiMinimarket = [];
+$transaksiCafe = [];
 
 try {
     $stmt = $pdo->prepare("SELECT id,kode,nama,no_hp,point,total_belanja,status,created_at,updated_at FROM member WHERE id=:id LIMIT 1");
@@ -270,11 +297,20 @@ try {
     $stmtSum->execute([':member_id' => $memberId]);
     $summary = $stmtSum->fetch(PDO::FETCH_ASSOC) ?: [];
 
+    $hasSumberTransaksi = has_column_member($pdo, 'transaksi', 'sumber_transaksi');
+    $hasCafePesanan = has_table_member($pdo, 'cafe_pesanan');
+    $sourceExpr = $hasSumberTransaksi
+        ? "CASE WHEN LOWER(TRIM(COALESCE(t.sumber_transaksi,''))) IN ('cafe','kafe','pos_cafe','kasir_cafe') THEN 'cafe' ELSE 'minimarket' END"
+        : ($hasCafePesanan
+            ? "CASE WHEN EXISTS (SELECT 1 FROM cafe_pesanan cp_src WHERE cp_src.transaksi_id=t.id) THEN 'cafe' ELSE 'minimarket' END"
+            : "'minimarket'");
+
     $stmtTrx = $pdo->prepare("
         SELECT
             t.id AS transaksi_id,
             t.invoice,
             t.created_at AS tanggal_transaksi,
+            $sourceExpr AS sumber_member,
             COALESCE(t.total,0) AS total_transaksi,
             COALESCE(t.bayar,0) AS bayar_transaksi,
             COALESCE(t.kembalian,0) AS kembalian_transaksi,
@@ -293,8 +329,242 @@ try {
         LIMIT 50");
     $stmtTrx->execute([':member_id' => $memberId]);
     $transaksi = $stmtTrx->fetchAll(PDO::FETCH_ASSOC);
+    $transaksiMinimarket = array_values(array_filter($transaksi, function ($row) {
+        return strtolower((string)($row['sumber_member'] ?? 'minimarket')) !== 'cafe';
+    }));
+    $transaksiCafe = array_values(array_filter($transaksi, function ($row) {
+        return strtolower((string)($row['sumber_member'] ?? '')) === 'cafe';
+    }));
 } catch (Throwable $e) {
     die('Gagal memuat dashboard: ' . h($e->getMessage()));
+}
+
+// ==================== NOTIFIKASI MEMBER ====================
+$memberNotifRows = [];
+$memberNotifUnread = 0;
+$memberNotifTotal = 0;
+try {
+    // Tabel ini sudah dipakai oleh halaman admin pinjaman. Struktur dilengkapi agar badge baca bisa disimpan.
+    $pdo->exec("
+        CREATE TABLE IF NOT EXISTS notifikasi_member (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            member_id INT NOT NULL,
+            judul VARCHAR(180) NOT NULL,
+            pesan TEXT NULL,
+            tipe VARCHAR(50) NULL,
+            ref_id INT NULL,
+            ref_tipe VARCHAR(50) NULL,
+            is_read TINYINT(1) NOT NULL DEFAULT 0,
+            read_at DATETIME NULL,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            INDEX idx_notifikasi_member_member (member_id),
+            INDEX idx_notifikasi_member_read (member_id, is_read)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    ");
+
+    $notifCols = [];
+    foreach ($pdo->query("SHOW COLUMNS FROM notifikasi_member")->fetchAll(PDO::FETCH_ASSOC) as $notifCol) {
+        $notifField = (string)($notifCol['Field'] ?? '');
+        if ($notifField !== '') $notifCols[$notifField] = true;
+    }
+    if (!isset($notifCols['is_read'])) $pdo->exec("ALTER TABLE notifikasi_member ADD COLUMN is_read TINYINT(1) NOT NULL DEFAULT 0");
+    if (!isset($notifCols['read_at'])) $pdo->exec("ALTER TABLE notifikasi_member ADD COLUMN read_at DATETIME NULL");
+    if (!isset($notifCols['created_at'])) $pdo->exec("ALTER TABLE notifikasi_member ADD COLUMN created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP");
+    if (!isset($notifCols['event_key'])) {
+        $pdo->exec("ALTER TABLE notifikasi_member ADD COLUMN event_key VARCHAR(190) NULL");
+        try {
+            $pdo->exec("ALTER TABLE notifikasi_member ADD UNIQUE KEY uq_notifikasi_member_event (event_key)");
+        } catch (Throwable $e) {
+        }
+    }
+
+    // Sinkron otomatis notifikasi Minimarket/Cafe dari transaksi member.
+    try {
+        $hasSumberNotif = has_column_member($pdo, 'transaksi', 'sumber_transaksi');
+        $hasCafeNotif = has_table_member($pdo, 'cafe_pesanan');
+        $sourceNotifExpr = $hasSumberNotif
+            ? "CASE WHEN LOWER(TRIM(COALESCE(t.sumber_transaksi,''))) IN ('cafe','kafe','pos_cafe','kasir_cafe') THEN 'cafe' ELSE 'minimarket' END"
+            : ($hasCafeNotif ? "CASE WHEN EXISTS (SELECT 1 FROM cafe_pesanan cp WHERE cp.transaksi_id=t.id) THEN 'cafe' ELSE 'minimarket' END" : "'minimarket'");
+        $stmtNotifTrx = $pdo->prepare("SELECT t.id,t.invoice,t.total,t.created_at,$sourceNotifExpr AS sumber FROM transaksi t WHERE t.member_id=:mid ORDER BY t.id DESC LIMIT 100");
+        $stmtNotifTrx->execute([':mid' => $memberId]);
+        $insNotif = $pdo->prepare("INSERT IGNORE INTO notifikasi_member (member_id,judul,pesan,tipe,ref_id,ref_tipe,is_read,read_at,created_at,event_key) VALUES (:mid,:judul,:pesan,:tipe,:rid,:ref_tipe,:is_read,:read_at,:created_at,:event_key)");
+        foreach ($stmtNotifTrx->fetchAll(PDO::FETCH_ASSOC) as $nt) {
+            $isCafe = strtolower((string)($nt['sumber'] ?? '')) === 'cafe';
+            $eventAt = (string)($nt['created_at'] ?? date('Y-m-d H:i:s'));
+            $isOld = date('Y-m-d', strtotime($eventAt)) < date('Y-m-d');
+            $insNotif->execute([
+                ':mid' => $memberId,
+                ':judul' => $isCafe ? 'Transaksi Cafe' : 'Belanja Minimarket',
+                ':pesan' => ($isCafe ? 'Pesanan Cafe' : 'Transaksi belanja') . ' ' . (string)($nt['invoice'] ?? ('#' . $nt['id'])) . ' sebesar ' . rupiah_member($nt['total'] ?? 0) . ' berhasil tercatat.',
+                ':tipe' => $isCafe ? 'cafe' : 'minimarket',
+                ':rid' => (int)$nt['id'],
+                ':ref_tipe' => $isCafe ? 'cafe' : 'transaksi',
+                ':is_read' => $isOld ? 1 : 0,
+                ':read_at' => $isOld ? $eventAt : null,
+                ':created_at' => $eventAt,
+                ':event_key' => 'trx_' . $nt['id'],
+            ]);
+        }
+    } catch (Throwable $e) {
+        error_log('SYNC NOTIF TRANSAKSI: ' . $e->getMessage());
+    }
+
+    // Sinkron otomatis perubahan status Rental Bandara.
+    try {
+        if (has_table_member($pdo, 'rental_bandara')) {
+            $stmtNotifRental = $pdo->prepare("SELECT id,kode_booking,status,total_harga,created_at FROM rental_bandara WHERE member_id=:mid ORDER BY id DESC LIMIT 50");
+            $stmtNotifRental->execute([':mid' => $memberId]);
+            $insRentalNotif = $pdo->prepare("INSERT IGNORE INTO notifikasi_member (member_id,judul,pesan,tipe,ref_id,ref_tipe,is_read,read_at,created_at,event_key) VALUES (:mid,'Rental Bandara',:pesan,'rental',:rid,'rental',:is_read,:read_at,:created_at,:event_key)");
+            foreach ($stmtNotifRental->fetchAll(PDO::FETCH_ASSOC) as $nr) {
+                $st = strtolower(trim((string)($nr['status'] ?? 'pending')));
+                $label = ucwords(str_replace('_', ' ', $st));
+                $created = (string)($nr['created_at'] ?? date('Y-m-d H:i:s'));
+                $isOld = date('Y-m-d', strtotime($created)) < date('Y-m-d');
+                $insRentalNotif->execute([
+                    ':mid' => $memberId,
+                    ':pesan' => 'Booking ' . (string)($nr['kode_booking'] ?? ('#' . $nr['id'])) . ' berstatus ' . $label . '.',
+                    ':rid' => (int)$nr['id'],
+                    ':is_read' => $isOld ? 1 : 0,
+                    ':read_at' => $isOld ? $created : null,
+                    ':created_at' => date('Y-m-d H:i:s'),
+                    ':event_key' => 'rental_' . $nr['id'] . '_' . $st,
+                ]);
+            }
+        }
+    } catch (Throwable $e) {
+        error_log('SYNC NOTIF RENTAL: ' . $e->getMessage());
+    }
+
+    // Saat item notifikasi diklik, tandai hanya notifikasi milik member login sebagai sudah dibaca.
+    $memberNotifReadId = (int)($_GET['member_notif_read'] ?? 0);
+    if ($memberNotifReadId > 0) {
+        $stmtMemberNotifRead = $pdo->prepare("UPDATE notifikasi_member SET is_read=1, read_at=NOW() WHERE id=:id AND member_id=:member_id");
+        $stmtMemberNotifRead->execute([':id' => $memberNotifReadId, ':member_id' => $memberId]);
+    }
+
+    if ((string)($_GET['member_notif_read_all'] ?? '') === '1') {
+        $stmtReadAll = $pdo->prepare("UPDATE notifikasi_member SET is_read=1, read_at=NOW() WHERE member_id=:member_id AND COALESCE(is_read,0)=0");
+        $stmtReadAll->execute([':member_id' => $memberId]);
+    }
+
+    $stmtMemberNotifTotal = $pdo->prepare("SELECT COUNT(*) FROM notifikasi_member WHERE member_id=:member_id");
+    $stmtMemberNotifTotal->execute([':member_id' => $memberId]);
+    $memberNotifTotal = (int)$stmtMemberNotifTotal->fetchColumn();
+
+    $stmtMemberNotifUnread = $pdo->prepare("SELECT COUNT(*) FROM notifikasi_member WHERE member_id=:member_id AND COALESCE(is_read,0)=0");
+    $stmtMemberNotifUnread->execute([':member_id' => $memberId]);
+    $memberNotifUnread = (int)$stmtMemberNotifUnread->fetchColumn();
+
+    $stmtMemberNotif = $pdo->prepare("
+        SELECT id, judul, pesan, tipe, ref_id, ref_tipe, COALESCE(is_read,0) AS is_read, created_at
+        FROM notifikasi_member
+        WHERE member_id=:member_id
+        ORDER BY COALESCE(is_read,0) ASC, created_at DESC, id DESC
+        LIMIT 10
+    ");
+    $stmtMemberNotif->execute([':member_id' => $memberId]);
+    $memberNotifRows = $stmtMemberNotif->fetchAll(PDO::FETCH_ASSOC);
+    if ((string)($_GET['member_notif_poll'] ?? '') === '1') {
+        header('Content-Type: application/json; charset=utf-8');
+        echo json_encode(['success' => true, 'unread' => $memberNotifUnread, 'total' => $memberNotifTotal, 'latest' => $memberNotifRows[0] ?? null], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+        exit;
+    }
+} catch (Throwable $notifError) {
+    error_log('NOTIFIKASI MEMBER ERROR: ' . $notifError->getMessage());
+    $memberNotifRows = [];
+    $memberNotifUnread = 0;
+}
+
+
+if (!function_exists('member_ensure_konfirmasi_pinjaman_schema')) {
+    function member_ensure_konfirmasi_pinjaman_schema(PDO $pdo): void
+    {
+        $pdo->exec("
+            CREATE TABLE IF NOT EXISTS konfirmasi_pinjaman_member (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                pengajuan_id INT NOT NULL,
+                member_id INT NOT NULL,
+                keputusan VARCHAR(20) NOT NULL DEFAULT 'pending',
+                nama_ktp VARCHAR(180) NULL,
+                alamat_ktp TEXT NULL,
+                no_hp VARCHAR(40) NULL,
+                nama_bank VARCHAR(100) NULL,
+                no_rekening VARCHAR(100) NULL,
+                nama_keluarga VARCHAR(180) NULL,
+                alamat_keluarga TEXT NULL,
+                no_hp_keluarga VARCHAR(40) NULL,
+                alamat_keluarga_sama TINYINT(1) NOT NULL DEFAULT 0,
+                dikonfirmasi_at DATETIME NULL,
+                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME NULL,
+                UNIQUE KEY uq_konfirmasi_pinjaman_pengajuan (pengajuan_id),
+                INDEX idx_konfirmasi_pinjaman_member (member_id),
+                INDEX idx_konfirmasi_pinjaman_keputusan (keputusan)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        ");
+
+        // Jika tabel pernah dibuat oleh versi lama, CREATE TABLE IF NOT EXISTS tidak menambah kolom baru.
+        // Karena itu cek struktur lalu tambahkan hanya kolom yang belum ada.
+        $existingCols = [];
+        $stmtCols = $pdo->query("SHOW COLUMNS FROM konfirmasi_pinjaman_member");
+        foreach ($stmtCols->fetchAll(PDO::FETCH_ASSOC) as $col) {
+            $field = (string)($col['Field'] ?? '');
+            if ($field !== '') $existingCols[$field] = true;
+        }
+
+        $requiredCols = [
+            'pengajuan_id' => "INT NOT NULL DEFAULT 0",
+            'member_id' => "INT NOT NULL DEFAULT 0",
+            'keputusan' => "VARCHAR(20) NOT NULL DEFAULT 'pending'",
+            'nama_ktp' => "VARCHAR(180) NULL",
+            'alamat_ktp' => "TEXT NULL",
+            'no_hp' => "VARCHAR(40) NULL",
+            'nama_bank' => "VARCHAR(100) NULL",
+            'no_rekening' => "VARCHAR(100) NULL",
+            'nama_keluarga' => "VARCHAR(180) NULL",
+            'alamat_keluarga' => "TEXT NULL",
+            'no_hp_keluarga' => "VARCHAR(40) NULL",
+            'alamat_keluarga_sama' => "TINYINT(1) NOT NULL DEFAULT 0",
+            'dikonfirmasi_at' => "DATETIME NULL",
+            'created_at' => "DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP",
+            'updated_at' => "DATETIME NULL",
+        ];
+        foreach ($requiredCols as $col => $definition) {
+            if (!isset($existingCols[$col])) {
+                $safeCol = str_replace('`', '', $col);
+                $pdo->exec("ALTER TABLE konfirmasi_pinjaman_member ADD COLUMN `{$safeCol}` {$definition}");
+            }
+        }
+
+        // Pastikan pengajuan_id unik agar ON DUPLICATE KEY UPDATE bekerja.
+        try {
+            $stmtIdx = $pdo->query("SHOW INDEX FROM konfirmasi_pinjaman_member WHERE Key_name='uq_konfirmasi_pinjaman_pengajuan'");
+            if (!$stmtIdx->fetch(PDO::FETCH_ASSOC)) {
+                $pdo->exec("ALTER TABLE konfirmasi_pinjaman_member ADD UNIQUE KEY uq_konfirmasi_pinjaman_pengajuan (pengajuan_id)");
+            }
+        } catch (Throwable $e) {
+            error_log('KONFIRMASI PINJAMAN INDEX ERROR: ' . $e->getMessage());
+        }
+    }
+}
+
+try {
+    member_ensure_konfirmasi_pinjaman_schema($pdo);
+} catch (Throwable $e) {
+    error_log('MEMBER KONFIRMASI PINJAMAN SCHEMA ERROR: ' . $e->getMessage());
+}
+
+try {
+    $colsPengajuan = [];
+    foreach ($pdo->query("SHOW COLUMNS FROM pengajuan_pinjaman")->fetchAll(PDO::FETCH_ASSOC) as $colPengajuan) {
+        $fieldPengajuan = (string)($colPengajuan['Field'] ?? '');
+        if ($fieldPengajuan !== '') $colsPengajuan[$fieldPengajuan] = true;
+    }
+    if (!isset($colsPengajuan['jumlah_disetujui'])) {
+        $pdo->exec("ALTER TABLE pengajuan_pinjaman ADD COLUMN jumlah_disetujui DECIMAL(15,2) NULL AFTER jumlah");
+    }
+} catch (Throwable $e) {
+    error_log('MEMBER JUMLAH DISETUJUI SCHEMA ERROR: ' . $e->getMessage());
 }
 
 $pinjamanMsg = '';
@@ -394,6 +664,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
                 ':harga_barang' => $jenis === 'barang' ? $jumlahInput : null,
             ]);
 
+            $pengajuanBaruId = (int)$pdo->lastInsertId();
+
             if (function_exists('catat_aktivitas')) {
                 catat_aktivitas($pdo, 'create', 'Pengajuan Pinjaman', 'Member mengajukan pinjaman ' . $jenis . ' sebesar ' . rupiah_member($jumlahInput));
             }
@@ -404,6 +676,98 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
             $pinjamanErr = 'Gagal mengirim pengajuan pinjaman: ' . $e->getMessage();
         }
     }
+}
+
+
+
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['action'] === 'konfirmasi_pinjaman') {
+    header('Content-Type: application/json; charset=utf-8');
+    try {
+        $pengajuanId = (int)($_POST['id'] ?? 0);
+        $keputusan = strtolower(trim((string)($_POST['keputusan'] ?? '')));
+        if ($pengajuanId < 1 || !in_array($keputusan, ['ambil', 'tidak_ambil'], true)) {
+            throw new Exception('Konfirmasi tidak valid.');
+        }
+
+        $stmtCek = $pdo->prepare("SELECT id, status FROM pengajuan_pinjaman WHERE id=:id AND member_id=:mid LIMIT 1");
+        $stmtCek->execute([':id' => $pengajuanId, ':mid' => $memberId]);
+        $pengajuanKonfirmasi = $stmtCek->fetch(PDO::FETCH_ASSOC);
+        if (!$pengajuanKonfirmasi || (string)$pengajuanKonfirmasi['status'] !== 'disetujui') {
+            throw new Exception('Pengajuan belum disetujui atau tidak ditemukan.');
+        }
+
+        $namaKtp = trim((string)($_POST['nama_ktp'] ?? ''));
+        $alamatKtp = trim((string)($_POST['alamat_ktp'] ?? ''));
+        $noHp = trim((string)($_POST['no_hp'] ?? ''));
+        $namaBank = trim((string)($_POST['nama_bank'] ?? ''));
+        $noRekening = trim((string)($_POST['no_rekening'] ?? ''));
+        $namaKeluarga = trim((string)($_POST['nama_keluarga'] ?? ''));
+        $alamatKeluargaSama = !empty($_POST['alamat_keluarga_sama']) ? 1 : 0;
+        $alamatKeluarga = $alamatKeluargaSama ? $alamatKtp : trim((string)($_POST['alamat_keluarga'] ?? ''));
+        $noHpKeluarga = trim((string)($_POST['no_hp_keluarga'] ?? ''));
+
+        if ($keputusan === 'ambil') {
+            $required = [
+                'Nama sesuai KTP' => $namaKtp,
+                'Alamat sesuai KTP' => $alamatKtp,
+                'No. Handphone' => $noHp,
+                'Nama Bank' => $namaBank,
+                'No. Rekening' => $noRekening,
+                'Nama anggota keluarga' => $namaKeluarga,
+                'Alamat anggota keluarga' => $alamatKeluarga,
+                'No. Handphone keluarga' => $noHpKeluarga,
+            ];
+            foreach ($required as $label => $value) {
+                if ($value === '') throw new Exception($label . ' wajib diisi.');
+            }
+        } else {
+            $namaKtp = $alamatKtp = $noHp = $namaBank = $noRekening = $namaKeluarga = $alamatKeluarga = $noHpKeluarga = '';
+            $alamatKeluargaSama = 0;
+        }
+
+        $stmtUp = $pdo->prepare("
+            INSERT INTO konfirmasi_pinjaman_member
+                (pengajuan_id, member_id, keputusan, nama_ktp, alamat_ktp, no_hp, nama_bank, no_rekening,
+                 nama_keluarga, alamat_keluarga, no_hp_keluarga, alamat_keluarga_sama, dikonfirmasi_at, created_at, updated_at)
+            VALUES
+                (:pid,:mid,:keputusan,:nama_ktp,:alamat_ktp,:no_hp,:nama_bank,:no_rekening,
+                 :nama_keluarga,:alamat_keluarga,:no_hp_keluarga,:alamat_sama,NOW(),NOW(),NOW())
+            ON DUPLICATE KEY UPDATE
+                keputusan=VALUES(keputusan), nama_ktp=VALUES(nama_ktp), alamat_ktp=VALUES(alamat_ktp),
+                no_hp=VALUES(no_hp), nama_bank=VALUES(nama_bank), no_rekening=VALUES(no_rekening),
+                nama_keluarga=VALUES(nama_keluarga), alamat_keluarga=VALUES(alamat_keluarga),
+                no_hp_keluarga=VALUES(no_hp_keluarga), alamat_keluarga_sama=VALUES(alamat_keluarga_sama),
+                dikonfirmasi_at=NOW(), updated_at=NOW()
+        ");
+        $stmtUp->execute([
+            ':pid' => $pengajuanId,
+            ':mid' => $memberId,
+            ':keputusan' => $keputusan,
+            ':nama_ktp' => $namaKtp,
+            ':alamat_ktp' => $alamatKtp,
+            ':no_hp' => $noHp,
+            ':nama_bank' => $namaBank,
+            ':no_rekening' => $noRekening,
+            ':nama_keluarga' => $namaKeluarga,
+            ':alamat_keluarga' => $alamatKeluarga,
+            ':no_hp_keluarga' => $noHpKeluarga,
+            ':alamat_sama' => $alamatKeluargaSama
+        ]);
+
+        // Konfirmasi utama sudah tersimpan. Pencatatan aktivitas tidak boleh menggagalkan simpan konfirmasi.
+        if (function_exists('catat_aktivitas')) {
+            try {
+                catat_aktivitas($pdo, 'update', 'Pengajuan Pinjaman', 'Member mengonfirmasi pengajuan #' . $pengajuanId . ': ' . $keputusan);
+            } catch (Throwable $logError) {
+                error_log('LOG KONFIRMASI PINJAMAN MEMBER: ' . $logError->getMessage());
+            }
+        }
+        echo json_encode(['success' => true, 'message' => $keputusan === 'ambil' ? 'Konfirmasi berhasil disimpan. Data pengambilan pinjaman sudah dikirim ke admin.' : 'Konfirmasi berhasil disimpan. Anda memilih tidak mengambil pinjaman ini.']);
+    } catch (Throwable $e) {
+        echo json_encode(['success' => false, 'message' => $e->getMessage()]);
+    }
+    exit;
 }
 
 
@@ -469,10 +833,21 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
 
 try {
     $stmtPengajuan = $pdo->prepare("
-        SELECT *
-        FROM pengajuan_pinjaman
-        WHERE member_id = :member_id
-        ORDER BY created_at DESC, id DESC
+        SELECT pp.*,
+               COALESCE(kpm.keputusan, 'pending') AS konfirmasi_keputusan,
+               kpm.dikonfirmasi_at AS konfirmasi_at,
+               kpm.nama_ktp AS konfirmasi_nama_ktp,
+               kpm.alamat_ktp AS konfirmasi_alamat_ktp,
+               kpm.no_hp AS konfirmasi_no_hp,
+               kpm.nama_bank AS konfirmasi_nama_bank,
+               kpm.no_rekening AS konfirmasi_no_rekening,
+               kpm.nama_keluarga AS konfirmasi_nama_keluarga,
+               kpm.alamat_keluarga AS konfirmasi_alamat_keluarga,
+               kpm.no_hp_keluarga AS konfirmasi_no_hp_keluarga
+        FROM pengajuan_pinjaman pp
+        LEFT JOIN konfirmasi_pinjaman_member kpm ON kpm.pengajuan_id = pp.id
+        WHERE pp.member_id = :member_id
+        ORDER BY pp.created_at DESC, pp.id DESC
         LIMIT 20
     ");
     $stmtPengajuan->execute([
@@ -551,7 +926,7 @@ try {
     $transportBookings = [];
 }
 
-
+$jumlahRiwayatPesanan = $jumlahTransaksi + count($transportBookings);
 
 if (!function_exists('transport_status_class_member')) {
     /**
@@ -3304,6 +3679,223 @@ catat_view_once($pdo, 'Member Dashboard', 'Membuka halaman Member Dashboard');
             color: var(--black);
             font-weight: 900;
         }
+
+        .member-notif-bell {
+            width: 36px;
+            height: 36px;
+            border-radius: var(--r);
+            border: 0.5px solid rgba(255, 255, 255, .2);
+            background: rgba(255, 255, 255, .08);
+            color: #fff;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            position: relative;
+            flex: 0 0 auto;
+        }
+
+        .member-notif-badge {
+            position: absolute;
+            top: -6px;
+            right: -6px;
+            min-width: 18px;
+            height: 18px;
+            padding: 0 5px;
+            border-radius: 9px;
+            background: #dc2626;
+            color: #fff;
+            border: 2px solid #111827;
+            font-size: 9px;
+            font-weight: 900;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            line-height: 1;
+        }
+
+        .member-notif-list {
+            display: flex;
+            flex-direction: column;
+            max-height: 56vh;
+            overflow-y: auto;
+            overscroll-behavior: contain;
+        }
+
+        .member-notif-item {
+            display: block;
+            padding: 15px 18px;
+            border-bottom: 1px solid #f1f1f1;
+            text-decoration: none;
+            color: #111;
+            background: #fff;
+            transition: background .15s ease;
+        }
+
+        .member-notif-item:hover {
+            background: #fafafa;
+        }
+
+        .member-notif-item:last-child {
+            border-bottom: 0;
+        }
+
+        .member-notif-item.unread {
+            background: #f8fbff;
+            box-shadow: inset 3px 0 0 #2563eb;
+        }
+
+        .member-notif-title {
+            font-size: 12px;
+            font-weight: 900;
+            margin-bottom: 5px;
+            line-height: 1.35;
+        }
+
+        .member-notif-message {
+            font-size: 11px;
+            line-height: 1.55;
+            color: #6b7280;
+            word-break: break-word;
+        }
+
+        .member-notif-time {
+            font-size: 9px;
+            color: #9ca3af;
+            margin-top: 7px;
+            font-weight: 700;
+        }
+
+        .member-notif-empty {
+            min-height: 150px;
+            padding: 34px 22px;
+            text-align: center;
+            font-size: 11px;
+            color: #9ca3af;
+            font-weight: 700;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        /* Modal notifikasi dibuat khusus agar tidak ikut model bottom-sheet generik di desktop. */
+        #modal-notif {
+            align-items: center;
+            padding: 24px;
+        }
+
+        #modal-notif .modal-sheet {
+            width: min(560px, 92vw);
+            max-width: 560px !important;
+            max-height: min(72vh, 620px);
+            border-radius: 0;
+            overflow: hidden;
+            box-shadow: 0 18px 60px rgba(0, 0, 0, .22);
+            animation: memberNotifPop .18s ease;
+        }
+
+        #modal-notif .modal-header {
+            padding: 18px 20px;
+        }
+
+        #modal-notif .modal-title {
+            font-size: 12px;
+        }
+
+        @keyframes memberNotifPop {
+            from {
+                opacity: 0;
+                transform: translateY(10px) scale(.985);
+            }
+
+            to {
+                opacity: 1;
+                transform: translateY(0) scale(1);
+            }
+        }
+
+        @media (min-width: 769px) and (max-width: 1024px) {
+            #modal-notif {
+                padding: 20px;
+            }
+
+            #modal-notif .modal-sheet {
+                width: min(620px, 88vw);
+                max-width: 620px !important;
+                max-height: 76vh;
+            }
+
+            #modal-notif .modal-header {
+                padding: 17px 18px;
+            }
+
+            .member-notif-list {
+                max-height: 58vh;
+            }
+        }
+
+        @media (max-width: 768px) {
+            #modal-notif {
+                align-items: flex-end;
+                padding: 0;
+            }
+
+            #modal-notif .modal-sheet {
+                width: 100%;
+                max-width: none !important;
+                max-height: 78dvh;
+                border-radius: 14px 14px 0 0;
+                box-shadow: 0 -12px 38px rgba(0, 0, 0, .18);
+                animation: slideUp .22s ease;
+            }
+
+            #modal-notif .modal-header {
+                padding: 15px 16px;
+            }
+
+            #modal-notif .modal-title {
+                font-size: 11px;
+            }
+
+            .member-notif-list {
+                max-height: calc(78dvh - 70px);
+            }
+
+            .member-notif-item {
+                padding: 14px 16px;
+            }
+
+            .member-notif-title {
+                font-size: 11px;
+            }
+
+            .member-notif-message {
+                font-size: 10px;
+            }
+
+            .member-notif-empty {
+                min-height: 130px;
+                padding: 28px 18px;
+            }
+        }
+
+        @media (max-width: 420px) {
+            #modal-notif .modal-sheet {
+                max-height: 82dvh;
+            }
+
+            .member-notif-list {
+                max-height: calc(82dvh - 68px);
+            }
+
+            #modal-notif .modal-header {
+                padding: 14px;
+            }
+
+            .member-notif-item {
+                padding: 13px 14px;
+            }
+        }
     </style>
 </head>
 
@@ -3328,11 +3920,14 @@ catat_view_once($pdo, 'Member Dashboard', 'Membuka halaman Member Dashboard');
                             <div class="hero-greeting">Selamat Datang Kembali</div>
                             <div class="hero-name"><?= h($member['nama']) ?></div>
                         </div>
-                        <button style="width:36px;height:36px;border-radius:var(--r);border:0.5px solid rgba(255,255,255,.2);background:rgba(255,255,255,.08);color:#fff;display:flex;align-items:center;justify-content:center;cursor:pointer;" onclick="openModal('modal-notif')">
+                        <button class="member-notif-bell" type="button" aria-label="Notifikasi" onclick="openModal('modal-notif')">
                             <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24">
                                 <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9" />
                                 <path d="M13.73 21a2 2 0 0 1-3.46 0" />
                             </svg>
+                            <?php if ($memberNotifUnread > 0): ?>
+                                <span class="member-notif-badge"><?= $memberNotifUnread > 9 ? '9+' : (int)$memberNotifUnread ?></span>
+                            <?php endif; ?>
                         </button>
                     </div>
                     <div class="hero-meta">
@@ -3588,7 +4183,7 @@ catat_view_once($pdo, 'Member Dashboard', 'Membuka halaman Member Dashboard');
                 <div class="promo-hero-bar">
                     <div style="font-size:10px;font-weight:900;text-transform:uppercase;letter-spacing:.15em;opacity:.4;margin-bottom:8px;">Riwayat Belanja Member</div>
                     <h2>Pesanan &amp;<br>Transaksi</h2>
-                    <p><?= angka_member($jumlahTransaksi) ?> transaksi · Belanja <?= rupiah_member($totalBelanjaTransaksi) ?></p>
+                    <p><?= angka_member($jumlahRiwayatPesanan) ?> riwayat · Minimarket/Cafe <?= angka_member($jumlahTransaksi) ?> · Rental <?= angka_member(count($transportBookings)) ?></p>
                 </div>
 
                 <!-- ── Summary Bar ── -->
@@ -3618,8 +4213,9 @@ catat_view_once($pdo, 'Member Dashboard', 'Membuka halaman Member Dashboard');
                 <!-- ── Tab ── -->
                 <div class="tab-bar no-scrollbar">
                     <button class="tab-btn active" data-target="pesanan-semua" onclick="setOrderTab(this)">Semua</button>
-                    <button class="tab-btn" data-target="pesanan-belanja" onclick="setOrderTab(this)">Belanja (<?= angka_member($jumlahTransaksi) ?>)</button>
-                    <button class="tab-btn" data-target="pesanan-bandara" onclick="setOrderTab(this)">Bandara (<?= angka_member(count($transportBookings)) ?>)</button>
+                    <button class="tab-btn" data-target="pesanan-minimarket" onclick="setOrderTab(this)">Minimarket (<?= angka_member(count($transaksiMinimarket)) ?>)</button>
+                    <button class="tab-btn" data-target="pesanan-cafe" onclick="setOrderTab(this)">Cafe (<?= angka_member(count($transaksiCafe)) ?>)</button>
+                    <button class="tab-btn" data-target="pesanan-bandara" onclick="setOrderTab(this)">Rental Bandara (<?= angka_member(count($transportBookings)) ?>)</button>
                 </div>
 
 
@@ -3651,7 +4247,7 @@ catat_view_once($pdo, 'Member Dashboard', 'Membuka halaman Member Dashboard');
                                 <div class="order-card">
                                     <div class="order-card-head">
                                         <div>
-                                            <div class="order-store">Koperasi BSDK</div>
+                                            <div class="order-store"><?= strtolower((string)($t['sumber_member'] ?? 'minimarket')) === 'cafe' ? 'Cafe SEJAHUB' : 'Minimarket SEJAHUB' ?></div>
                                             <div class="order-date"><?= h(tanggal_member($t['tanggal_transaksi'])) ?></div>
                                         </div>
                                         <span class="badge badge-selesai">Selesai</span>
@@ -3787,10 +4383,37 @@ catat_view_once($pdo, 'Member Dashboard', 'Membuka halaman Member Dashboard');
                         </div>
                     </div>
 
+
+                    <?php if ($transportBookings): ?>
+                        <div class="transport-card-box" style="margin-top:12px;">
+                            <div class="transport-section-head">
+                                <div>
+                                    <h3>Booking Rental Bandara</h3>
+                                    <div style="font-size:11px;font-weight:600;color:var(--g4);margin-top:4px;">Riwayat transport member</div>
+                                </div><span><?= angka_member(count($transportBookings)) ?></span>
+                            </div>
+                            <div class="transport-history-wrap">
+                                <?php foreach ($transportBookings as $tb): ?>
+                                    <div class="transport-history-card">
+                                        <div class="transport-history-top">
+                                            <div>
+                                                <div class="transport-booking-code"><?= h($tb['kode_booking']) ?></div>
+                                                <div class="transport-booking-date"><?= h(tanggal_member($tb['created_at'])) ?></div>
+                                            </div>
+                                            <div class="transport-status <?= h(transport_status_class_member($tb['status'])) ?>"><?= h(transport_status_label_member($tb['status'])) ?></div>
+                                        </div>
+                                        <div class="transport-price-row"><small><?= h(transport_layanan_label_member($tb['layanan'])) ?></small>
+                                            <div class="transport-price"><?= rupiah_member($tb['total_harga']) ?></div>
+                                        </div>
+                                    </div>
+                                <?php endforeach; ?>
+                            </div>
+                        </div>
+                    <?php endif; ?>
                 </div>
 
-                <div class="pesanan-content" id="pesanan-belanja">
-                    <?php if (!$transaksi): ?>
+                <div class="pesanan-content" id="pesanan-minimarket">
+                    <?php if (!$transaksiMinimarket): ?>
                         <div class="empty-state">
                             <svg viewBox="0 0 24 24">
                                 <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z" />
@@ -3801,7 +4424,7 @@ catat_view_once($pdo, 'Member Dashboard', 'Membuka halaman Member Dashboard');
                         </div>
                     <?php else: ?>
                         <div class="order-list">
-                            <?php foreach ($transaksi as $t):
+                            <?php foreach ($transaksiMinimarket as $t):
                                 $sebelumDiskon   = (int)($t['total_sebelum_diskon'] ?? 0);
                                 $setelahPoint    = (int)($t['total_transaksi']      ?? 0);
                                 $pointPakai      = (int)($t['point_pakai']          ?? 0);
@@ -3816,7 +4439,7 @@ catat_view_once($pdo, 'Member Dashboard', 'Membuka halaman Member Dashboard');
                                 <div class="order-card">
                                     <div class="order-card-head">
                                         <div>
-                                            <div class="order-store">Koperasi BSDK</div>
+                                            <div class="order-store"><?= strtolower((string)($t['sumber_member'] ?? 'minimarket')) === 'cafe' ? 'Cafe SEJAHUB' : 'Minimarket SEJAHUB' ?></div>
                                             <div class="order-date"><?= h(tanggal_member($t['tanggal_transaksi'])) ?></div>
                                         </div>
                                         <span class="badge badge-selesai">Selesai</span>
@@ -3870,6 +4493,89 @@ catat_view_once($pdo, 'Member Dashboard', 'Membuka halaman Member Dashboard');
                         </div>
                     <?php endif; ?>
                 </div>
+
+                <div class="pesanan-content" id="pesanan-cafe">
+                    <?php if (!$transaksiCafe): ?>
+                        <div class="empty-state">
+                            <svg viewBox="0 0 24 24">
+                                <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z" />
+                                <polyline points="3.27 6.96 12 12.01 20.73 6.96" />
+                                <line x1="12" y1="22.08" x2="12" y2="12" />
+                            </svg>
+                            <p>Belum ada transaksi Cafe</p>
+                        </div>
+                    <?php else: ?>
+                        <div class="order-list">
+                            <?php foreach ($transaksiCafe as $t):
+                                $sebelumDiskon   = (int)($t['total_sebelum_diskon'] ?? 0);
+                                $setelahPoint    = (int)($t['total_transaksi']      ?? 0);
+                                $pointPakai      = (int)($t['point_pakai']          ?? 0);
+                                $nilaiPointPakai = (int)($t['nilai_point_pakai']    ?? 0);
+                                $setelahDiskon   = $setelahPoint + $nilaiPointPakai;
+                                $diskonDariSelisih = max(0, $sebelumDiskon - $setelahDiskon);
+                                $diskonDb        = (int)($t['diskon_transaksi'] ?? 0);
+                                $diskonTampil    = max($diskonDb, $diskonDariSelisih);
+                                $ptDb            = (int)($t['point_transaksi']  ?? 0);
+                                $ptTampil        = $ptDb > 0 ? $ptDb : (int)floor($setelahPoint / 10000);
+                            ?>
+                                <div class="order-card">
+                                    <div class="order-card-head">
+                                        <div>
+                                            <div class="order-store"><?= strtolower((string)($t['sumber_member'] ?? 'minimarket')) === 'cafe' ? 'Cafe SEJAHUB' : 'Minimarket SEJAHUB' ?></div>
+                                            <div class="order-date"><?= h(tanggal_member($t['tanggal_transaksi'])) ?></div>
+                                        </div>
+                                        <span class="badge badge-selesai">Selesai</span>
+                                    </div>
+                                    <div class="order-items-wrap">
+                                        <div class="order-item-row">
+                                            <span class="oi-name" style="font-weight:800;color:var(--black);"><?= h($t['invoice']) ?></span>
+                                            <span class="oi-price"><?= rupiah_member($setelahPoint) ?></span>
+                                        </div>
+                                        <?php if ($sebelumDiskon > $setelahDiskon): ?>
+                                            <div class="order-item-row">
+                                                <span style="font-size:11px;color:var(--g4);font-weight:600;">Harga Asli</span>
+                                                <span style="font-size:11px;font-weight:600;color:var(--g4);text-decoration:line-through;"><?= rupiah_member($sebelumDiskon) ?></span>
+                                            </div>
+                                        <?php endif; ?>
+                                        <?php if ($diskonTampil > 0): ?>
+                                            <div class="order-item-row">
+                                                <span style="font-size:11px;color:var(--g4);font-weight:600;">Diskon</span>
+                                                <span style="font-size:11px;font-weight:700;color:#15803d;">- <?= rupiah_member($diskonTampil) ?></span>
+                                            </div>
+                                        <?php endif; ?>
+                                        <?php if ($nilaiPointPakai > 0): ?>
+                                            <div class="order-item-row">
+                                                <span style="font-size:11px;color:var(--g4);font-weight:600;">Tukar Point</span>
+                                                <span style="font-size:11px;font-weight:700;color:#7c3aed;">- <?= rupiah_member($nilaiPointPakai) ?> (<?= angka_member($pointPakai) ?> pt)</span>
+                                            </div>
+                                        <?php endif; ?>
+                                        <div class="order-item-row" style="margin-top:4px;padding-top:8px;border-top:0.5px solid var(--g7);">
+                                            <span style="font-size:11px;color:var(--g4);font-weight:600;">Bayar</span>
+                                            <span style="font-size:11px;font-weight:700;color:var(--black);"><?= rupiah_member($t['bayar_transaksi'] ?? 0) ?></span>
+                                        </div>
+                                        <?php if (($t['kembalian_transaksi'] ?? 0) > 0): ?>
+                                            <div class="order-item-row">
+                                                <span style="font-size:11px;color:var(--g4);font-weight:600;">Kembali</span>
+                                                <span style="font-size:11px;font-weight:700;color:var(--g3);"><?= rupiah_member($t['kembalian_transaksi']) ?></span>
+                                            </div>
+                                        <?php endif; ?>
+                                    </div>
+                                    <div class="order-card-foot">
+                                        <div class="order-total-wrap">
+                                            <div class="ot-label">Total Dibayar</div>
+                                            <div class="ot-val"><?= rupiah_member($setelahPoint) ?></div>
+                                            <div class="ot-pt">+<?= angka_member($ptTampil) ?> point diperoleh</div>
+                                        </div>
+                                        <div class="order-actions">
+                                            <a href="struk.php?invoice=<?= urlencode($t['invoice']) ?>&member=1" target="_blank" class="btn btn-black" style="padding:7px 14px;">Struk</a>
+                                        </div>
+                                    </div>
+                                </div>
+                            <?php endforeach; ?>
+                        </div>
+                    <?php endif; ?>
+                </div>
+
 
                 <div class="pesanan-content" id="pesanan-bandara">
 
@@ -4236,7 +4942,7 @@ catat_view_once($pdo, 'Member Dashboard', 'Membuka halaman Member Dashboard');
                             $angTot = $angPok + $angBng;
                             $statusPengajuan = strtolower(trim((string)($p['status'] ?? '')));
                         ?>
-                            <div class="pinjaman-history-card">
+                            <div class="pinjaman-history-card" id="pengajuan-<?= (int)$p['id'] ?>">
                                 <div class="pinjaman-history-top">
                                     <div>
                                         <div class="pinjaman-history-code">Pengajuan #<?= (int)$p['id'] ?></div>
@@ -4305,6 +5011,25 @@ catat_view_once($pdo, 'Member Dashboard', 'Membuka halaman Member Dashboard');
                                             </div>
                                         <?php endif; ?>
                                     </div>
+                                <?php endif; ?>
+
+                                <?php if ($statusPengajuan === 'disetujui'): ?>
+                                    <?php $konf = (string)($p['konfirmasi_keputusan'] ?? 'pending'); ?>
+                                    <?php if ($konf === 'ambil'): ?>
+                                        <div style="margin-top:12px;padding:12px;border:1px solid #bbf7d0;background:#f0fdf4;font-size:11px;font-weight:800;color:#166534;">
+                                            Sudah dikonfirmasi: pinjaman akan diambil<?= !empty($p['konfirmasi_at']) ? ' · ' . h(tanggal_member($p['konfirmasi_at'])) : '' ?>
+                                        </div>
+                                    <?php elseif ($konf === 'tidak_ambil'): ?>
+                                        <div style="margin-top:12px;padding:12px;border:1px solid #fecaca;background:#fef2f2;font-size:11px;font-weight:800;color:#b91c1c;">
+                                            Sudah dikonfirmasi: pinjaman tidak diambil
+                                        </div>
+                                    <?php else: ?>
+                                        <div style="margin-top:12px;padding:12px;border:1px solid #fde68a;background:#fffbeb;">
+                                            <div style="font-size:11px;font-weight:900;color:#92400e;">Pengajuan Anda telah disetujui</div>
+                                            <div style="font-size:10px;color:#a16207;margin-top:4px;">Konfirmasi apakah pinjaman akan Anda ambil.</div>
+                                            <button type="button" class="btn-konfirmasi-pinjaman" data-id="<?= (int)$p['id'] ?>" style="margin-top:10px;width:100%;padding:10px;background:#111;color:#fff;border:0;font-size:10px;font-weight:900;text-transform:uppercase;letter-spacing:.08em;">Konfirmasi Pengambilan</button>
+                                        </div>
+                                    <?php endif; ?>
                                 <?php endif; ?>
 
                                 <?php if ($statusPengajuan === 'pending'): ?>
@@ -5158,8 +5883,125 @@ catat_view_once($pdo, 'Member Dashboard', 'Membuka halaman Member Dashboard');
         </div>
     </div>
 
+    <!-- MODAL: Notifikasi Member -->
+    <div class="modal-overlay" id="modal-notif" onclick="overlayClose(event,this)">
+        <div class="modal-sheet">
+            <div class="modal-header">
+                <div>
+                    <div class="modal-title">Notifikasi</div>
+                    <div style="font-size:10px;color:var(--g4);font-weight:700;margin-top:3px;"><?= (int)$memberNotifUnread ?> belum dibaca · <?= (int)$memberNotifTotal ?> total</div>
+                </div>
+                <button class="modal-close" type="button" onclick="closeModal('modal-notif')">
+                    <svg viewBox="0 0 24 24">
+                        <line x1="18" y1="6" x2="6" y2="18" />
+                        <line x1="6" y1="6" x2="18" y2="18" />
+                    </svg>
+                </button>
+            </div>
+            <div class="member-notif-list">
+                <?php if (!$memberNotifRows): ?>
+                    <div class="member-notif-empty">Belum ada notifikasi.</div>
+                <?php else: ?>
+                    <?php foreach ($memberNotifRows as $memberNotif): ?>
+                        <?php
+                        $memberNotifId = (int)($memberNotif['id'] ?? 0);
+                        $memberNotifRef = (int)($memberNotif['ref_id'] ?? 0);
+                        $memberNotifType = strtolower(trim((string)($memberNotif['ref_tipe'] ?? '')));
+                        if ($memberNotifType === 'pengajuan' || $memberNotifType === 'pinjaman') {
+                            $memberNotifUrl = 'member_dashboard.php?member_notif_read=' . $memberNotifId . '&tab=pinjaman';
+                            if ($memberNotifType === 'pengajuan' && $memberNotifRef > 0) $memberNotifUrl .= '&pengajuan_id=' . $memberNotifRef;
+                        } elseif ($memberNotifType === 'cafe') {
+                            $memberNotifUrl = 'member_dashboard.php?member_notif_read=' . $memberNotifId . '&tab=pesanan&order_tab=cafe';
+                        } elseif ($memberNotifType === 'rental') {
+                            $memberNotifUrl = 'member_dashboard.php?member_notif_read=' . $memberNotifId . '&tab=pesanan&order_tab=bandara';
+                        } else {
+                            $memberNotifUrl = 'member_dashboard.php?member_notif_read=' . $memberNotifId . '&tab=pesanan&order_tab=minimarket';
+                        }
+                        $memberNotifIsUnread = (int)($memberNotif['is_read'] ?? 0) === 0;
+                        ?>
+                        <a class="member-notif-item <?= $memberNotifIsUnread ? 'unread' : '' ?>" href="<?= h($memberNotifUrl) ?>">
+                            <div class="member-notif-title"><?= h($memberNotif['judul'] ?? 'Notifikasi') ?></div>
+                            <div class="member-notif-message"><?= h($memberNotif['pesan'] ?? '') ?></div>
+                            <div class="member-notif-time"><?= h(tanggal_member($memberNotif['created_at'] ?? null)) ?></div>
+                        </a>
+                    <?php endforeach; ?>
+                <?php endif; ?>
+            </div>
+            <div style="padding:12px 16px;border-top:1px solid var(--g7);display:flex;gap:8px;justify-content:space-between;align-items:center;flex-wrap:wrap;background:#fff;">
+                <button type="button" class="btn" style="font-size:9px;padding:8px 10px;" onclick="enableMemberBrowserNotif()">Aktifkan Notifikasi HP</button>
+                <?php if ($memberNotifUnread > 0): ?><a class="btn" style="font-size:9px;padding:8px 10px;text-decoration:none;" href="member_dashboard.php?member_notif_read_all=1">Tandai Semua Dibaca</a><?php endif; ?>
+                <span style="font-size:9px;color:var(--g4);font-weight:700;">10 terbaru dari <?= (int)$memberNotifTotal ?> notifikasi</span>
+            </div>
+        </div>
+    </div>
+
     <!-- Toast -->
     <div class="success-toast" id="toast"></div>
+
+    <div id="modal-konfirmasi-pinjaman" class="modal-overlay" style="display:none;z-index:9999;align-items:center;justify-content:center;padding:16px;">
+        <div style="background:#fff;width:100%;max-width:620px;max-height:92vh;overflow-y:auto;border:1px solid #e5e7eb;box-shadow:0 24px 80px rgba(0,0,0,.22);">
+            <div style="padding:18px 20px;border-bottom:1px solid #eee;display:flex;align-items:flex-start;justify-content:space-between;gap:12px;position:sticky;top:0;background:#fff;z-index:2;">
+                <div>
+                    <div style="font-size:10px;font-weight:900;text-transform:uppercase;letter-spacing:.12em;color:#9ca3af;">Pengajuan Disetujui</div>
+                    <h3 style="font-size:18px;font-weight:900;margin-top:4px;">Konfirmasi Pengambilan Pinjaman</h3>
+                    <p style="font-size:11px;color:#6b7280;margin-top:5px;">Silakan konfirmasi apakah pinjaman akan diambil.</p>
+                </div>
+                <button type="button" onclick="closeKonfirmasiPinjaman()" style="border:0;background:#f3f4f6;width:34px;height:34px;font-size:20px;">&times;</button>
+            </div>
+            <form id="form-konfirmasi-pinjaman" style="padding:20px;">
+                <input type="hidden" name="action" value="konfirmasi_pinjaman">
+                <input type="hidden" name="id" id="konfirmasi-pinjaman-id" value="">
+                <input type="hidden" name="keputusan" id="konfirmasi-keputusan" value="">
+                <div id="konfirmasi-step-choice">
+                    <div id="konfirmasi-ringkasan-nominal" style="border:1px solid #e5e7eb;background:#f9fafb;padding:14px;margin-bottom:14px;">
+                        <div style="font-size:10px;font-weight:900;text-transform:uppercase;letter-spacing:.08em;color:#9ca3af;margin-bottom:10px;">Rincian Persetujuan</div>
+                        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
+                            <div>
+                                <div style="font-size:9px;color:#9ca3af;font-weight:800;text-transform:uppercase;">Diajukan</div>
+                                <div id="konf-jumlah-diajukan" style="font-size:16px;font-weight:900;margin-top:3px;">Rp 0</div>
+                            </div>
+                            <div>
+                                <div style="font-size:9px;color:#9ca3af;font-weight:800;text-transform:uppercase;">Disetujui</div>
+                                <div id="konf-jumlah-disetujui" style="font-size:18px;font-weight:900;color:#15803d;margin-top:3px;">Rp 0</div>
+                            </div>
+                        </div>
+                        <div id="konf-nominal-berbeda" style="display:none;margin-top:10px;padding-top:10px;border-top:1px solid #e5e7eb;font-size:10px;color:#b45309;font-weight:700;">Nominal yang disetujui berbeda dari nominal pengajuan awal.</div>
+                        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:12px;padding-top:10px;border-top:1px solid #e5e7eb;">
+                            <div>
+                                <div style="font-size:9px;color:#9ca3af;font-weight:800;text-transform:uppercase;">Tenor</div>
+                                <div id="konf-tenor" style="font-size:12px;font-weight:900;margin-top:3px;">-</div>
+                            </div>
+                            <div>
+                                <div style="font-size:9px;color:#9ca3af;font-weight:800;text-transform:uppercase;">Estimasi Angsuran</div>
+                                <div id="konf-angsuran" style="font-size:12px;font-weight:900;margin-top:3px;">Rp 0 / bln</div>
+                            </div>
+                        </div>
+                    </div>
+                    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
+                        <button type="button" onclick="pilihKeputusanPinjaman('ambil')" style="padding:16px 12px;border:1px solid #111;background:#111;color:#fff;font-size:11px;font-weight:900;text-transform:uppercase;">Ya, Saya Akan Mengambil</button>
+                        <button type="button" onclick="pilihKeputusanPinjaman('tidak_ambil')" style="padding:16px 12px;border:1px solid #fecaca;background:#fff;color:#b91c1c;font-size:11px;font-weight:900;text-transform:uppercase;">Tidak Mengambil</button>
+                    </div>
+                </div>
+                <div id="konfirmasi-data-wrap" style="display:none;margin-top:18px;">
+                    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+                        <div style="grid-column:1/-1"><label style="display:block;font-size:10px;font-weight:800;margin-bottom:6px;">Nama Sesuai KTP</label><input name="nama_ktp" id="konf-nama-ktp" value="<?= h($member['nama'] ?? '') ?>" class="transport-input" required></div>
+                        <div style="grid-column:1/-1"><label style="display:block;font-size:10px;font-weight:800;margin-bottom:6px;">Alamat Sesuai KTP</label><textarea name="alamat_ktp" id="konf-alamat-ktp" class="transport-input transport-textarea" required></textarea></div>
+                        <div><label style="display:block;font-size:10px;font-weight:800;margin-bottom:6px;">No. Handphone</label><input name="no_hp" value="<?= h($member['no_hp'] ?? '') ?>" class="transport-input" required></div>
+                        <div><label style="display:block;font-size:10px;font-weight:800;margin-bottom:6px;">Nama Bank</label><input name="nama_bank" class="transport-input" placeholder="Contoh: BRI / BNI / BCA" required></div>
+                        <div style="grid-column:1/-1"><label style="display:block;font-size:10px;font-weight:800;margin-bottom:6px;">No. Rekening</label><input name="no_rekening" class="transport-input" inputmode="numeric" required></div>
+                        <div style="grid-column:1/-1;border-top:1px solid #eee;padding-top:16px;margin-top:4px;">
+                            <div style="font-size:11px;font-weight:900;">Kontak Keluarga yang Dapat Dihubungi</div>
+                        </div>
+                        <div style="grid-column:1/-1"><label style="display:block;font-size:10px;font-weight:800;margin-bottom:6px;">Nama Anggota Keluarga</label><input name="nama_keluarga" class="transport-input" required></div>
+                        <div style="grid-column:1/-1"><label style="display:flex;align-items:center;gap:8px;font-size:10px;font-weight:800;margin-bottom:8px;"><input type="checkbox" name="alamat_keluarga_sama" id="alamat-keluarga-sama" value="1"> Alamat sama dengan yang bersangkutan</label><textarea name="alamat_keluarga" id="konf-alamat-keluarga" class="transport-input transport-textarea" required></textarea></div>
+                        <div style="grid-column:1/-1"><label style="display:block;font-size:10px;font-weight:800;margin-bottom:6px;">No. Handphone Keluarga</label><input name="no_hp_keluarga" class="transport-input" required></div>
+                    </div>
+                    <button type="submit" style="margin-top:18px;width:100%;padding:13px;background:#111;color:#fff;border:0;font-size:10px;font-weight:900;text-transform:uppercase;letter-spacing:.08em;">Simpan Konfirmasi</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
 
     <script>
         'use strict';
@@ -5221,6 +6063,73 @@ catat_view_once($pdo, 'Member Dashboard', 'Membuka halaman Member Dashboard');
 
             var activeBox = document.getElementById(target);
             if (activeBox) activeBox.classList.add('active');
+        }
+
+        function applyOrderTabFromQuery() {
+            var wanted = new URLSearchParams(window.location.search).get('order_tab') || '';
+            var map = {
+                minimarket: 'pesanan-minimarket',
+                cafe: 'pesanan-cafe',
+                bandara: 'pesanan-bandara',
+                semua: 'pesanan-semua'
+            };
+            if (!map[wanted]) return;
+            var btn = document.querySelector('#page-pesanan .tab-btn[data-target="' + map[wanted] + '"]');
+            if (btn) setOrderTab(btn);
+        }
+
+        var memberNotifLastUnread = <?= (int)$memberNotifUnread ?>;
+        var memberNotifLastId = <?= (int)(($memberNotifRows[0]['id'] ?? 0)) ?>;
+
+        function enableMemberBrowserNotif() {
+            if (!('Notification' in window)) {
+                showToast('Browser ini belum mendukung notifikasi perangkat.');
+                return;
+            }
+            Notification.requestPermission().then(function(permission) {
+                showToast(permission === 'granted' ? 'Notifikasi HP diaktifkan.' : 'Izin notifikasi belum diberikan.');
+            });
+        }
+
+        function pollMemberNotifications() {
+            fetch('member_dashboard.php?member_notif_poll=1', {
+                    headers: {
+                        'X-Requested-With': 'XMLHttpRequest'
+                    },
+                    cache: 'no-store'
+                })
+                .then(function(r) {
+                    return r.json();
+                }).then(function(data) {
+                    if (!data || !data.success) return;
+                    var latest = data.latest || null,
+                        latestId = latest ? Number(latest.id || 0) : 0;
+                    if (Number(data.unread || 0) > memberNotifLastUnread && latest && latestId !== memberNotifLastId) {
+                        if ('Notification' in window && Notification.permission === 'granted') {
+                            var n = new Notification(latest.judul || 'SEJAHUB', {
+                                body: latest.pesan || 'Ada notifikasi baru.'
+                            });
+                            n.onclick = function() {
+                                window.focus();
+                                window.location.href = 'member_dashboard.php';
+                            };
+                        }
+                        memberNotifLastId = latestId;
+                    }
+                    memberNotifLastUnread = Number(data.unread || 0);
+                    var badge = document.querySelector('.member-notif-badge');
+                    if (memberNotifLastUnread > 0) {
+                        if (!badge) {
+                            var bell = document.querySelector('.member-notif-bell');
+                            if (bell) {
+                                badge = document.createElement('span');
+                                badge.className = 'member-notif-badge';
+                                bell.appendChild(badge);
+                            }
+                        }
+                        if (badge) badge.textContent = memberNotifLastUnread > 9 ? '9+' : String(memberNotifLastUnread);
+                    } else if (badge) badge.remove();
+                }).catch(function() {});
         }
 
         /* ── Modal ── */
@@ -5396,6 +6305,148 @@ catat_view_once($pdo, 'Member Dashboard', 'Membuka halaman Member Dashboard');
         }
 
 
+        var KONFIRMASI_PINJAMAN_DATA = <?= json_encode(array_column($pengajuanPinjaman, null, 'id'), JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) ?>;
+
+        var TARGET_PENGAJUAN_ID = Number(new URLSearchParams(window.location.search).get('pengajuan_id') || 0);
+
+        function openKonfirmasiPinjaman(id) {
+            document.getElementById('konfirmasi-pinjaman-id').value = id || '';
+            document.getElementById('konfirmasi-keputusan').value = '';
+            document.getElementById('konfirmasi-step-choice').style.display = '';
+            document.getElementById('konfirmasi-data-wrap').style.display = 'none';
+
+            var item = KONFIRMASI_PINJAMAN_DATA[id] || {};
+            var diajukan = Number(item.jumlah || 0);
+            var disetujui = Number(item.jumlah_disetujui || 0) > 0 ? Number(item.jumlah_disetujui) : diajukan;
+            var tenor = Number(item.tenor || 0);
+            var bunga = String(item.jenis || '') === 'barang' ? BUNGA_BARANG : BUNGA_UANG;
+            var totalBunga = Math.round(disetujui * bunga / 100);
+            var angsuran = tenor > 0 ? Math.round(disetujui / tenor) + Math.round(totalBunga / tenor) : 0;
+
+            var elDiajukan = document.getElementById('konf-jumlah-diajukan');
+            var elDisetujui = document.getElementById('konf-jumlah-disetujui');
+            var elBeda = document.getElementById('konf-nominal-berbeda');
+            var elTenor = document.getElementById('konf-tenor');
+            var elAngsuran = document.getElementById('konf-angsuran');
+            if (elDiajukan) elDiajukan.textContent = formatRupiahSimple(diajukan);
+            if (elDisetujui) elDisetujui.textContent = formatRupiahSimple(disetujui);
+            if (elBeda) elBeda.style.display = Math.round(diajukan) !== Math.round(disetujui) ? '' : 'none';
+            if (elTenor) elTenor.textContent = tenor > 0 ? tenor + ' Bulan' : '-';
+            if (elAngsuran) elAngsuran.textContent = formatRupiahSimple(angsuran) + ' / bln';
+
+            var modal = document.getElementById('modal-konfirmasi-pinjaman');
+            if (modal) modal.style.display = 'flex';
+        }
+
+        function closeKonfirmasiPinjaman() {
+            var modal = document.getElementById('modal-konfirmasi-pinjaman');
+            if (modal) modal.style.display = 'none';
+        }
+
+        function pilihKeputusanPinjaman(keputusan) {
+            document.getElementById('konfirmasi-keputusan').value = keputusan;
+            if (keputusan === 'ambil') {
+                document.getElementById('konfirmasi-step-choice').style.display = 'none';
+                document.getElementById('konfirmasi-data-wrap').style.display = '';
+                return;
+            }
+            if (!confirm('Anda memilih tidak mengambil pinjaman yang telah disetujui. Lanjutkan?')) return;
+            simpanKonfirmasiPinjaman();
+        }
+
+        async function simpanKonfirmasiPinjaman() {
+            var formEl = document.getElementById('form-konfirmasi-pinjaman');
+            if (!formEl) return;
+            var keputusan = document.getElementById('konfirmasi-keputusan').value;
+            if (!keputusan) {
+                showToast('Pilih konfirmasi pengambilan terlebih dahulu.');
+                return;
+            }
+
+            // Validasi field hanya saat member memilih akan mengambil.
+            if (keputusan === 'ambil' && !formEl.reportValidity()) {
+                return;
+            }
+
+            var submitBtn = formEl.querySelector('button[type="submit"]');
+            if (submitBtn) {
+                submitBtn.disabled = true;
+                submitBtn.dataset.originalText = submitBtn.textContent;
+                submitBtn.textContent = 'Menyimpan...';
+            }
+
+            var form = new FormData(formEl);
+            try {
+                var res = await fetch('member_dashboard.php', {
+                    method: 'POST',
+                    body: form,
+                    headers: {
+                        'X-Requested-With': 'XMLHttpRequest'
+                    }
+                });
+                var raw = await res.text();
+                var data;
+                try {
+                    data = JSON.parse(raw);
+                } catch (parseErr) {
+                    throw new Error(raw ? raw.substring(0, 300) : 'Respons server kosong.');
+                }
+
+                showToast(data.message || 'Konfirmasi diproses');
+                if (data.success) {
+                    setTimeout(function() {
+                        window.location.href = 'member_dashboard.php#pinjaman';
+                    }, 900);
+                    return;
+                }
+            } catch (e) {
+                console.error('Simpan konfirmasi pinjaman:', e);
+                showToast('Gagal menyimpan konfirmasi: ' + (e.message || 'kesalahan server'));
+            } finally {
+                if (submitBtn) {
+                    submitBtn.disabled = false;
+                    submitBtn.textContent = submitBtn.dataset.originalText || 'Simpan Konfirmasi';
+                }
+            }
+        }
+
+        function initKonfirmasiPinjaman() {
+            document.querySelectorAll('.btn-konfirmasi-pinjaman').forEach(function(btn) {
+                btn.addEventListener('click', function() {
+                    openKonfirmasiPinjaman(this.getAttribute('data-id'));
+                });
+            });
+            var cb = document.getElementById('alamat-keluarga-sama');
+            if (cb) cb.addEventListener('change', function() {
+                var target = document.getElementById('konf-alamat-keluarga');
+                var source = document.getElementById('konf-alamat-ktp');
+                if (!target || !source) return;
+                target.value = this.checked ? source.value : '';
+                target.readOnly = this.checked;
+            });
+            var formEl = document.getElementById('form-konfirmasi-pinjaman');
+            if (formEl) formEl.addEventListener('submit', function(e) {
+                e.preventDefault();
+                simpanKonfirmasiPinjaman();
+            });
+            if (TARGET_PENGAJUAN_ID > 0) {
+                setTimeout(function() {
+                    var card = document.getElementById('pengajuan-' + TARGET_PENGAJUAN_ID);
+                    if (card) {
+                        card.scrollIntoView({
+                            behavior: 'smooth',
+                            block: 'center'
+                        });
+                        card.style.boxShadow = '0 0 0 2px #2563eb';
+                        setTimeout(function() {
+                            card.style.boxShadow = '';
+                        }, 2200);
+                    }
+                }, 500);
+            }
+        }
+
+
         function initBatalPengajuan() {
             document.querySelectorAll('.btn-batal-pengajuan').forEach(function(btn) {
                 btn.addEventListener('click', async function() {
@@ -5438,38 +6489,25 @@ catat_view_once($pdo, 'Member Dashboard', 'Membuka halaman Member Dashboard');
             if (typeof initBatalPengajuan === 'function') {
                 initBatalPengajuan();
             }
-            var targetHash = (window.location.hash || '').replace('#', '');
-            if (targetHash && typeof goTo === 'function') {
-                goTo(targetHash);
+            if (typeof initKonfirmasiPinjaman === 'function') {
+                initKonfirmasiPinjaman();
             }
         });
 
         document.addEventListener('DOMContentLoaded', function() {
-            var savedPage = 'beranda';
-            var hashPage = (window.location.hash || '').replace('#', '');
-            var queryPage = new URLSearchParams(window.location.search).get('tab') || '';
-
-            try {
-                savedPage = localStorage.getItem('member_dashboard_active_page') || 'beranda';
-            } catch (e) {
-                savedPage = 'beranda';
-            }
-
-            if (queryPage && document.getElementById('page-' + queryPage)) {
-                savedPage = queryPage;
-            }
-
-            if (hashPage && document.getElementById('page-' + hashPage)) {
-                savedPage = hashPage;
-            }
-
-            if (!document.getElementById('page-' + savedPage)) {
-                savedPage = 'beranda';
-            }
-
+            var params = new URLSearchParams(window.location.search);
+            var targetTab = params.get('tab') || '';
+            // Buka Beranda secara default. Halaman lain hanya dibuka jika datang dari klik notifikasi/menu dengan parameter tab.
             if (typeof goTo === 'function') {
-                goTo(savedPage);
+                goTo(targetTab && document.getElementById('page-' + targetTab) ? targetTab : 'beranda');
             }
+            if (targetTab === 'pesanan') applyOrderTabFromQuery();
+            try {
+                localStorage.setItem('member_dashboard_active_page', 'beranda');
+            } catch (e) {}
+            if (window.location.hash) history.replaceState(null, document.title, window.location.pathname + window.location.search);
+            setTimeout(pollMemberNotifications, 5000);
+            setInterval(pollMemberNotifications, 30000);
         });
     </script>
 </body>

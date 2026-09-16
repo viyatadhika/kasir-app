@@ -1359,6 +1359,87 @@ if (!function_exists('sp_create_pinjaman_from_import')) {
     }
 }
 
+
+
+if (!function_exists('sp_ensure_konfirmasi_member_schema')) {
+    function sp_ensure_konfirmasi_member_schema(PDO $pdo): void
+    {
+        $pdo->exec("\n            CREATE TABLE IF NOT EXISTS konfirmasi_pinjaman_member (\n                id INT AUTO_INCREMENT PRIMARY KEY,\n                pengajuan_id INT NOT NULL,\n                member_id INT NOT NULL,\n                keputusan VARCHAR(20) NOT NULL DEFAULT 'pending',\n                nama_ktp VARCHAR(180) NULL,\n                alamat_ktp TEXT NULL,\n                no_hp VARCHAR(40) NULL,\n                nama_bank VARCHAR(100) NULL,\n                no_rekening VARCHAR(100) NULL,\n                nama_keluarga VARCHAR(180) NULL,\n                alamat_keluarga TEXT NULL,\n                no_hp_keluarga VARCHAR(40) NULL,\n                alamat_keluarga_sama TINYINT(1) NOT NULL DEFAULT 0,\n                dikonfirmasi_at DATETIME NULL,\n                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,\n                updated_at DATETIME NULL,\n                UNIQUE KEY uq_konfirmasi_pinjaman_pengajuan (pengajuan_id),\n                INDEX idx_konfirmasi_pinjaman_member (member_id),\n                INDEX idx_konfirmasi_pinjaman_keputusan (keputusan)\n            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4\n        ");
+    }
+}
+
+try {
+    sp_ensure_konfirmasi_member_schema($pdo);
+} catch (Throwable $e) {
+    error_log('KONFIRMASI PINJAMAN MEMBER SCHEMA ERROR: ' . $e->getMessage());
+}
+
+
+if (!function_exists('sp_ensure_jumlah_disetujui_schema')) {
+    function sp_ensure_jumlah_disetujui_schema(PDO $pdo): void
+    {
+        $cols = [];
+        foreach ($pdo->query("SHOW COLUMNS FROM pengajuan_pinjaman")->fetchAll(PDO::FETCH_ASSOC) as $col) {
+            $field = (string)($col['Field'] ?? '');
+            if ($field !== '') $cols[$field] = true;
+        }
+        if (!isset($cols['jumlah_disetujui'])) {
+            $pdo->exec("ALTER TABLE pengajuan_pinjaman ADD COLUMN jumlah_disetujui DECIMAL(15,2) NULL AFTER jumlah");
+        }
+    }
+}
+
+try {
+    sp_ensure_jumlah_disetujui_schema($pdo);
+} catch (Throwable $e) {
+    error_log('JUMLAH DISETUJUI SCHEMA ERROR: ' . $e->getMessage());
+}
+
+/*
+ * Pastikan kolom status tidak lagi terikat ENUM lama.
+ * Database lama sering hanya mengenal pending/diseleksi/disetujui/ditolak,
+ * sehingga saat pencairan menyimpan status 'dicairkan' MySQL/MariaDB
+ * menghasilkan SQLSTATE 01000: Data truncated for column 'status'.
+ * VARCHAR dipakai agar status baru seperti dibatalkan/dicairkan tetap aman.
+ */
+if (!function_exists('sp_ensure_status_columns_schema')) {
+    function sp_ensure_status_columns_schema(PDO $pdo): void
+    {
+        $targets = [
+            'pengajuan_pinjaman' => 'pending',
+            'pinjaman' => 'aktif',
+            'angsuran_pinjaman' => 'belum_bayar',
+        ];
+
+        foreach ($targets as $table => $defaultStatus) {
+            try {
+                $stmt = $pdo->query("SHOW COLUMNS FROM `{$table}` LIKE 'status'");
+                $col = $stmt ? $stmt->fetch(PDO::FETCH_ASSOC) : false;
+                if (!$col) {
+                    continue;
+                }
+
+                $type = strtolower(trim((string)($col['Type'] ?? '')));
+                $needsChange = (strpos($type, 'enum(') === 0 || strpos($type, 'set(') === 0);
+                if (!$needsChange && preg_match('/^varchar\((\d+)\)$/', $type, $m)) {
+                    $needsChange = ((int)$m[1] < 30);
+                }
+                if (!$needsChange && preg_match('/^char\((\d+)\)$/', $type, $m)) {
+                    $needsChange = ((int)$m[1] < 30);
+                }
+                if ($needsChange) {
+                    $defaultSql = str_replace("'", "''", (string)$defaultStatus);
+                    $pdo->exec("ALTER TABLE `{$table}` MODIFY COLUMN `status` VARCHAR(30) NOT NULL DEFAULT '{$defaultSql}'");
+                }
+            } catch (Throwable $e) {
+                error_log('STATUS COLUMN SCHEMA ERROR [' . $table . ']: ' . $e->getMessage());
+            }
+        }
+    }
+}
+
+sp_ensure_status_columns_schema($pdo);
+
 $userId = (int)(isset($_SESSION['user']['id']) ? $_SESSION['user']['id'] : 0);
 
 $importPinjamanPreview = [];
@@ -1455,6 +1536,515 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !isset($_GET['action'])) {
     }
 }
 
+
+
+if (isset($_GET['action']) && $_GET['action'] === 'export_konfirmasi') {
+    $stmtExport = $pdo->query("
+        SELECT
+            pp.id AS pengajuan_id,
+            m.kode AS kode_member,
+            m.nama AS nama_member,
+            pp.jenis,
+            pp.jumlah,
+            COALESCE(NULLIF(pp.jumlah_disetujui, 0), pp.jumlah) AS jumlah_disetujui,
+            pp.tenor,
+            pp.status AS status_pengajuan,
+            pp.keperluan, pp.catatan_petugas,
+            pp.disetujui_at,
+            COALESCE(k.keputusan, 'pending') AS keputusan_member,
+            k.dikonfirmasi_at,
+            k.nama_ktp, k.alamat_ktp, k.no_hp,
+            k.nama_bank, k.no_rekening,
+            k.nama_keluarga, k.alamat_keluarga, k.no_hp_keluarga
+        FROM pengajuan_pinjaman pp
+        LEFT JOIN member m ON m.id = pp.member_id
+        LEFT JOIN konfirmasi_pinjaman_member k ON k.pengajuan_id = pp.id
+        WHERE pp.status IN ('disetujui','dicairkan')
+          AND k.keputusan IN ('ambil','tidak_ambil')
+        ORDER BY k.dikonfirmasi_at DESC, pp.disetujui_at DESC, pp.id DESC
+    ");
+    $rowsExport = $stmtExport->fetchAll(PDO::FETCH_ASSOC);
+
+    $fpdfCandidates = [
+        __DIR__ . '/fpdf/fpdf.php',
+        __DIR__ . '/FPDF/fpdf.php',
+        __DIR__ . '/vendor/fpdf/fpdf.php',
+        __DIR__ . '/vendor/setasign/fpdf/fpdf.php',
+        __DIR__ . '/fpdf.php',
+    ];
+    foreach ($fpdfCandidates as $fpdfFile) {
+        if (is_file($fpdfFile)) {
+            require_once $fpdfFile;
+            break;
+        }
+    }
+    if (!class_exists('FPDF')) {
+        http_response_code(500);
+        header('Content-Type: text/plain; charset=UTF-8');
+        echo "Library FPDF tidak ditemukan. Pastikan fpdf/fpdf.php tersedia di aplikasi.";
+        exit;
+    }
+
+    if (!function_exists('sp_pdf_text')) {
+        /**
+         * @param mixed $text
+         * @return string
+         */
+        function sp_pdf_text($text): string
+        {
+            $text = (string)($text ?? '');
+            if (function_exists('iconv')) {
+                $converted = @iconv('UTF-8', 'windows-1252//TRANSLIT//IGNORE', $text);
+                if ($converted !== false) return $converted;
+            }
+            return $text;
+        }
+    }
+    if (!function_exists('sp_pdf_date')) {
+        /**
+         * @param mixed $date
+         * @param bool $withTime
+         * @return string
+         */
+        function sp_pdf_date($date, bool $withTime = false): string
+        {
+            $date = trim((string)($date ?? ''));
+            if ($date === '' || strtotime($date) === false) return '-';
+            return date($withTime ? 'd/m/Y H:i' : 'd/m/Y', strtotime($date));
+        }
+    }
+
+    class SPPinjamanKonfirmasiPDF extends FPDF
+    {
+        public function Header()
+        {
+            $this->SetFont('Arial', 'B', 13);
+            $this->Cell(0, 6, sp_pdf_text('KOPERASI BSDK SEJAHTERA'), 0, 1, 'C');
+            $this->SetFont('Arial', '', 8);
+            $this->Cell(0, 4, sp_pdf_text('Laporan Persetujuan dan Konfirmasi Pengambilan Pinjaman'), 0, 1, 'C');
+            $this->Ln(2);
+            $this->SetDrawColor(30, 30, 30);
+            $this->Line(10, $this->GetY(), $this->GetPageWidth() - 10, $this->GetY());
+            $this->Ln(4);
+        }
+
+        public function Footer()
+        {
+            $this->SetY(-10);
+            $this->SetFont('Arial', '', 7);
+            $this->SetTextColor(110, 110, 110);
+            $this->Cell(0, 4, sp_pdf_text('Dicetak ' . date('d/m/Y H:i') . ' WIB  |  Halaman ' . $this->PageNo()), 0, 0, 'C');
+            $this->SetTextColor(0, 0, 0);
+        }
+
+        public function sectionTitle(string $title): void
+        {
+            $this->SetFillColor(245, 245, 245);
+            $this->SetFont('Arial', 'B', 9);
+            $this->Cell(0, 7, sp_pdf_text($title), 0, 1, 'L', true);
+            $this->Ln(1);
+        }
+    }
+
+    $pdf = new SPPinjamanKonfirmasiPDF('L', 'mm', 'A4');
+    $pdf->SetMargins(10, 10, 10);
+    $pdf->SetAutoPageBreak(true, 13);
+    $pdf->AddPage();
+
+    $totalData = count($rowsExport);
+    $totalAmbil = 0;
+    $totalTidakAmbil = 0;
+    $totalMenunggu = 0;
+    $totalDisetujui = 0;
+    $periodeKonfirmasiAwal = null;
+    $periodeKonfirmasiAkhir = null;
+    foreach ($rowsExport as $r) {
+        $totalDisetujui += (float)($r['jumlah_disetujui'] ?? 0);
+        $k = (string)($r['keputusan_member'] ?? 'pending');
+        if ($k === 'ambil') $totalAmbil++;
+        elseif ($k === 'tidak_ambil') $totalTidakAmbil++;
+        else $totalMenunggu++;
+
+        $tglPeriode = !empty($r['dikonfirmasi_at']) ? (string)$r['dikonfirmasi_at'] : (string)($r['disetujui_at'] ?? '');
+        if ($tglPeriode !== '' && strtotime($tglPeriode) !== false) {
+            $ts = strtotime($tglPeriode);
+            if ($periodeKonfirmasiAwal === null || $ts < $periodeKonfirmasiAwal) $periodeKonfirmasiAwal = $ts;
+            if ($periodeKonfirmasiAkhir === null || $ts > $periodeKonfirmasiAkhir) $periodeKonfirmasiAkhir = $ts;
+        }
+    }
+
+    $periodeKonfirmasiText = '-';
+    if ($periodeKonfirmasiAwal !== null && $periodeKonfirmasiAkhir !== null) {
+        $periodeKonfirmasiText = date('d/m/Y', $periodeKonfirmasiAwal) . ' s.d. ' . date('d/m/Y', $periodeKonfirmasiAkhir);
+    }
+
+    // Periode laporan ditempatkan sebelum tabel agar konteks data langsung terlihat.
+    $pdf->SetFont('Arial', '', 8);
+    $pdf->Cell(45, 6, sp_pdf_text('Periode Konfirmasi'), 1, 0, 'L');
+    $pdf->SetFont('Arial', 'B', 8);
+    $pdf->Cell(232, 6, sp_pdf_text($periodeKonfirmasiText), 1, 1, 'L');
+    $pdf->Ln(3);
+
+    $pdf->sectionTitle('RINGKASAN PERSETUJUAN DAN KONFIRMASI');
+
+    $headers = ['No', 'Member', 'Jenis', 'Diajukan', 'Disetujui', 'Tenor', 'Status', 'Konfirmasi', 'Tgl ACC', 'Tgl Konfirmasi'];
+    $widths  = [9, 58, 18, 30, 30, 16, 24, 32, 28, 32];
+    $pdf->SetFillColor(30, 30, 30);
+    $pdf->SetTextColor(255, 255, 255);
+    $pdf->SetFont('Arial', 'B', 7);
+    foreach ($headers as $i => $h) {
+        $pdf->Cell($widths[$i], 7, sp_pdf_text($h), 1, 0, 'C', true);
+    }
+    $pdf->Ln();
+    $pdf->SetTextColor(0, 0, 0);
+    $pdf->SetFont('Arial', '', 7);
+
+    foreach ($rowsExport as $idx => $r) {
+        if ($pdf->GetY() > 183) {
+            $pdf->AddPage();
+            $pdf->SetFillColor(30, 30, 30);
+            $pdf->SetTextColor(255, 255, 255);
+            $pdf->SetFont('Arial', 'B', 7);
+            foreach ($headers as $i => $h) $pdf->Cell($widths[$i], 7, sp_pdf_text($h), 1, 0, 'C', true);
+            $pdf->Ln();
+            $pdf->SetTextColor(0, 0, 0);
+            $pdf->SetFont('Arial', '', 7);
+        }
+        $keputusan = (string)($r['keputusan_member'] ?? 'pending');
+        $labelKonfirmasi = $keputusan === 'ambil' ? 'Akan Mengambil' : ($keputusan === 'tidak_ambil' ? 'Tidak Mengambil' : 'Belum Konfirmasi');
+        $memberText = trim((string)($r['nama_member'] ?? '-')) . ' (' . trim((string)($r['kode_member'] ?? '-')) . ')';
+        if (strlen($memberText) > 34) $memberText = substr($memberText, 0, 31) . '...';
+        $statusLabel = ucfirst((string)($r['status_pengajuan'] ?? '-'));
+        $rowData = [
+            (string)($idx + 1),
+            $memberText,
+            ucfirst((string)($r['jenis'] ?? '-')),
+            rupiah_sp((float)($r['jumlah'] ?? 0)),
+            rupiah_sp((float)($r['jumlah_disetujui'] ?? 0)),
+            (int)($r['tenor'] ?? 0) . ' bln',
+            $statusLabel,
+            $labelKonfirmasi,
+            sp_pdf_date($r['disetujui_at'] ?? null, false),
+            sp_pdf_date($r['dikonfirmasi_at'] ?? null, false),
+        ];
+        foreach ($rowData as $i => $val) {
+            $align = in_array($i, [0, 2, 5, 6, 7, 8, 9], true) ? 'C' : ($i === 1 ? 'L' : 'R');
+            $pdf->Cell($widths[$i], 6, sp_pdf_text((string)$val), 1, 0, $align);
+        }
+        $pdf->Ln();
+    }
+
+    $confirmed = array_values(array_filter($rowsExport, static function ($r) {
+        return in_array((string)($r['keputusan_member'] ?? ''), ['ambil', 'tidak_ambil'], true);
+    }));
+
+    if ($confirmed) {
+        $pdf->AddPage();
+        $pdf->sectionTitle('DETAIL DATA MEMBER YANG SUDAH KONFIRMASI');
+        foreach ($confirmed as $idx => $r) {
+            if ($pdf->GetY() > 155) $pdf->AddPage();
+            $keputusan = (string)($r['keputusan_member'] ?? '');
+            $labelKonfirmasi = $keputusan === 'ambil' ? 'AKAN MENGAMBIL' : 'TIDAK MENGAMBIL';
+
+            $pdf->SetFont('Arial', 'B', 8);
+            $pdf->SetFillColor(245, 245, 245);
+            $pdf->Cell(0, 7, sp_pdf_text(($idx + 1) . '. ' . ($r['nama_member'] ?? '-') . ' - ' . $labelKonfirmasi), 1, 1, 'L', true);
+            $pdf->SetFont('Arial', '', 7.5);
+
+            $leftX = $pdf->GetX();
+            $startY = $pdf->GetY();
+            $half = 136;
+            $labelW = 39;
+            $valueW = $half - $labelW;
+
+            $pairsLeft = [
+                ['Kode Member', $r['kode_member'] ?? '-'],
+                ['Jenis Pinjaman', ucfirst((string)($r['jenis'] ?? '-'))],
+                ['Nominal Diajukan', rupiah_sp((float)($r['jumlah'] ?? 0))],
+                ['Nominal Disetujui', rupiah_sp((float)($r['jumlah_disetujui'] ?? 0))],
+                ['Tenor', (int)($r['tenor'] ?? 0) . ' bulan'],
+                ['Keperluan', trim((string)($r['keperluan'] ?? '')) !== '' ? $r['keperluan'] : '-'],
+                ['Nama Sesuai KTP', $r['nama_ktp'] ?? '-'],
+                ['No. Handphone', $r['no_hp'] ?? '-'],
+            ];
+            $pairsRight = [
+                ['Nama Bank', $r['nama_bank'] ?? '-'],
+                ['No. Rekening', $r['no_rekening'] ?? '-'],
+                ['Nama Keluarga', $r['nama_keluarga'] ?? '-'],
+                ['No. HP Keluarga', $r['no_hp_keluarga'] ?? '-'],
+                ['Tanggal ACC', sp_pdf_date($r['disetujui_at'] ?? null, true)],
+                ['Tanggal Konfirmasi', sp_pdf_date($r['dikonfirmasi_at'] ?? null, true)],
+                ['Status', $labelKonfirmasi],
+            ];
+
+            foreach ($pairsLeft as $pair) {
+                $pdf->SetX($leftX);
+                $pdf->Cell($labelW, 5.5, sp_pdf_text($pair[0]), 1, 0, 'L');
+                $pdf->Cell($valueW, 5.5, sp_pdf_text((string)$pair[1]), 1, 1, 'L');
+            }
+            $leftEndY = $pdf->GetY();
+
+            $pdf->SetXY($leftX + $half + 5, $startY);
+            foreach ($pairsRight as $pair) {
+                $pdf->SetX($leftX + $half + 5);
+                $pdf->Cell($labelW, 5.5, sp_pdf_text($pair[0]), 1, 0, 'L');
+                $pdf->Cell($valueW, 5.5, sp_pdf_text((string)$pair[1]), 1, 1, 'L');
+            }
+            $rightEndY = $pdf->GetY();
+            $pdf->SetY(max($leftEndY, $rightEndY) + 1.5);
+
+            $pdf->SetFont('Arial', 'B', 7.5);
+            $pdf->Cell(38, 5.5, sp_pdf_text('Alamat Sesuai KTP'), 1, 0, 'L');
+            $pdf->SetFont('Arial', '', 7.5);
+            $alamatKtp = trim((string)($r['alamat_ktp'] ?? '-')) ?: '-';
+            $pdf->MultiCell(0, 5.5, sp_pdf_text($alamatKtp), 1, 'L');
+            $pdf->SetFont('Arial', 'B', 7.5);
+            $pdf->Cell(38, 5.5, sp_pdf_text('Alamat Keluarga'), 1, 0, 'L');
+            $pdf->SetFont('Arial', '', 7.5);
+            $alamatKel = trim((string)($r['alamat_keluarga'] ?? '-')) ?: '-';
+            $pdf->MultiCell(0, 5.5, sp_pdf_text($alamatKel), 1, 'L');
+            $pdf->Ln(3);
+        }
+    }
+
+    // Ringkasan akhir: rata penuh dari margin kiri sampai margin kanan.
+    if ($pdf->GetY() > 170) {
+        $pdf->AddPage();
+    } else {
+        $pdf->Ln(4);
+    }
+    $pdf->SetFont('Arial', '', 8);
+    $pdf->Cell(52, 6, sp_pdf_text('Total pengajuan disetujui'), 1, 0, 'L');
+    $pdf->SetFont('Arial', 'B', 8);
+    $pdf->Cell(17, 6, number_format($totalData, 0, ',', '.'), 1, 0, 'C');
+    $pdf->SetFont('Arial', '', 8);
+    $pdf->Cell(38, 6, sp_pdf_text('Akan mengambil'), 1, 0, 'L');
+    $pdf->SetFont('Arial', 'B', 8);
+    $pdf->Cell(17, 6, number_format($totalAmbil, 0, ',', '.'), 1, 0, 'C');
+    $pdf->SetFont('Arial', '', 8);
+    $pdf->Cell(38, 6, sp_pdf_text('Tidak mengambil'), 1, 0, 'L');
+    $pdf->SetFont('Arial', 'B', 8);
+    $pdf->Cell(17, 6, number_format($totalTidakAmbil, 0, ',', '.'), 1, 0, 'C');
+    $pdf->SetFont('Arial', '', 8);
+    $pdf->Cell(35, 6, sp_pdf_text('Menunggu'), 1, 0, 'L');
+    $pdf->SetFont('Arial', 'B', 8);
+    $pdf->Cell(63, 6, number_format($totalMenunggu, 0, ',', '.'), 1, 1, 'L');
+    $pdf->SetFont('Arial', '', 8);
+    $pdf->Cell(69, 6, sp_pdf_text('Total nominal disetujui'), 1, 0, 'L');
+    $pdf->SetFont('Arial', 'B', 8);
+    $pdf->Cell(208, 6, sp_pdf_text(rupiah_sp($totalDisetujui)), 1, 1, 'L');
+
+    $filename = 'laporan_persetujuan_konfirmasi_pinjaman_' . date('Ymd_His') . '.pdf';
+    $pdf->Output('D', $filename);
+    exit;
+}
+
+
+if (isset($_GET['action']) && $_GET['action'] === 'export_pengajuan') {
+    $stmtExport = $pdo->query("
+        SELECT
+            pp.id AS pengajuan_id,
+            m.kode AS kode_member,
+            m.nama AS nama_member,
+            m.no_hp AS no_hp_member,
+            pp.jenis,
+            pp.jumlah,
+            COALESCE(NULLIF(pp.jumlah_disetujui, 0), 0) AS jumlah_disetujui,
+            pp.tenor,
+            pp.keperluan,
+            pp.catatan_petugas,
+            pp.status AS status_pengajuan,
+            pp.created_at,
+            pp.disetujui_at
+        FROM pengajuan_pinjaman pp
+        LEFT JOIN member m ON m.id = pp.member_id
+        ORDER BY pp.created_at DESC, pp.id DESC
+    ");
+    $rowsExport = $stmtExport->fetchAll(PDO::FETCH_ASSOC);
+
+    $fpdfCandidates = [
+        __DIR__ . '/fpdf/fpdf.php',
+        __DIR__ . '/FPDF/fpdf.php',
+        __DIR__ . '/vendor/fpdf/fpdf.php',
+        __DIR__ . '/vendor/setasign/fpdf/fpdf.php',
+        __DIR__ . '/fpdf.php',
+    ];
+    foreach ($fpdfCandidates as $fpdfFile) {
+        if (is_file($fpdfFile)) {
+            require_once $fpdfFile;
+            break;
+        }
+    }
+    if (!class_exists('FPDF')) {
+        http_response_code(500);
+        header('Content-Type: text/plain; charset=UTF-8');
+        echo "Library FPDF tidak ditemukan. Pastikan fpdf/fpdf.php tersedia di aplikasi.";
+        exit;
+    }
+
+    if (!function_exists('sp_pengajuan_pdf_text')) {
+        /**
+         * @param mixed $text
+         * @return string
+         */
+        function sp_pengajuan_pdf_text($text): string
+        {
+            $text = (string)($text ?? '');
+            if (function_exists('iconv')) {
+                $converted = @iconv('UTF-8', 'windows-1252//TRANSLIT//IGNORE', $text);
+                if ($converted !== false) return $converted;
+            }
+            return $text;
+        }
+    }
+    if (!function_exists('sp_pengajuan_pdf_date')) {
+        /**
+         * @param mixed $date
+         * @param bool $withTime
+         * @return string
+         */
+        function sp_pengajuan_pdf_date($date, bool $withTime = false): string
+        {
+            $date = trim((string)($date ?? ''));
+            if ($date === '' || strtotime($date) === false) return '-';
+            return date($withTime ? 'd/m/Y H:i' : 'd/m/Y', strtotime($date));
+        }
+    }
+    if (!function_exists('sp_pengajuan_pdf_status')) {
+        /**
+         * @param mixed $status
+         * @return string
+         */
+        function sp_pengajuan_pdf_status($status): string
+        {
+            $status = strtolower(trim((string)$status));
+            $map = [
+                'pending' => 'Pending',
+                'diseleksi' => 'Diseleksi',
+                'disetujui' => 'Disetujui',
+                'ditolak' => 'Ditolak',
+                'dibatalkan' => 'Dibatalkan',
+                'batal_pengajuan' => 'Dibatalkan',
+                'dicairkan' => 'Dicairkan',
+            ];
+            return $map[$status] ?? ($status !== '' ? ucfirst($status) : 'Dibatalkan');
+        }
+    }
+
+    class SPPengajuanPDF extends FPDF
+    {
+        public function Header()
+        {
+            $this->SetFont('Arial', 'B', 13);
+            $this->Cell(0, 6, sp_pengajuan_pdf_text('KOPERASI BSDK SEJAHTERA'), 0, 1, 'C');
+            $this->SetFont('Arial', '', 8);
+            $this->Cell(0, 4, sp_pengajuan_pdf_text('Laporan Daftar Pengajuan Pinjaman Member'), 0, 1, 'C');
+            $this->Ln(2);
+            $this->Line(10, $this->GetY(), $this->GetPageWidth() - 10, $this->GetY());
+            $this->Ln(4);
+        }
+        public function Footer()
+        {
+            $this->SetY(-10);
+            $this->SetFont('Arial', '', 7);
+            $this->SetTextColor(110, 110, 110);
+            $this->Cell(0, 4, sp_pengajuan_pdf_text('Dicetak ' . date('d/m/Y H:i') . ' WIB  |  Halaman ' . $this->PageNo()), 0, 0, 'C');
+            $this->SetTextColor(0, 0, 0);
+        }
+    }
+
+    $pdf = new SPPengajuanPDF('L', 'mm', 'A4');
+    $pdf->SetMargins(8, 10, 8);
+    $pdf->SetAutoPageBreak(true, 13);
+    $pdf->AddPage();
+
+    $total = count($rowsExport);
+    $totalNilai = 0;
+    $periodePengajuanAwal = null;
+    $periodePengajuanAkhir = null;
+    foreach ($rowsExport as $r) {
+        $totalNilai += (float)($r['jumlah'] ?? 0);
+        $tglPengajuan = (string)($r['created_at'] ?? '');
+        if ($tglPengajuan !== '' && strtotime($tglPengajuan) !== false) {
+            $ts = strtotime($tglPengajuan);
+            if ($periodePengajuanAwal === null || $ts < $periodePengajuanAwal) $periodePengajuanAwal = $ts;
+            if ($periodePengajuanAkhir === null || $ts > $periodePengajuanAkhir) $periodePengajuanAkhir = $ts;
+        }
+    }
+    $periodePengajuanText = '-';
+    if ($periodePengajuanAwal !== null && $periodePengajuanAkhir !== null) {
+        $periodePengajuanText = date('d/m/Y', $periodePengajuanAwal) . ' s.d. ' . date('d/m/Y', $periodePengajuanAkhir);
+    }
+
+    // Periode pengajuan tampil di atas tabel.
+    $pdf->SetFont('Arial', '', 8);
+    $pdf->Cell(45, 6, sp_pengajuan_pdf_text('Periode Pengajuan'), 1, 0, 'L');
+    $pdf->SetFont('Arial', 'B', 8);
+    $pdf->Cell(236, 6, sp_pengajuan_pdf_text($periodePengajuanText), 1, 1, 'L');
+    $pdf->Ln(3);
+
+    $headers = ['No', 'Member', 'Jenis', 'Diajukan', 'Tenor', 'Keperluan / Keterangan', 'Status', 'Tanggal'];
+    $widths  = [9, 53, 18, 30, 16, 98, 25, 32];
+
+    $drawHeader = static function ($pdf) use ($headers, $widths) {
+        $pdf->SetFillColor(30, 30, 30);
+        $pdf->SetTextColor(255, 255, 255);
+        $pdf->SetFont('Arial', 'B', 7);
+        foreach ($headers as $i => $h) $pdf->Cell($widths[$i], 7, sp_pengajuan_pdf_text($h), 1, 0, 'C', true);
+        $pdf->Ln();
+        $pdf->SetTextColor(0, 0, 0);
+        $pdf->SetFont('Arial', '', 7);
+    };
+    $drawHeader($pdf);
+
+    foreach ($rowsExport as $idx => $r) {
+        if ($pdf->GetY() > 181) {
+            $pdf->AddPage();
+            $drawHeader($pdf);
+        }
+        $memberText = trim((string)($r['nama_member'] ?? '-')) . ' (' . trim((string)($r['kode_member'] ?? '-')) . ')';
+        if (strlen($memberText) > 31) $memberText = substr($memberText, 0, 28) . '...';
+        $ket = trim((string)($r['keperluan'] ?? ''));
+        if ($ket === '') $ket = '-';
+        if (!empty($r['catatan_petugas'])) $ket .= ' | Catatan: ' . trim((string)$r['catatan_petugas']);
+        if (strlen($ket) > 72) $ket = substr($ket, 0, 69) . '...';
+        $row = [
+            (string)($idx + 1),
+            $memberText,
+            ucfirst((string)($r['jenis'] ?? '-')),
+            rupiah_sp((float)($r['jumlah'] ?? 0)),
+            (int)($r['tenor'] ?? 0) . ' bln',
+            $ket,
+            sp_pengajuan_pdf_status($r['status_pengajuan'] ?? ''),
+            sp_pengajuan_pdf_date($r['created_at'] ?? null, true)
+        ];
+        foreach ($row as $i => $val) {
+            $align = in_array($i, [0, 2, 4, 6, 7], true) ? 'C' : ($i === 3 ? 'R' : 'L');
+            $pdf->Cell($widths[$i], 6, sp_pengajuan_pdf_text((string)$val), 1, 0, $align);
+        }
+        $pdf->Ln();
+    }
+
+    // Ringkasan akhir: rata penuh dari margin kiri sampai margin kanan.
+    if ($pdf->GetY() > 180) {
+        $pdf->AddPage();
+    } else {
+        $pdf->Ln(4);
+    }
+    $pdf->SetFont('Arial', '', 8);
+    $pdf->Cell(55, 6, sp_pengajuan_pdf_text('Total Pengajuan'), 1, 0, 'L');
+    $pdf->SetFont('Arial', 'B', 8);
+    $pdf->Cell(30, 6, number_format($total, 0, ',', '.'), 1, 0, 'C');
+    $pdf->SetFont('Arial', '', 8);
+    $pdf->Cell(65, 6, sp_pengajuan_pdf_text('Total Nilai Diajukan'), 1, 0, 'L');
+    $pdf->SetFont('Arial', 'B', 8);
+    $pdf->Cell(131, 6, sp_pengajuan_pdf_text(rupiah_sp($totalNilai)), 1, 1, 'L');
+
+    $filename = 'laporan_pengajuan_pinjaman_' . date('Ymd_His') . '.pdf';
+    $pdf->Output('D', $filename);
+    exit;
+}
+
 // ── API Handler ───────────────────────────────────────────────────────────────
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_GET['action'])) {
     header('Content-Type: application/json');
@@ -1467,6 +2057,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_GET['action'])) {
             $id     = (int)(isset($input['id']) ? $input['id'] : 0);
             $status = isset($input['status']) ? $input['status'] : '';
             $catatan = trim(isset($input['catatan']) ? $input['catatan'] : '');
+            $jumlahDisetujuiInput = isset($input['jumlah_disetujui']) ? (float)$input['jumlah_disetujui'] : 0;
 
             if (!in_array($status, ['disetujui', 'ditolak', 'diseleksi'], true)) {
                 echo json_encode(['success' => false, 'message' => 'Status tidak valid.']);
@@ -1497,6 +2088,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_GET['action'])) {
                 $setArr['diseleksi_oleh'] = $userId;
                 $setArr['diseleksi_at']   = date('Y-m-d H:i:s');
             } elseif ($status === 'disetujui') {
+                $jumlahDiminta = (float)($pengajuan['jumlah'] ?? 0);
+                if ($jumlahDisetujuiInput <= 0) {
+                    $jumlahDisetujuiInput = $jumlahDiminta;
+                }
+                if ($jumlahDisetujuiInput > $jumlahDiminta) {
+                    echo json_encode(['success' => false, 'message' => 'Nominal yang disetujui tidak boleh melebihi nominal pengajuan.']);
+                    exit;
+                }
+                $setArr['jumlah_disetujui'] = $jumlahDisetujuiInput;
                 $setArr['disetujui_oleh'] = $userId;
                 $setArr['disetujui_at']   = date('Y-m-d H:i:s');
             }
@@ -1511,7 +2111,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_GET['action'])) {
             // Kirim notifikasi ke member
             $pesanMap = [
                 'diseleksi' => 'Pengajuan pinjaman Anda sedang dalam proses seleksi oleh petugas.',
-                'disetujui' => 'Selamat! Pengajuan pinjaman Anda telah disetujui. Silakan hubungi petugas untuk pencairan.',
+                'disetujui' => 'Pengajuan pinjaman Anda telah disetujui sebesar ' . rupiah_sp((float)($setArr['jumlah_disetujui'] ?? $pengajuan['jumlah'])) . ' dari pengajuan ' . rupiah_sp((float)$pengajuan['jumlah']) . '. Silakan buka halaman Pinjaman di Member Dashboard lalu konfirmasi apakah pinjaman akan diambil.',
                 'ditolak'   => 'Mohon maaf, pengajuan pinjaman Anda tidak dapat disetujui.' . ($catatan ? ' Alasan: ' . $catatan : ''),
             ];
             $judulMap = [
@@ -1566,6 +2166,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_GET['action'])) {
                 exit;
             }
 
+            $stmtKonfirmasi = $pdo->prepare("SELECT keputusan FROM konfirmasi_pinjaman_member WHERE pengajuan_id = :id LIMIT 1");
+            $stmtKonfirmasi->execute([':id' => $id]);
+            $keputusanMember = (string)($stmtKonfirmasi->fetchColumn() ?: 'pending');
+            if ($keputusanMember !== 'ambil') {
+                echo json_encode([
+                    'success' => false,
+                    'message' => $keputusanMember === 'tidak_ambil'
+                        ? 'Member mengonfirmasi tidak akan mengambil pinjaman ini.'
+                        : 'Pinjaman belum dapat dicairkan karena member belum mengonfirmasi pengambilan.'
+                ]);
+                exit;
+            }
+
             // Ambil konfigurasi bunga langsung dari database
             $konfig = $pdo->query("
                 SELECT bunga_uang, bunga_barang
@@ -1578,7 +2191,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_GET['action'])) {
                 ? (float)($konfig['bunga_barang'] ?? 1.5)
                 : (float)($konfig['bunga_uang'] ?? 1.0);
 
-            $pokok  = (int)$pengajuan['jumlah'];
+            $pokok  = (int)((float)($pengajuan['jumlah_disetujui'] ?? 0) > 0 ? $pengajuan['jumlah_disetujui'] : $pengajuan['jumlah']);
             $tenor  = max(1, (int)$pengajuan['tenor']);
             $hitung = hitung_angsuran_sp($pokok, $tenor, $bungaPct);
             $angPok = $hitung['pokok'];
@@ -1738,10 +2351,16 @@ if ($pagePengajuan > $totalPagePengajuan) {
 
 $stmt = $pdo->prepare("
     SELECT pp.*, m.nama AS member_nama, m.kode AS member_kode, m.no_hp AS member_hp,
-           u.nama AS petugas_nama
+           u.nama AS petugas_nama,
+           COALESCE(kpm.keputusan, 'pending') AS konfirmasi_keputusan,
+           kpm.dikonfirmasi_at AS konfirmasi_at,
+           kpm.nama_ktp AS konfirmasi_nama_ktp,
+           kpm.nama_bank AS konfirmasi_nama_bank,
+           kpm.no_rekening AS konfirmasi_no_rekening
     FROM pengajuan_pinjaman pp
     LEFT JOIN member m ON m.id = pp.member_id
     LEFT JOIN users u  ON u.id = pp.disetujui_oleh
+    LEFT JOIN konfirmasi_pinjaman_member kpm ON kpm.pengajuan_id = pp.id
     WHERE $whereStr
     ORDER BY FIELD(pp.status,'pending','diseleksi','disetujui','ditolak','dibatalkan','dicairkan'), pp.created_at DESC
     LIMIT :limit_pengajuan OFFSET :offset_pengajuan
@@ -1858,10 +2477,7 @@ foreach ($sumStmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
 
 $konfig = $pdo->query("SELECT * FROM konfigurasi_sp ORDER BY id ASC LIMIT 1")->fetch(PDO::FETCH_ASSOC);
 
-$rightActionHtml = '
-<a href="sp.php" class="inline-flex items-center gap-2 px-4 py-2 text-[10px] font-black uppercase tracking-widest border border-gray-200 hover:bg-gray-50 transition-all">
-    Konfigurasi SP
-</a>';
+$rightActionHtml = '';
 
 
 if (!function_exists('sp_pagination_url')) {
@@ -1933,6 +2549,124 @@ catat_view_once($pdo, 'Pengajuan Pinjaman', 'Membuka halaman Pengajuan Pinjaman'
 
         .border-subtle {
             border-color: #f0f0f0;
+        }
+
+        /* Toolbar aksi dipindahkan dari header agar judul tidak terdesak */
+        .pinjaman-action-toolbar {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 16px;
+            padding: 16px;
+            margin-bottom: 20px;
+            background: #fff;
+            border: 1px solid #f0f0f0;
+        }
+
+        .pinjaman-action-toolbar-copy {
+            min-width: 0;
+        }
+
+        .pinjaman-action-toolbar-title {
+            margin: 0;
+            font-size: 10px;
+            font-weight: 900;
+            letter-spacing: .12em;
+            text-transform: uppercase;
+            color: #9ca3af;
+        }
+
+        .pinjaman-action-toolbar-sub {
+            margin-top: 4px;
+            font-size: 12px;
+            line-height: 1.45;
+            color: #6b7280;
+        }
+
+        .pinjaman-action-buttons {
+            display: grid;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            gap: 8px;
+            width: min(100%, 520px);
+            flex: 0 0 auto;
+        }
+
+        .pinjaman-action-btn {
+            min-height: 42px;
+            padding: 8px 12px;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            border: 1px solid #d1d5db;
+            background: #fff;
+            color: #111;
+            font-size: 10px;
+            line-height: 1.3;
+            font-weight: 900;
+            letter-spacing: .07em;
+            text-transform: uppercase;
+            text-align: center;
+            white-space: normal;
+            text-decoration: none;
+            transition: background-color .15s ease, color .15s ease, border-color .15s ease;
+        }
+
+        .pinjaman-action-btn:hover {
+            background: #f9fafb;
+            border-color: #111;
+        }
+
+        .pinjaman-action-btn.primary {
+            background: #111;
+            color: #fff;
+            border-color: #111;
+        }
+
+        .pinjaman-action-btn.primary:hover {
+            background: #262626;
+        }
+
+        @media (max-width: 1023px) {
+            .pinjaman-action-toolbar {
+                flex-direction: column;
+                align-items: stretch;
+                gap: 12px;
+            }
+
+            .pinjaman-action-buttons {
+                width: 100%;
+            }
+        }
+
+        @media (max-width: 767px) {
+            .pinjaman-action-toolbar {
+                padding: 14px;
+                margin-bottom: 16px;
+            }
+
+            .pinjaman-action-buttons {
+                grid-template-columns: 1fr 1fr;
+            }
+
+            .pinjaman-action-btn {
+                min-height: 44px;
+                font-size: 9px;
+                padding: 8px;
+            }
+
+            .pinjaman-action-btn:last-child {
+                grid-column: 1 / -1;
+            }
+        }
+
+        @media (max-width: 380px) {
+            .pinjaman-action-buttons {
+                grid-template-columns: 1fr;
+            }
+
+            .pinjaman-action-btn:last-child {
+                grid-column: auto;
+            }
         }
 
         .no-scrollbar::-webkit-scrollbar {
@@ -2042,6 +2776,152 @@ catat_view_once($pdo, 'Pengajuan Pinjaman', 'Membuka halaman Pengajuan Pinjaman'
                 display: none;
             }
         }
+
+
+        /* ===== Pengajuan responsive: mobile & tablet ===== */
+        .pengajuan-mobile-grid {
+            display: grid;
+            grid-template-columns: 1fr;
+            gap: .75rem;
+        }
+
+        .pengajuan-card {
+            min-width: 0;
+            overflow: hidden;
+        }
+
+        .pengajuan-card-actions {
+            flex-wrap: wrap;
+        }
+
+        .pengajuan-card-actions>button,
+        .pengajuan-card-actions>span {
+            min-height: 38px;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        #modal-detail .pinjaman-detail-panel,
+        #modal-cairkan .pinjaman-cairkan-panel {
+            scrollbar-width: thin;
+        }
+
+        @media (min-width: 640px) and (max-width: 1023px) {
+            .pengajuan-mobile-grid {
+                grid-template-columns: repeat(2, minmax(0, 1fr));
+                gap: 1rem;
+            }
+
+            .pengajuan-card {
+                height: 100%;
+                display: flex;
+                flex-direction: column;
+            }
+
+            .pengajuan-card-actions {
+                margin-top: auto;
+            }
+        }
+
+        @media (max-width: 639px) {
+            main.content {
+                padding: 12px !important;
+            }
+
+            .pengajuan-card {
+                padding: 14px !important;
+            }
+
+            .pengajuan-card .grid.grid-cols-2 {
+                gap: 8px !important;
+            }
+
+            .pengajuan-card-actions {
+                display: grid !important;
+                grid-template-columns: repeat(2, minmax(0, 1fr));
+                gap: 8px !important;
+            }
+
+            .pengajuan-card-actions> :only-child {
+                grid-column: 1 / -1;
+            }
+
+            .pengajuan-card-actions>span:last-child:nth-child(2),
+            .pengajuan-card-actions>button:last-child:nth-child(2) {
+                grid-column: auto;
+            }
+
+            #toast {
+                left: 12px !important;
+                right: 12px !important;
+                bottom: 78px !important;
+                width: auto !important;
+            }
+        }
+
+        /* Detail: center on tablet/desktop, bottom-sheet on phone */
+        @media (max-width: 639px) {
+
+            #modal-detail,
+            #modal-cairkan {
+                align-items: flex-end !important;
+                padding: 0 !important;
+            }
+
+            #modal-detail .pinjaman-detail-panel,
+            #modal-cairkan .pinjaman-cairkan-panel {
+                width: 100%;
+                max-width: none;
+                max-height: 88vh;
+                border-radius: 0;
+            }
+
+            #modal-detail-body {
+                padding: 16px !important;
+            }
+
+            #modal-detail-actions {
+                padding: 12px !important;
+                position: sticky;
+                bottom: 0;
+                background: #fff;
+                z-index: 2;
+                flex-wrap: wrap;
+            }
+
+            #modal-detail-actions>* {
+                min-width: calc(50% - 6px);
+            }
+        }
+
+        @media (min-width: 640px) and (max-width: 1023px) {
+            #modal-detail .pinjaman-detail-panel {
+                max-width: 680px;
+                width: calc(100vw - 48px);
+            }
+
+            #modal-cairkan .pinjaman-cairkan-panel {
+                max-width: 520px;
+                width: calc(100vw - 48px);
+            }
+        }
+
+        .cairkan-spinner {
+            width: 14px;
+            height: 14px;
+            border: 2px solid rgba(255, 255, 255, .35);
+            border-top-color: #fff;
+            border-radius: 50%;
+            display: inline-block;
+            animation: cairkanSpin .7s linear infinite;
+        }
+
+        @keyframes cairkanSpin {
+            to {
+                transform: rotate(360deg);
+            }
+        }
     </style>
 </head>
 
@@ -2051,6 +2931,19 @@ catat_view_once($pdo, 'Pengajuan Pinjaman', 'Membuka halaman Pengajuan Pinjaman'
     <?php require_once 'navbar.php'; ?>
 
     <main class="content p-4 sm:p-6 lg:p-10">
+
+        <!-- Aksi laporan dipindahkan dari header agar responsif dan tidak memotong judul -->
+        <section class="pinjaman-action-toolbar" aria-label="Aksi laporan pinjaman">
+            <div class="pinjaman-action-toolbar-copy">
+                <p class="pinjaman-action-toolbar-title">Laporan & Pengaturan</p>
+                <p class="pinjaman-action-toolbar-sub">Unduh laporan pengajuan atau konfirmasi, serta buka konfigurasi simpan pinjam.</p>
+            </div>
+            <div class="pinjaman-action-buttons">
+                <a href="pinjaman.php?action=export_pengajuan" class="pinjaman-action-btn">PDF Pengajuan</a>
+                <a href="pinjaman.php?action=export_konfirmasi" class="pinjaman-action-btn primary">PDF Setelah Konfirmasi</a>
+                <a href="sp.php" class="pinjaman-action-btn">Konfigurasi SP</a>
+            </div>
+        </section>
 
         <!-- Konfigurasi aktif -->
         <?php if ($konfig): ?>
@@ -2406,6 +3299,7 @@ catat_view_once($pdo, 'Pengajuan Pinjaman', 'Membuka halaman Pengajuan Pinjaman'
                         <tr>
                             <th class="px-5 py-4 text-[10px] font-bold uppercase tracking-widest text-gray-400">Member</th>
                             <th class="px-5 py-4 text-[10px] font-bold uppercase tracking-widest text-gray-400">Jenis</th>
+                            <th class="px-5 py-4 text-[10px] font-bold uppercase tracking-widest text-gray-400">Keterangan / Keperluan</th>
                             <th class="px-5 py-4 text-[10px] font-bold uppercase tracking-widest text-gray-400 text-right">Jumlah</th>
                             <th class="px-5 py-4 text-[10px] font-bold uppercase tracking-widest text-gray-400 text-center">Tenor</th>
                             <th class="px-5 py-4 text-[10px] font-bold uppercase tracking-widest text-gray-400 text-right">Angsuran Est.</th>
@@ -2417,7 +3311,7 @@ catat_view_once($pdo, 'Pengajuan Pinjaman', 'Membuka halaman Pengajuan Pinjaman'
                     <tbody class="divide-y divide-gray-50">
                         <?php if (empty($pengajuanList)): ?>
                             <tr>
-                                <td colspan="8" class="py-16 text-center text-xs text-gray-400">Tidak ada pengajuan</td>
+                                <td colspan="9" class="py-16 text-center text-xs text-gray-400">Tidak ada pengajuan</td>
                             </tr>
                         <?php else: ?>
                             <?php foreach ($pengajuanList as $p):
@@ -2454,7 +3348,21 @@ catat_view_once($pdo, 'Pengajuan Pinjaman', 'Membuka halaman Pengajuan Pinjaman'
                                             <p class="text-[10px] text-gray-400 mt-1"><?php echo h($p['nama_barang']); ?></p>
                                         <?php endif; ?>
                                     </td>
-                                    <td class="px-5 py-4 text-right font-bold text-sm"><?php echo rupiah_sp($pokok); ?></td>
+                                    <td class="px-5 py-4 align-top min-w-[220px]">
+                                        <p class="text-[10px] text-gray-700 leading-relaxed font-semibold"><?php echo !empty($p['keperluan']) ? h($p['keperluan']) : '-'; ?></p>
+                                        <?php if (!empty($p['catatan_petugas'])): ?>
+                                            <div class="mt-2 pt-2 border-t border-gray-100">
+                                                <p class="text-[9px] font-black uppercase tracking-wider text-gray-400">Catatan Petugas</p>
+                                                <p class="text-[10px] text-gray-600 mt-0.5 leading-relaxed"><?php echo h($p['catatan_petugas']); ?></p>
+                                            </div>
+                                        <?php endif; ?>
+                                    </td>
+                                    <td class="px-5 py-4 text-right">
+                                        <p class="font-bold text-sm"><?php echo rupiah_sp($pokok); ?></p>
+                                        <?php if ((float)($p['jumlah_disetujui'] ?? 0) > 0): ?>
+                                            <p class="text-[10px] text-green-700 font-bold mt-1">ACC <?php echo rupiah_sp($p['jumlah_disetujui']); ?></p>
+                                        <?php endif; ?>
+                                    </td>
                                     <td class="px-5 py-4 text-center text-sm font-bold"><?php echo $tenor; ?> bln</td>
                                     <td class="px-5 py-4 text-right">
                                         <p class="text-sm font-bold"><?php echo rupiah_sp($angTot); ?>/bln</p>
@@ -2485,10 +3393,17 @@ catat_view_once($pdo, 'Pengajuan Pinjaman', 'Membuka halaman Pengajuan Pinjaman'
                                                     Tolak
                                                 </button>
                                             <?php elseif ($statusKey === 'disetujui'): ?>
-                                                <button onclick="cairkan(<?php echo (int)$p['id']; ?>)"
-                                                    class="px-3 py-1.5 text-[10px] font-black uppercase bg-black text-white hover:bg-gray-800 transition-all">
-                                                    Cairkan
-                                                </button>
+                                                <?php $konfirmasiKeputusan = (string)($p['konfirmasi_keputusan'] ?? 'pending'); ?>
+                                                <?php if ($konfirmasiKeputusan === 'ambil'): ?>
+                                                    <button onclick="requestCairkan(<?php echo (int)$p['id']; ?>, this)"
+                                                        class="px-3 py-1.5 text-[10px] font-black uppercase bg-black text-white hover:bg-gray-800 transition-all">
+                                                        Cairkan
+                                                    </button>
+                                                <?php elseif ($konfirmasiKeputusan === 'tidak_ambil'): ?>
+                                                    <span class="px-3 py-1.5 text-[9px] font-black uppercase border border-red-200 bg-red-50 text-red-700">Tidak Diambil</span>
+                                                <?php else: ?>
+                                                    <span class="px-3 py-1.5 text-[9px] font-black uppercase border border-amber-200 bg-amber-50 text-amber-700">Menunggu Member</span>
+                                                <?php endif; ?>
                                             <?php endif; ?>
                                         </div>
                                     </td>
@@ -2501,7 +3416,7 @@ catat_view_once($pdo, 'Pengajuan Pinjaman', 'Membuka halaman Pengajuan Pinjaman'
         </div>
 
         <!-- MOBILE: Card -->
-        <div class="lg:hidden space-y-3">
+        <div class="lg:hidden pengajuan-mobile-grid">
             <?php if (empty($pengajuanList)): ?>
                 <div class="py-16 text-center text-xs text-gray-400">Tidak ada pengajuan</div>
             <?php else: ?>
@@ -2524,7 +3439,7 @@ catat_view_once($pdo, 'Pengajuan Pinjaman', 'Membuka halaman Pengajuan Pinjaman'
                         'dicairkan'   => 'bg-purple-50 text-purple-700 border-purple-200',
                     ][$statusKey] ?? 'bg-gray-50 text-gray-700 border-gray-200';
                 ?>
-                    <div class="bg-white border border-gray-100 p-4">
+                    <div class="bg-white border border-gray-100 p-4 pengajuan-card">
                         <div class="flex items-start justify-between gap-3 mb-3">
                             <div>
                                 <p class="text-sm font-bold"><?php echo h($p['member_nama']); ?></p>
@@ -2534,6 +3449,13 @@ catat_view_once($pdo, 'Pengajuan Pinjaman', 'Membuka halaman Pengajuan Pinjaman'
                             <span class="text-[9px] font-black uppercase px-2 py-1 border flex-shrink-0 <?php echo $badgeClass; ?>">
                                 <?php echo h(status_pinjaman_label_sp($statusKey)); ?>
                             </span>
+                        </div>
+                        <div class="border border-gray-100 bg-gray-50 p-3 mb-3">
+                            <p class="text-[9px] font-black uppercase tracking-wider text-gray-400 mb-1">Keterangan / Keperluan</p>
+                            <p class="text-xs text-gray-700 leading-relaxed"><?php echo !empty($p['keperluan']) ? h($p['keperluan']) : '-'; ?></p>
+                            <?php if (!empty($p['catatan_petugas'])): ?>
+                                <p class="text-xs text-gray-700 leading-relaxed mt-2 pt-2 border-t border-gray-200"><strong>Catatan Petugas:</strong> <?php echo h($p['catatan_petugas']); ?></p>
+                            <?php endif; ?>
                         </div>
                         <div class="grid grid-cols-2 gap-3 mb-3">
                             <div class="border border-gray-100 p-3 bg-gray-50">
@@ -2553,7 +3475,7 @@ catat_view_once($pdo, 'Pengajuan Pinjaman', 'Membuka halaman Pengajuan Pinjaman'
                                 <p class="text-sm font-bold"><?php echo rupiah_sp($angTot); ?></p>
                             </div>
                         </div>
-                        <div class="flex gap-2 pt-3 border-t border-gray-100">
+                        <div class="pengajuan-card-actions flex gap-2 pt-3 border-t border-gray-100">
                             <button onclick="openDetail(<?php echo (int)$p['id']; ?>)"
                                 class="flex-1 py-2 text-[10px] font-black uppercase border border-gray-200 hover:bg-gray-50 transition-all">Detail</button>
                             <?php if ($statusKey === 'pending' || $statusKey === 'diseleksi'): ?>
@@ -2562,8 +3484,15 @@ catat_view_once($pdo, 'Pengajuan Pinjaman', 'Membuka halaman Pengajuan Pinjaman'
                                 <button onclick="aksiBulk(<?php echo (int)$p['id']; ?>, 'ditolak')"
                                     class="flex-1 py-2 text-[10px] font-black uppercase border border-red-200 text-red-700 hover:bg-red-50">Tolak</button>
                             <?php elseif ($statusKey === 'disetujui'): ?>
-                                <button onclick="cairkan(<?php echo (int)$p['id']; ?>)"
-                                    class="flex-1 py-2 text-[10px] font-black uppercase bg-black text-white">Cairkan</button>
+                                <?php $konfirmasiKeputusan = (string)($p['konfirmasi_keputusan'] ?? 'pending'); ?>
+                                <?php if ($konfirmasiKeputusan === 'ambil'): ?>
+                                    <button onclick="requestCairkan(<?php echo (int)$p['id']; ?>, this)"
+                                        class="flex-1 py-2 text-[10px] font-black uppercase bg-black text-white">Cairkan</button>
+                                <?php elseif ($konfirmasiKeputusan === 'tidak_ambil'): ?>
+                                    <span class="flex-1 py-2 text-center text-[9px] font-black uppercase border border-red-200 bg-red-50 text-red-700">Tidak Diambil</span>
+                                <?php else: ?>
+                                    <span class="flex-1 py-2 text-center text-[9px] font-black uppercase border border-amber-200 bg-amber-50 text-amber-700">Menunggu Member</span>
+                                <?php endif; ?>
                             <?php endif; ?>
                         </div>
                     </div>
@@ -2578,7 +3507,7 @@ catat_view_once($pdo, 'Pengajuan Pinjaman', 'Membuka halaman Pengajuan Pinjaman'
 
     <!-- Modal Detail -->
     <div id="modal-detail" class="fixed inset-0 z-[100] bg-black/40 items-center justify-center p-4" style="display:none">
-        <div class="bg-white w-full max-w-lg shadow-2xl max-h-[90vh] overflow-y-auto">
+        <div class="pinjaman-detail-panel bg-white w-full max-w-lg shadow-2xl max-h-[90vh] overflow-y-auto">
             <div class="flex items-center justify-between px-6 py-4 border-b border-gray-100">
                 <h2 class="text-xs font-black uppercase tracking-widest">Detail Pengajuan</h2>
                 <button onclick="closeDetail()" class="p-2 hover:bg-gray-100">&times;</button>
@@ -2587,6 +3516,31 @@ catat_view_once($pdo, 'Pengajuan Pinjaman', 'Membuka halaman Pengajuan Pinjaman'
                 <p class="text-xs text-gray-400">Memuat...</p>
             </div>
             <div class="px-6 py-4 border-t border-gray-100 flex gap-3" id="modal-detail-actions"></div>
+        </div>
+    </div>
+
+
+
+    <!-- Modal Konfirmasi Pencairan (non-blocking, mengganti confirm() native) -->
+    <div id="modal-cairkan" class="fixed inset-0 z-[160] bg-black/45 items-center justify-center p-4" style="display:none" aria-hidden="true">
+        <div class="pinjaman-cairkan-panel bg-white w-full max-w-md shadow-2xl">
+            <div class="px-5 py-4 border-b border-gray-100 flex items-center justify-between gap-3">
+                <div>
+                    <p class="text-[9px] font-black uppercase tracking-widest text-gray-400">Konfirmasi</p>
+                    <h3 class="text-sm font-black mt-1">Cairkan Pinjaman</h3>
+                </div>
+                <button type="button" onclick="closeCairkanModal()" class="w-9 h-9 inline-flex items-center justify-center border border-gray-100 hover:bg-gray-50 text-xl leading-none">&times;</button>
+            </div>
+            <div class="px-5 py-5">
+                <p id="cairkan-confirm-text" class="text-sm text-gray-700 leading-relaxed">Pinjaman akan dicairkan dan angsuran dibuat otomatis.</p>
+                <div class="mt-4 border border-amber-200 bg-amber-50 px-3 py-3 text-[11px] leading-relaxed text-amber-800">
+                    Pastikan data member dan nominal yang disetujui sudah benar sebelum melanjutkan.
+                </div>
+            </div>
+            <div class="px-5 py-4 border-t border-gray-100 grid grid-cols-2 gap-2 bg-white">
+                <button type="button" id="btn-cairkan-batal" onclick="closeCairkanModal()" class="min-h-[42px] border border-gray-200 text-[10px] font-black uppercase tracking-wider hover:bg-gray-50">Batal</button>
+                <button type="button" id="btn-cairkan-ok" onclick="prosesCairkan()" class="min-h-[42px] bg-black text-white text-[10px] font-black uppercase tracking-wider hover:bg-gray-800 inline-flex items-center justify-center gap-2">Ya, Cairkan</button>
+            </div>
         </div>
     </div>
 
@@ -2664,7 +3618,9 @@ catat_view_once($pdo, 'Pengajuan Pinjaman', 'Membuka halaman Pengajuan Pinjaman'
             if (!p) return;
 
             var bungaPct = p.jenis === 'barang' ? parseFloat(KONFIG.bunga_barang || 1.5) : parseFloat(KONFIG.bunga_uang || 1.0);
-            var pokok = parseInt(p.jumlah || 0);
+            var jumlahDiajukan = parseInt(p.jumlah || 0);
+            var jumlahDisetujui = parseInt(p.jumlah_disetujui || 0);
+            var pokok = (p.status === 'disetujui' || p.status === 'dicairkan') && jumlahDisetujui > 0 ? jumlahDisetujui : jumlahDiajukan;
             var tenor = parseInt(p.tenor || 0);
             var angPok = tenor > 0 ? Math.round(pokok / tenor) : 0;
             var totalBunga = Math.round(pokok * bungaPct / 100);
@@ -2676,7 +3632,8 @@ catat_view_once($pdo, 'Pengajuan Pinjaman', 'Membuka halaman Pengajuan Pinjaman'
             html += box('Member', escHtml(p.member_nama || '-'));
             html += box('Kode', escHtml(p.member_kode || '-'));
             html += box('Jenis Pinjaman', ucFirst(p.jenis));
-            html += box('Jumlah', rupiah(pokok));
+            html += box('Jumlah Diajukan', rupiah(jumlahDiajukan));
+            if (jumlahDisetujui > 0) html += box('Jumlah Disetujui', rupiah(jumlahDisetujui));
             html += box('Tenor', tenor + ' bulan');
             html += box('Angsuran/bln', rupiah(angTot));
             html += box('Bunga', bungaPct + '% total');
@@ -2720,7 +3677,14 @@ catat_view_once($pdo, 'Pengajuan Pinjaman', 'Membuka halaman Pengajuan Pinjaman'
                 actHtml += '<button onclick="aksiBulk(' + id + ',\'disetujui\');closeDetail()" class="flex-1 py-2.5 text-xs font-bold uppercase bg-green-600 text-white hover:bg-green-700">ACC</button>';
                 actHtml += '<button onclick="aksiBulk(' + id + ',\'ditolak\');closeDetail()" class="flex-1 py-2.5 text-xs font-bold uppercase border border-red-200 text-red-700 hover:bg-red-50">Tolak</button>';
             } else if (p.status === 'disetujui') {
-                actHtml += '<button onclick="cairkan(' + id + ');closeDetail()" class="flex-1 py-2.5 text-xs font-bold uppercase bg-black text-white hover:bg-gray-800">Cairkan</button>';
+                var konf = String(p.konfirmasi_keputusan || 'pending');
+                if (konf === 'ambil') {
+                    actHtml += '<button onclick="requestCairkan(' + id + ', this)" class="flex-1 py-2.5 text-xs font-bold uppercase bg-black text-white hover:bg-gray-800">Cairkan</button>';
+                } else if (konf === 'tidak_ambil') {
+                    actHtml += '<span class="flex-1 py-2.5 text-center text-xs font-bold uppercase border border-red-200 bg-red-50 text-red-700">Tidak Diambil Member</span>';
+                } else {
+                    actHtml += '<span class="flex-1 py-2.5 text-center text-xs font-bold uppercase border border-amber-200 bg-amber-50 text-amber-700">Menunggu Konfirmasi Member</span>';
+                }
             }
             document.getElementById('modal-detail-actions').innerHTML = actHtml;
             document.getElementById('modal-detail').style.display = 'flex';
@@ -2736,12 +3700,37 @@ catat_view_once($pdo, 'Pengajuan Pinjaman', 'Membuka halaman Pengajuan Pinjaman'
 
         // ── Aksi ─────────────────────────────────────────────────────────────────────
         async function aksiBulk(id, status) {
+            var p = PENGAJUAN_DATA[id] || {};
             var label = status === 'disetujui' ? 'menyetujui' : 'menolak';
             var catatan = '';
+            var jumlahDisetujui = 0;
+
             if (status === 'ditolak') {
                 catatan = prompt('Alasan penolakan (opsional):') || '';
             }
-            if (!confirm('Yakin ' + label + ' pengajuan #' + id + '?')) return;
+
+            if (status === 'disetujui') {
+                var jumlahDiminta = Number(p.jumlah || 0);
+                var defaultNominal = Math.round(jumlahDiminta).toLocaleString('id-ID');
+                var raw = prompt(
+                    'Nominal pengajuan: ' + rupiah(jumlahDiminta) + '\n\nMasukkan nominal yang DISETUJUI:',
+                    defaultNominal
+                );
+                if (raw === null) return;
+                jumlahDisetujui = Number(String(raw).replace(/[^0-9]/g, '')) || 0;
+                if (jumlahDisetujui <= 0) {
+                    showToast('Nominal yang disetujui wajib lebih dari 0.', 'error');
+                    return;
+                }
+                if (jumlahDisetujui > jumlahDiminta) {
+                    showToast('Nominal disetujui tidak boleh melebihi nominal pengajuan.', 'error');
+                    return;
+                }
+                if (!confirm('Setujui pengajuan #' + id + ' sebesar ' + rupiah(jumlahDisetujui) + '?')) return;
+            } else {
+                if (!confirm('Yakin ' + label + ' pengajuan #' + id + '?')) return;
+            }
+
             try {
                 var res = await fetch('pinjaman.php?action=seleksi', {
                     method: 'POST',
@@ -2751,7 +3740,8 @@ catat_view_once($pdo, 'Pengajuan Pinjaman', 'Membuka halaman Pengajuan Pinjaman'
                     body: JSON.stringify({
                         id: id,
                         status: status,
-                        catatan: catatan
+                        catatan: catatan,
+                        jumlah_disetujui: jumlahDisetujui
                     })
                 });
                 var data = await res.json();
@@ -2769,8 +3759,65 @@ catat_view_once($pdo, 'Pengajuan Pinjaman', 'Membuka halaman Pengajuan Pinjaman'
             }
         }
 
-        async function cairkan(id) {
-            if (!confirm('Cairkan pinjaman #' + id + '? Angsuran akan dibuat otomatis.')) return;
+        var pendingCairkanId = 0;
+        var pendingCairkanButton = null;
+        var cairkanSedangProses = false;
+
+        function requestCairkan(id, buttonEl) {
+            if (cairkanSedangProses) return;
+            pendingCairkanId = Number(id || 0);
+            pendingCairkanButton = buttonEl || null;
+            if (!pendingCairkanId) return;
+
+            var text = document.getElementById('cairkan-confirm-text');
+            if (text) text.textContent = 'Cairkan pinjaman #' + pendingCairkanId + '? Angsuran akan dibuat otomatis setelah pencairan berhasil.';
+
+            var modal = document.getElementById('modal-cairkan');
+            if (modal) {
+                modal.style.display = 'flex';
+                modal.setAttribute('aria-hidden', 'false');
+                document.body.style.overflow = 'hidden';
+            }
+        }
+
+        function closeCairkanModal(force) {
+            if (cairkanSedangProses && !force) return;
+            var modal = document.getElementById('modal-cairkan');
+            if (modal) {
+                modal.style.display = 'none';
+                modal.setAttribute('aria-hidden', 'true');
+            }
+            document.body.style.overflow = '';
+            if (!cairkanSedangProses) {
+                pendingCairkanId = 0;
+                pendingCairkanButton = null;
+            }
+        }
+
+        async function prosesCairkan() {
+            if (cairkanSedangProses || !pendingCairkanId) return;
+            cairkanSedangProses = true;
+
+            var id = pendingCairkanId;
+            var okBtn = document.getElementById('btn-cairkan-ok');
+            var batalBtn = document.getElementById('btn-cairkan-batal');
+            if (okBtn) {
+                okBtn.disabled = true;
+                okBtn.innerHTML = '<span class="cairkan-spinner"></span><span>Memproses...</span>';
+            }
+            if (batalBtn) batalBtn.disabled = true;
+            if (pendingCairkanButton) {
+                pendingCairkanButton.disabled = true;
+                pendingCairkanButton.classList.add('opacity-60', 'pointer-events-none');
+            }
+
+            // Beri browser kesempatan merender state loading sebelum request/network mulai.
+            await new Promise(function(resolve) {
+                requestAnimationFrame(function() {
+                    setTimeout(resolve, 0);
+                });
+            });
+
             try {
                 var res = await fetch('pinjaman.php?action=cairkan', {
                     method: 'POST',
@@ -2781,20 +3828,59 @@ catat_view_once($pdo, 'Pengajuan Pinjaman', 'Membuka halaman Pengajuan Pinjaman'
                         id: id
                     })
                 });
-                var data = await res.json();
-                showToast(data.message, data.success ? 'success' : 'error');
-                if (data.success && data.wa_link) {
-                    setTimeout(function() {
-                        window.open(data.wa_link, '_blank');
-                    }, 300);
+                var raw = await res.text();
+                var data;
+                try {
+                    data = JSON.parse(raw);
+                } catch (parseErr) {
+                    throw new Error(raw ? raw.substring(0, 220) : 'Respons server kosong.');
                 }
-                if (data.success) setTimeout(function() {
-                    location.reload();
-                }, 1200);
+
+                showToast(data.message || (data.success ? 'Pinjaman berhasil dicairkan.' : 'Pencairan gagal.'), data.success ? 'success' : 'error');
+
+                if (data.success) {
+                    closeDetail();
+                    closeCairkanModal(true);
+                    if (data.wa_link) {
+                        setTimeout(function() {
+                            window.open(data.wa_link, '_blank');
+                        }, 150);
+                    }
+                    setTimeout(function() {
+                        location.reload();
+                    }, 650);
+                    return;
+                }
             } catch (e) {
-                showToast('Terjadi kesalahan', 'error');
+                console.error('Pencairan pinjaman:', e);
+                showToast('Terjadi kesalahan: ' + (e.message || 'pencairan gagal'), 'error');
+            } finally {
+                cairkanSedangProses = false;
+                if (okBtn) {
+                    okBtn.disabled = false;
+                    okBtn.textContent = 'Ya, Cairkan';
+                }
+                if (batalBtn) batalBtn.disabled = false;
+                if (pendingCairkanButton) {
+                    pendingCairkanButton.disabled = false;
+                    pendingCairkanButton.classList.remove('opacity-60', 'pointer-events-none');
+                }
             }
         }
+
+        var modalCairkanEl = document.getElementById('modal-cairkan');
+        if (modalCairkanEl) {
+            modalCairkanEl.addEventListener('click', function(e) {
+                if (e.target === this) closeCairkanModal();
+            });
+        }
+
+        document.addEventListener('keydown', function(e) {
+            if (e.key === 'Escape') {
+                var modal = document.getElementById('modal-cairkan');
+                if (modal && modal.style.display === 'flex') closeCairkanModal();
+            }
+        });
 
         // ── Helpers ──────────────────────────────────────────────────────────────────
         function box(label, val) {
