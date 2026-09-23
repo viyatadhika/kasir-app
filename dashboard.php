@@ -2505,7 +2505,7 @@ $title = 'Dashboard - ' . ($_SESSION['nama'] ?? 'SEJAHUB');
                             <?php endif; ?>
                             <?php foreach ($airPesananTerbaru as $order): ?>
                                 <?php $airStatus = strtolower((string)($order['status'] ?? 'baru')); ?>
-                                <a href="air_pesanan.php?q=<?php echo urlencode((string)$order['nomor_pesanan']); ?>" class="p-4 md:p-5 flex items-center justify-between gap-4 hover:bg-gray-50">
+                                <a href="air_pesanan.php?q=<?php echo urlencode((string)$order['nomor_pesanan']); ?>&status=semua&page=1" class="p-4 md:p-5 flex items-center justify-between gap-4 hover:bg-gray-50">
                                     <div class="flex items-center gap-3 min-w-0">
                                         <div class="w-10 h-10 bg-blue-50 border border-blue-100 flex items-center justify-center shrink-0"><i data-lucide="droplets" class="w-5 h-5 text-blue-600"></i></div>
                                         <div class="min-w-0">
