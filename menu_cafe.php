@@ -9,19 +9,15 @@
 | - CRUD tambah, edit, aktif/nonaktif, dan hapus
 |--------------------------------------------------------------------------
 */
-
 if (session_status() === PHP_SESSION_NONE) {
     session_start();
 }
-
 require_once 'config.php';
 require_once 'auth.php';
 requireAccess();
-
 $activeMenu = 'menu_cafe';
 $pageTitle  = 'Menu Cafe';
 $backUrl    = 'dashboard.php';
-
 if (!function_exists('mc_h')) {
     /**
      * @param mixed $value
@@ -32,7 +28,6 @@ if (!function_exists('mc_h')) {
         return htmlspecialchars((string)($value ?? ''), ENT_QUOTES, 'UTF-8');
     }
 }
-
 if (!function_exists('mc_rupiah')) {
     /**
      * @param mixed $value
@@ -43,8 +38,6 @@ if (!function_exists('mc_rupiah')) {
         return 'Rp ' . number_format((float)($value ?? 0), 0, ',', '.');
     }
 }
-
-
 if (!function_exists('mc_normalize_category_name')) {
     /**
      * @param mixed $value
@@ -54,28 +47,22 @@ if (!function_exists('mc_normalize_category_name')) {
     {
         $value = trim((string)$value);
         $value = preg_replace('/\s+/', ' ', $value);
-
         if ($value === '') {
             return '';
         }
-
         $lower = mb_strtolower($value, 'UTF-8');
-
         $fixed = [
             'makanan' => 'Makanan',
             'minuman' => 'Minuman',
             'snack'   => 'Snack',
             'es krim' => 'Es Krim',
         ];
-
         if (isset($fixed[$lower])) {
             return $fixed[$lower];
         }
-
         return mb_convert_case($lower, MB_CASE_TITLE, 'UTF-8');
     }
 }
-
 if (!function_exists('mc_has_column')) {
     /**
      * @param PDO $pdo
@@ -103,7 +90,6 @@ if (!function_exists('mc_has_column')) {
         }
     }
 }
-
 if (!function_exists('mc_first_column')) {
     /**
      * @param PDO $pdo
@@ -122,10 +108,10 @@ if (!function_exists('mc_first_column')) {
         return $fallback;
     }
 }
-
-
 if (!function_exists('mc_generate_next_cafe_code')) {
     /**
+     * Gunakan nomor terkecil yang masih kosong setelah kode Cafe aktif
+     * dalam urutan; cek seluruh produk untuk menjaga UNIQUE(kode).
      * @param PDO $pdo
      * @param string $kodeCol
      * @param string $idCol
@@ -133,81 +119,23 @@ if (!function_exists('mc_generate_next_cafe_code')) {
      */
     function mc_generate_next_cafe_code(PDO $pdo, $kodeCol, $idCol)
     {
-        $stmt = $pdo->query("
-            SELECT `$kodeCol`
-            FROM produk
-            WHERE tipe_produk IN ('makanan','minuman','topping','cafe')
-              AND `$kodeCol` REGEXP '^CDS[0-9]+$'
-            ORDER BY CAST(SUBSTRING(`$kodeCol`, 4) AS UNSIGNED) DESC, `$idCol` DESC
-            LIMIT 1
-        ");
-
-        $lastCode = $stmt ? (string)$stmt->fetchColumn() : '';
-        $nextNumber = 1;
-
-        if (preg_match('/^CDS(\d+)$/i', $lastCode, $m)) {
-            $nextNumber = ((int)$m[1]) + 1;
+        // Jangan gunakan MAX(): kode tersembunyi / loncatan nomor dapat
+        // menyebabkan form melompat ke CDS074 meski CDS067 masih kosong.
+        $stmt = $pdo->query("SELECT `$kodeCol` FROM produk WHERE `$kodeCol` REGEXP '^CDS[0-9]+$'");
+        $used = [];
+        foreach (($stmt ? $stmt->fetchAll(PDO::FETCH_COLUMN) : []) as $existingCode) {
+            if (preg_match('/^CDS([0-9]+)$/', (string)$existingCode, $matches)) {
+                $used[(int)$matches[1]] = true;
+            }
         }
-
-        return 'CDS' . str_pad((string)$nextNumber, 3, '0', STR_PAD_LEFT);
-    }
-}
-
-if (!function_exists('mc_normalize_existing_cafe_codes_once')) {
-    /**
-     * Nomori ulang SEMUA data menu cafe lama berdasarkan ID:
-     * CDS001, CDS002, CDS003, dan seterusnya.
-     *
-     * @param PDO $pdo
-     * @param string $kodeCol
-     * @param string $idCol
-     * @return void
-     */
-    function mc_normalize_existing_cafe_codes_once(PDO $pdo, $kodeCol, $idCol)
-    {
-        $stmt = $pdo->query("
-            SELECT `$idCol` AS id
-            FROM produk
-            WHERE tipe_produk IN ('makanan','minuman','topping','cafe')
-            ORDER BY `$idCol` ASC
-        ");
-        $rows = $stmt ? $stmt->fetchAll(PDO::FETCH_ASSOC) : [];
-
-        if (!$rows) {
-            return;
+        // Nomor 1..60 merupakan ruang kode lama. Mulai mencari dari
+        // CDS061 agar tidak mengisi celah pada kode historis.
+        for ($number = 61; $number < 100000; $number++) {
+            if (!isset($used[$number])) {
+                return 'CDS' . str_pad((string)$number, 3, '0', STR_PAD_LEFT);
+            }
         }
-
-        /*
-         * Pakai kode sementara terlebih dahulu agar tidak bentrok
-         * bila kolom kode memiliki UNIQUE index.
-         */
-        $temp = $pdo->prepare("
-            UPDATE produk
-            SET `$kodeCol` = :kode
-            WHERE `$idCol` = :id
-        ");
-
-        foreach ($rows as $index => $row) {
-            $temp->execute([
-                ':kode' => '__CAFE_TMP_' . (int)$row['id'] . '__',
-                ':id'   => (int)$row['id'],
-            ]);
-        }
-
-        $update = $pdo->prepare("
-            UPDATE produk
-            SET `$kodeCol` = :kode
-            WHERE `$idCol` = :id
-        ");
-
-        $number = 1;
-        foreach ($rows as $row) {
-            $update->execute([
-                ':kode' => 'CDS' . str_pad((string)$number, 3, '0', STR_PAD_LEFT),
-                ':id'   => (int)$row['id'],
-            ]);
-            $number++;
-        }
+        throw new RuntimeException('Tidak ditemukan kode menu Cafe yang tersedia.');
     }
 }
 
@@ -221,7 +149,6 @@ try {
 } catch (Throwable $e) {
     // Halaman tetap berjalan; pesan struktur akan ditampilkan jika query gagal.
 }
-
 $idCol       = mc_first_column($pdo, 'produk', ['id', 'produk_id'], 'id');
 $kodeCol     = mc_first_column($pdo, 'produk', ['kode', 'kode_produk', 'barcode'], 'kode');
 $namaCol     = mc_first_column($pdo, 'produk', ['nama', 'nama_produk'], 'nama');
@@ -232,12 +159,8 @@ $stokCol     = mc_first_column($pdo, 'produk', ['stok', 'stock'], 'stok');
 $satuanCol   = mc_first_column($pdo, 'produk', ['satuan', 'unit'], '');
 $statusCol   = mc_first_column($pdo, 'produk', ['status', 'aktif'], 'status');
 $gambarCol   = mc_first_column($pdo, 'produk', ['gambar', 'foto', 'image'], '');
-
-try {
-    mc_normalize_existing_cafe_codes_once($pdo, $kodeCol, $idCol);
-} catch (Throwable $e) {
-    // Data cafe lama dinomori ulang CDS001 dst berdasarkan ID. Halaman tetap berjalan bila proses gagal.
-}
+// Jangan menomori ulang produk setiap halaman dibuka.
+// Kode yang sudah dipakai di transaksi / POS harus tetap stabil.
 
 
 try {
@@ -248,17 +171,14 @@ try {
           AND `$kategoriCol` IS NOT NULL
           AND TRIM(`$kategoriCol`) <> ''
     ");
-
     $normalizeCategoryUpdate = $pdo->prepare("
         UPDATE produk
         SET `$kategoriCol` = :kategori
         WHERE `$idCol` = :id
     ");
-
     foreach (($stmtNormalizeCategories ? $stmtNormalizeCategories->fetchAll(PDO::FETCH_ASSOC) : []) as $categoryRow) {
         $oldCategory = trim((string)($categoryRow['kategori'] ?? ''));
         $newCategory = mc_normalize_category_name($oldCategory);
-
         if ($newCategory !== '' && $newCategory !== $oldCategory) {
             $normalizeCategoryUpdate->execute([
                 ':kategori' => $newCategory,
@@ -269,21 +189,16 @@ try {
 } catch (Throwable $e) {
     // Halaman tetap berjalan bila normalisasi kategori lama gagal.
 }
-
 $allowedTypes = ['cafe'];
-
 $flash = '';
 $flashType = 'success';
-
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     try {
         $action = trim((string)($_POST['action'] ?? ''));
-
         if ($action === 'save') {
             $id        = (int)($_POST['id'] ?? 0);
             $kode      = trim((string)($_POST['kode'] ?? ''));
             $nama      = trim((string)($_POST['nama'] ?? ''));
-
             if ($id <= 0) {
                 $kode = mc_generate_next_cafe_code($pdo, $kodeCol, $idCol);
             } elseif ($kode === '') {
@@ -293,46 +208,36 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             }
             $kategori  = trim((string)($_POST['kategori'] ?? ''));
             $kategoriBaru = trim((string)($_POST['kategori_baru'] ?? ''));
-
             if ($kategori === '__baru__') {
                 $kategori = $kategoriBaru;
             }
-
             $kategori = mc_normalize_category_name($kategori);
-
             if ($kategori === '') {
                 throw new RuntimeException('Kategori menu wajib dipilih atau diisi.');
             }
-
             if (mb_strlen($kategori) > 80) {
                 throw new RuntimeException('Nama kategori terlalu panjang.');
             }
-
             $tipe      = 'cafe';
             $hargaJual = (float)preg_replace('/[^0-9]/', '', (string)($_POST['harga_jual'] ?? 0));
             $hargaBeli = (float)preg_replace('/[^0-9]/', '', (string)($_POST['harga_beli'] ?? 0));
-
             // Menu Cafe dibuat saat dipesan. Stok menu jadi tidak digunakan.
             // Nilai stok tetap disimpan 0 agar kompatibel dengan tabel produk.
             $stok      = 0;
             $satuan    = trim((string)($_POST['satuan'] ?? 'porsi'));
             $status    = trim((string)($_POST['status'] ?? 'aktif'));
-
             if ($nama === '') {
                 throw new RuntimeException('Nama menu wajib diisi.');
             }
             if ($kode === '') {
                 throw new RuntimeException('Kode menu otomatis gagal dibuat.');
             }
-
             if (!in_array($tipe, $allowedTypes, true)) {
                 $tipe = 'cafe';
             }
-
             if (!in_array($status, ['aktif', 'nonaktif'], true)) {
                 $status = 'aktif';
             }
-
             $fields = [
                 "`$kodeCol`"     => ':kode',
                 "`$namaCol`"     => ':nama',
@@ -342,7 +247,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 "`$statusCol`"   => ':status',
                 "`tipe_produk`"  => ':tipe_produk',
             ];
-
             $params = [
                 ':kode'         => $kode,
                 ':nama'         => $nama,
@@ -352,24 +256,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 ':status'       => $status,
                 ':tipe_produk'  => $tipe,
             ];
-
             if ($beliCol !== '') {
                 $fields["`$beliCol`"] = ':harga_beli';
                 $params[':harga_beli'] = $hargaBeli;
             }
-
             if ($satuanCol !== '') {
                 $fields["`$satuanCol`"] = ':satuan';
                 $params[':satuan'] = $satuan;
             }
-
             if ($id > 0) {
                 $set = [];
                 foreach ($fields as $field => $placeholder) {
                     $set[] = $field . '=' . $placeholder;
                 }
                 $params[':id'] = $id;
-
                 $stmt = $pdo->prepare("
                     UPDATE produk
                     SET " . implode(', ', $set) . "
@@ -380,21 +280,36 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             } else {
                 $columns = array_keys($fields);
                 $values  = array_values($fields);
-
                 $stmt = $pdo->prepare("
                     INSERT INTO produk (" . implode(', ', $columns) . ")
                     VALUES (" . implode(', ', $values) . ")
                 ");
-                $stmt->execute($params);
+                // Jika ada penambahan produk bersamaan, coba kode baru tanpa mengubah data lama.
+                $inserted = false;
+                for ($attempt = 0; $attempt < 5; $attempt++) {
+                    if ($attempt > 0) {
+                        $params[':kode'] = mc_generate_next_cafe_code($pdo, $kodeCol, $idCol);
+                    }
+                    try {
+                        $stmt->execute($params);
+                        $inserted = true;
+                        break;
+                    } catch (PDOException $e) {
+                        if ((string)$e->getCode() !== '23000' || strpos($e->getMessage(), '1062') === false || $attempt === 4) {
+                            throw $e;
+                        }
+                    }
+                }
+                if (!$inserted) {
+                    throw new RuntimeException('Gagal membuat kode menu unik. Silakan ulangi.');
+                }
                 $flash = 'Menu cafe berhasil ditambahkan.';
             }
         }
-
         if ($action === 'toggle') {
             $id = (int)($_POST['id'] ?? 0);
             $current = trim((string)($_POST['current_status'] ?? 'aktif'));
             $next = $current === 'aktif' ? 'nonaktif' : 'aktif';
-
             $stmt = $pdo->prepare("
                 UPDATE produk
                 SET `$statusCol` = :status
@@ -406,10 +321,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             ]);
             $flash = 'Status menu berhasil diperbarui.';
         }
-
         if ($action === 'delete') {
             $id = (int)($_POST['id'] ?? 0);
-
             $stmt = $pdo->prepare("
                 DELETE FROM produk
                 WHERE `$idCol` = :id
@@ -423,17 +336,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $flashType = 'error';
     }
 }
-
 $q = trim((string)($_GET['q'] ?? ''));
 $filterType = strtolower(trim((string)($_GET['tipe'] ?? '')));
 $filterStatus = strtolower(trim((string)($_GET['status'] ?? '')));
 $filterCategory = mc_normalize_category_name($_GET['kategori_filter'] ?? '');
 $page = max(1, (int)($_GET['page'] ?? 1));
 $perPage = 10;
-
 $where = ["tipe_produk IN ('makanan','minuman','topping','cafe')"];
 $params = [];
-
 if ($q !== '') {
     /*
      * Gunakan placeholder berbeda untuk setiap LIKE.
@@ -446,23 +356,19 @@ if ($q !== '') {
         OR `$namaCol` LIKE :q_nama
         OR `$kategoriCol` LIKE :q_kategori
     )";
-
     $searchValue = '%' . $q . '%';
     $params[':q_kode'] = $searchValue;
     $params[':q_nama'] = $searchValue;
     $params[':q_kategori'] = $searchValue;
 }
-
 if ($filterCategory !== '') {
     $where[] = "LOWER(TRIM(`$kategoriCol`)) = :kategori_filter";
     $params[':kategori_filter'] = mb_strtolower($filterCategory, 'UTF-8');
 }
-
 if (in_array($filterStatus, ['aktif', 'nonaktif'], true)) {
     $where[] = "`$statusCol` = :status";
     $params[':status'] = $filterStatus;
 }
-
 $select = [
     "`$idCol` AS id",
     "`$kodeCol` AS kode",
@@ -473,25 +379,21 @@ $select = [
     "`$statusCol` AS status",
     "tipe_produk",
 ];
-
 if ($beliCol !== '') {
     $select[] = "`$beliCol` AS harga_beli";
 } else {
     $select[] = "0 AS harga_beli";
 }
-
 if ($satuanCol !== '') {
     $select[] = "`$satuanCol` AS satuan";
 } else {
     $select[] = "'porsi' AS satuan";
 }
-
 if ($gambarCol !== '') {
     $select[] = "`$gambarCol` AS gambar";
 } else {
     $select[] = "'' AS gambar";
 }
-
 $menus = [];
 $totalRows = 0;
 $totalPages = 1;
@@ -525,15 +427,12 @@ if (!function_exists('mc_page_url')) {
         return 'menu_cafe.php?' . http_build_query($query);
     }
 }
-
 $defaultCategories = ['Makanan', 'Minuman', 'Snack', 'Es Krim'];
 $existingCategoriesMap = [];
-
 foreach ($defaultCategories as $categoryName) {
     $normalized = mc_normalize_category_name($categoryName);
     $existingCategoriesMap[mb_strtolower($normalized, 'UTF-8')] = $normalized;
 }
-
 try {
     $stmtCategories = $pdo->query("
         SELECT DISTINCT TRIM(`$kategoriCol`) AS kategori
@@ -543,7 +442,6 @@ try {
           AND TRIM(`$kategoriCol`) <> ''
         ORDER BY kategori ASC
     ");
-
     if ($stmtCategories) {
         foreach ($stmtCategories->fetchAll(PDO::FETCH_COLUMN) as $categoryName) {
             $normalized = mc_normalize_category_name($categoryName);
@@ -555,17 +453,14 @@ try {
 } catch (Throwable $e) {
     // Tetap pakai kategori bawaan.
 }
-
 $existingCategories = array_values($existingCategoriesMap);
 sort($existingCategories, SORT_NATURAL | SORT_FLAG_CASE);
-
 $nextCafeCode = 'CDS001';
 try {
     $nextCafeCode = mc_generate_next_cafe_code($pdo, $kodeCol, $idCol);
 } catch (Throwable $e) {
     $nextCafeCode = 'CDS001';
 }
-
 $summaryMenu = [
     'aktif'   => 0,
     'makanan' => 0,
@@ -573,7 +468,6 @@ $summaryMenu = [
     'snack'   => 0,
     'es_krim' => 0,
 ];
-
 try {
     $stmtSummary = $pdo->query("
         SELECT
@@ -586,7 +480,6 @@ try {
         WHERE tipe_produk = 'cafe'
     ");
     $summaryRow = $stmtSummary ? $stmtSummary->fetch(PDO::FETCH_ASSOC) : [];
-
     foreach ($summaryMenu as $key => $value) {
         if (isset($summaryRow[$key])) {
             $summaryMenu[$key] = (int)$summaryRow[$key];
@@ -595,7 +488,6 @@ try {
 } catch (Throwable $e) {
     // Ringkasan tetap nol bila query gagal.
 }
-
 require_once 'sidebar.php';
 require_once 'navbar.php';
 ?>
@@ -695,7 +587,6 @@ require_once 'navbar.php';
             min-width: 62px;
             padding: 0 12px;
         }
-
 
         .menu-header {
             display: flex;
@@ -872,7 +763,6 @@ require_once 'navbar.php';
                 <?php echo mc_h($flash); ?>
             </div>
         <?php endif; ?>
-
         <div class="menu-header">
             <div class="menu-header-copy">
                 <p class="text-[10px] font-black uppercase tracking-[.18em] text-gray-400">Operasional Cafe</p>
@@ -883,7 +773,6 @@ require_once 'navbar.php';
                 + Tambah Menu
             </button>
         </div>
-
         <div class="menu-summary-grid">
             <div class="menu-summary-card active">
                 <p class="menu-summary-label">Menu Aktif</p>
@@ -906,7 +795,6 @@ require_once 'navbar.php';
                 <p class="menu-summary-value"><?php echo number_format($summaryMenu['es_krim']); ?></p>
             </div>
         </div>
-
         <form method="get" id="menuFilterForm" class="card p-4 mb-5">
             <div class="grid grid-cols-1 md:grid-cols-4 gap-3">
                 <div class="md:col-span-2 relative">
@@ -940,7 +828,6 @@ require_once 'navbar.php';
                 <a href="menu_cafe.php" class="btn border border-gray-200 bg-white text-gray-600 px-5 inline-flex items-center justify-center">Reset</a>
             </div>
         </form>
-
         <div class="hidden lg:block card overflow-x-auto">
             <table class="w-full min-w-[980px] text-left">
                 <thead class="bg-gray-50 border-b border-gray-100">
@@ -970,7 +857,7 @@ require_once 'navbar.php';
                             </td>
                             <td class="px-5 py-4 text-xs font-bold uppercase"><?php echo mc_h($menu['tipe_produk']); ?></td>
                             <td class="px-5 py-4 text-xs font-black text-right"><?php echo mc_rupiah($menu['harga_jual']); ?></td>
-                                <td class="px-5 py-4 text-center">
+                            <td class="px-5 py-4 text-center">
                                 <span class="badge <?php echo $menu['status'] === 'aktif' ? 'bg-green-50 border-green-200 text-green-700' : 'bg-gray-100 border-gray-200 text-gray-600'; ?>">
                                     <?php echo mc_h($menu['status']); ?>
                                 </span>
@@ -1000,7 +887,6 @@ require_once 'navbar.php';
                             </td>
                         </tr>
                     <?php endif; ?>
-
                     <tr id="desktopSearchEmpty" class="hidden">
                         <td colspan="6" class="px-5 py-12 text-center text-xs font-bold text-gray-400 uppercase tracking-widest">
                             Menu tidak ditemukan
@@ -1009,7 +895,6 @@ require_once 'navbar.php';
                 </tbody>
             </table>
         </div>
-
         <div id="menuMobileList" class="lg:hidden grid grid-cols-1 md:grid-cols-2 gap-3">
             <?php foreach ($menus as $menu): ?>
                 <div class="card p-4 menu-search-item"
@@ -1029,7 +914,6 @@ require_once 'navbar.php';
                             <?php echo mc_h($menu['status']); ?>
                         </span>
                     </div>
-
                     <div class="grid grid-cols-2 gap-2 mt-4 pt-4 border-t border-gray-100">
                         <div>
                             <p class="text-[8px] font-black uppercase tracking-widest text-gray-400">Jenis</p>
@@ -1040,7 +924,6 @@ require_once 'navbar.php';
                             <p class="text-xs font-bold mt-1"><?php echo mc_rupiah($menu['harga_jual']); ?></p>
                         </div>
                     </div>
-
                     <div class="grid grid-cols-1 sm:grid-cols-3 gap-2 mt-4 items-stretch">
                         <button type="button" onclick='editMenu(<?php echo json_encode($menu, JSON_HEX_APOS | JSON_HEX_QUOT); ?>)' class="btn border border-gray-200 bg-white">Edit</button>
                         <form method="post" class="h-full">
@@ -1076,7 +959,6 @@ require_once 'navbar.php';
             </div>
         <?php endif; ?>
     </main>
-
     <div id="menuModal" class="fixed inset-0 z-[80] hidden items-center justify-center bg-black/50 p-4">
         <div class="w-full max-w-2xl bg-white border border-gray-200 max-h-[92vh] overflow-y-auto">
             <div class="px-5 py-4 border-b border-gray-100 flex items-center justify-between">
@@ -1086,11 +968,9 @@ require_once 'navbar.php';
                 </div>
                 <button type="button" onclick="closeMenuModal()" class="w-10 h-10 border border-gray-200 text-xl font-bold">&times;</button>
             </div>
-
             <form method="post" class="p-5">
                 <input type="hidden" name="action" value="save">
                 <input type="hidden" name="id" id="menu-id" value="0">
-
                 <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
                     <div>
                         <label class="block text-[9px] font-black uppercase tracking-widest text-gray-400 mb-2">Kode Menu</label>
@@ -1150,7 +1030,6 @@ require_once 'navbar.php';
                         </select>
                     </div>
                 </div>
-
                 <div class="grid grid-cols-2 gap-3 mt-6">
                     <button type="button" onclick="closeMenuModal()" class="btn border border-gray-200 bg-white">Batal</button>
                     <button type="submit" class="btn bg-black text-white">Simpan Menu</button>
@@ -1158,15 +1037,12 @@ require_once 'navbar.php';
             </form>
         </div>
     </div>
-
     <script>
         function toggleNewCategoryField() {
             var select = document.getElementById('menu-kategori');
             var wrap = document.getElementById('new-category-wrap');
             var input = document.getElementById('menu-kategori-baru');
-
             if (!select || !wrap || !input) return;
-
             if (select.value === '__baru__') {
                 wrap.classList.remove('hidden');
                 input.required = true;
@@ -1193,7 +1069,6 @@ require_once 'navbar.php';
             document.getElementById('menu-harga-jual').value = '';
             document.getElementById('menu-satuan').value = 'porsi';
             document.getElementById('menu-status').value = 'aktif';
-
             var modal = document.getElementById('menuModal');
             modal.classList.remove('hidden');
             modal.classList.add('flex');
@@ -1207,7 +1082,6 @@ require_once 'navbar.php';
             var categorySelect = document.getElementById('menu-kategori');
             var categoryValue = String(menu.kategori || '').trim();
             var matchedOptionValue = '';
-
             Array.prototype.some.call(categorySelect.options, function(opt) {
                 if (String(opt.value || '').toLowerCase() === categoryValue.toLowerCase()) {
                     matchedOptionValue = opt.value;
@@ -1215,7 +1089,6 @@ require_once 'navbar.php';
                 }
                 return false;
             });
-
             if (matchedOptionValue !== '') {
                 categorySelect.value = matchedOptionValue;
                 document.getElementById('menu-kategori-baru').value = '';
@@ -1232,7 +1105,6 @@ require_once 'navbar.php';
             document.getElementById('menu-harga-jual').value = Number(menu.harga_jual || 0);
             document.getElementById('menu-satuan').value = menu.satuan || 'porsi';
             document.getElementById('menu-status').value = menu.status || 'aktif';
-
             var modal = document.getElementById('menuModal');
             modal.classList.remove('hidden');
             modal.classList.add('flex');
@@ -1243,11 +1115,9 @@ require_once 'navbar.php';
             modal.classList.add('hidden');
             modal.classList.remove('flex');
         }
-
         document.getElementById('menuModal').addEventListener('click', function(event) {
             if (event.target === this) closeMenuModal();
         });
-
         // SEARCH AJAX: mencari ke seluruh data database tanpa reload halaman.
         (function() {
             var searchInput = document.getElementById('menuSearch');
@@ -1256,41 +1126,31 @@ require_once 'navbar.php';
             var mobileList = document.getElementById('menuMobileList');
             var timer = null;
             var requestController = null;
-
             if (!searchInput || !filterForm || !tableBody || !mobileList) return;
 
             function buildSearchUrl() {
                 var params = new URLSearchParams();
-
                 var keyword = searchInput.value.trim();
                 if (keyword !== '') {
                     params.set('q', keyword);
                 }
-
                 var category = filterForm.querySelector('[name="kategori_filter"]');
                 var status = filterForm.querySelector('[name="status"]');
-
                 if (category && category.value) {
                     params.set('kategori_filter', category.value);
                 }
-
                 if (status && status.value) {
                     params.set('status', status.value);
                 }
-
                 // Selalu mulai dari halaman 1 untuk hasil pencarian.
                 params.set('page', '1');
-
                 return 'menu_cafe.php?' + params.toString();
             }
-
             async function runAjaxSearch() {
                 if (requestController) {
                     requestController.abort();
                 }
-
                 requestController = new AbortController();
-
                 try {
                     var response = await fetch(buildSearchUrl(), {
                         method: 'GET',
@@ -1300,24 +1160,18 @@ require_once 'navbar.php';
                             'X-Requested-With': 'XMLHttpRequest'
                         }
                     });
-
                     if (!response.ok) {
                         throw new Error('HTTP ' + response.status);
                     }
-
                     var html = await response.text();
                     var doc = new DOMParser().parseFromString(html, 'text/html');
-
                     var newTableBody = doc.getElementById('menuTableBody');
                     var newMobileList = doc.getElementById('menuMobileList');
-
                     if (!newTableBody || !newMobileList) {
                         throw new Error('Hasil pencarian tidak valid.');
                     }
-
                     tableBody.innerHTML = newTableBody.innerHTML;
                     mobileList.innerHTML = newMobileList.innerHTML;
-
                     // Inisialisasi ulang icon bila tersedia.
                     if (window.lucide) {
                         lucide.createIcons();
@@ -1332,13 +1186,11 @@ require_once 'navbar.php';
                 clearTimeout(timer);
                 timer = setTimeout(runAjaxSearch, 250);
             }
-
             searchInput.addEventListener('input', queueAjaxSearch);
             searchInput.addEventListener('search', function() {
                 clearTimeout(timer);
                 runAjaxSearch();
             });
-
             searchInput.addEventListener('keydown', function(event) {
                 if (event.key === 'Enter') {
                     event.preventDefault();
@@ -1346,15 +1198,12 @@ require_once 'navbar.php';
                     runAjaxSearch();
                 }
             });
-
             // Filter kategori/status juga langsung refresh hasil tanpa reload.
             var category = filterForm.querySelector('[name="kategori_filter"]');
             var status = filterForm.querySelector('[name="status"]');
-
             if (category) {
                 category.addEventListener('change', runAjaxSearch);
             }
-
             if (status) {
                 status.addEventListener('change', runAjaxSearch);
             }

@@ -241,6 +241,8 @@ function pa_ensure_database(PDO $pdo): void
 
 $lokasiPilihan = [
     'Lobby Gedung Kantor',
+    'Perpustakaan',
+    'Lab',
     'Candra 1',
     'Candra 2',
     'Sari',
