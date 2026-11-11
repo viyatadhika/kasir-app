@@ -185,6 +185,7 @@ if (!function_exists('air_ensure_schema')) {
                 galon_dipinjamkan INT NOT NULL DEFAULT 0,
                 deposit_galon DECIMAL(15,2) NOT NULL DEFAULT 0,
                 catatan TEXT NULL,
+                alasan_pembatalan TEXT NULL,
                 created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at DATETIME NULL,
                 UNIQUE KEY uq_air_nomor_pesanan (nomor_pesanan),
@@ -193,6 +194,10 @@ if (!function_exists('air_ensure_schema')) {
                 INDEX idx_air_pesanan_pelanggan (pelanggan_id)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
         ");
+
+        if (!air_column_exists($pdo, 'air_pesanan', 'alasan_pembatalan')) {
+            $pdo->exec("ALTER TABLE air_pesanan ADD COLUMN alasan_pembatalan TEXT NULL AFTER catatan");
+        }
 
         if (!air_column_exists($pdo, 'air_pesanan', 'tanggal_pemesanan')) {
             $pdo->exec("ALTER TABLE air_pesanan ADD COLUMN tanggal_pemesanan DATE NULL AFTER user_id");
@@ -405,22 +410,29 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $action = trim((string)($_POST['action'] ?? ''));
         if ($action === 'cancel_order') {
             $orderId = (int)($_POST['order_id'] ?? 0);
+            $alasanPembatalan = trim((string)($_POST['alasan_pembatalan'] ?? ''));
             if ($orderId <= 0) {
                 throw new RuntimeException('Pesanan tidak valid.');
+            }
+            if ($alasanPembatalan === '') {
+                throw new RuntimeException('Keterangan alasan pembatalan wajib diisi.');
+            }
+            if (strlen($alasanPembatalan) > 1000) {
+                throw new RuntimeException('Keterangan pembatalan maksimal 1000 karakter.');
             }
 
             $stmt = $pdo->prepare("
                 UPDATE air_pesanan
-                SET status = 'batal', updated_at = NOW()
-                WHERE id = :id AND status <> 'selesai'
+                SET status = 'batal', alasan_pembatalan = :alasan, updated_at = NOW()
+                WHERE id = :id AND status NOT IN ('selesai', 'batal')
             ");
-            $stmt->execute([':id' => $orderId]);
+            $stmt->execute([':id' => $orderId, ':alasan' => $alasanPembatalan]);
 
             if ($stmt->rowCount() < 1) {
-                throw new RuntimeException('Pesanan selesai tidak dapat dibatalkan.');
+                throw new RuntimeException('Pesanan tidak ditemukan, sudah selesai, atau sudah dibatalkan.');
             }
 
-            $flash = 'Pesanan berhasil dibatalkan.';
+            $flash = 'Pesanan berhasil dibatalkan beserta keterangannya.';
         }
 
         if ($action === 'delete_order') {
@@ -1607,15 +1619,11 @@ require_once 'navbar.php';
                                         </button>
 
                                         <?php if (!in_array($status, ['selesai', 'batal'], true)): ?>
-                                            <form method="post" onsubmit="return confirm('Batalkan pesanan ini?')">
-                                                <input type="hidden" name="action" value="cancel_order">
-                                                <input type="hidden" name="order_id" value="<?php echo (int)$order['id']; ?>">
-                                                <button type="submit"
-                                                    class="order-action-btn order-action-cancel"
-                                                    aria-label="Batalkan pesanan">
-                                                    <span>Batal</span>
-                                                </button>
-                                            </form>
+                                            <button type="button" onclick='openCancelModal(<?php echo (int)$order['id']; ?>, <?php echo json_encode((string)$order['nomor_pesanan'], JSON_UNESCAPED_UNICODE | JSON_HEX_APOS | JSON_HEX_QUOT); ?>)'
+                                                class="order-action-btn order-action-cancel"
+                                                aria-label="Batalkan pesanan">
+                                                <span>Batal</span>
+                                            </button>
                                         <?php else: ?>
                                             <span class="px-3 py-2 text-[9px] font-black uppercase tracking-widest text-gray-400">Otomatis</span>
                                         <?php endif; ?>
@@ -1712,15 +1720,11 @@ require_once 'navbar.php';
                         </button>
 
                         <?php if (!in_array($status, ['selesai', 'batal'], true)): ?>
-                            <form method="post" onsubmit="return confirm('Batalkan pesanan ini?')">
-                                <input type="hidden" name="action" value="cancel_order">
-                                <input type="hidden" name="order_id" value="<?php echo (int)$order['id']; ?>">
-                                <button type="submit"
-                                    class="order-action-btn order-action-cancel"
-                                    aria-label="Batalkan pesanan">
-                                    <span>Batal</span>
-                                </button>
-                            </form>
+                            <button type="button" onclick='openCancelModal(<?php echo (int)$order['id']; ?>, <?php echo json_encode((string)$order['nomor_pesanan'], JSON_UNESCAPED_UNICODE | JSON_HEX_APOS | JSON_HEX_QUOT); ?>)'
+                                class="order-action-btn order-action-cancel"
+                                aria-label="Batalkan pesanan">
+                                <span>Batal</span>
+                            </button>
                         <?php else: ?>
                             <span class="order-action-btn text-gray-400 border-gray-200 bg-gray-50 cursor-default">
                                 Otomatis
@@ -1773,6 +1777,31 @@ require_once 'navbar.php';
         <?php endif; ?>
     </main>
 
+    <!-- Modal pembatalan: alasan wajib diisi dan disimpan terpisah dari catatan pelanggan. -->
+    <div id="cancelOrderModal" class="fixed inset-0 z-[110] hidden items-center justify-center bg-black/50 p-3 sm:p-4" role="dialog" aria-modal="true" aria-labelledby="cancelModalTitle">
+        <div class="w-full max-w-lg border border-gray-200 bg-white p-5 sm:p-6">
+            <div class="flex items-start justify-between gap-4">
+                <div>
+                    <p class="text-[9px] font-black uppercase tracking-widest text-red-600">Konfirmasi Pembatalan</p>
+                    <h2 id="cancelModalTitle" class="text-lg font-black mt-1">Batalkan Pesanan Air</h2>
+                    <p id="cancelOrderNumber" class="text-xs text-gray-500 mt-1"></p>
+                </div>
+                <button type="button" onclick="closeCancelModal()" class="w-9 h-9 border border-gray-200 text-xl" aria-label="Tutup">&times;</button>
+            </div>
+            <form method="post" id="cancelOrderForm" class="mt-5">
+                <input type="hidden" name="action" value="cancel_order">
+                <input type="hidden" name="order_id" id="cancelOrderId">
+                <label for="cancelReason" class="block text-[10px] font-black uppercase tracking-wider text-gray-600 mb-2">Alasan pembatalan <span class="text-red-600">*</span></label>
+                <textarea id="cancelReason" name="alasan_pembatalan" required maxlength="1000" rows="4" class="field h-auto py-3 resize-y" placeholder="Contoh: Pemesan membatalkan karena kebutuhan air berubah."></textarea>
+                <p class="text-[10px] text-gray-400 mt-2">Keterangan akan tersimpan dan dapat dilihat kembali pada detail pesanan berstatus Batal.</p>
+                <div class="flex flex-col-reverse sm:flex-row justify-end gap-2 mt-5">
+                    <button type="button" onclick="closeCancelModal()" class="btn border border-gray-200 bg-white text-gray-700">Kembali</button>
+                    <button type="submit" class="btn bg-red-600 text-white hover:bg-red-700">Ya, Batalkan Pesanan</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
     <div id="orderDetailModal"
         class="fixed inset-0 z-[100] hidden items-center justify-center bg-black/50 p-2 sm:p-4">
         <div class="detail-modal-panel w-full max-w-4xl overflow-y-auto bg-white border border-gray-200 rounded-sm">
@@ -1796,6 +1825,28 @@ require_once 'navbar.php';
     </div>
 
     <script>
+        function openCancelModal(orderId, orderNumber) {
+            document.getElementById('cancelOrderId').value = orderId;
+            document.getElementById('cancelOrderNumber').textContent = 'Nomor: ' + (orderNumber || '-');
+            document.getElementById('cancelReason').value = '';
+            var modal = document.getElementById('cancelOrderModal');
+            modal.classList.remove('hidden');
+            modal.classList.add('flex');
+            document.body.style.overflow = 'hidden';
+            document.getElementById('cancelReason').focus();
+        }
+
+        function closeCancelModal() {
+            var modal = document.getElementById('cancelOrderModal');
+            modal.classList.add('hidden');
+            modal.classList.remove('flex');
+            document.body.style.overflow = '';
+        }
+
+        document.getElementById('cancelOrderModal').addEventListener('click', function(event) {
+            if (event.target === this) closeCancelModal();
+        });
+
         function escapeHtml(value) {
             return String(value == null ? '' : value)
                 .replace(/&/g, '&amp;')
@@ -1951,6 +2002,12 @@ require_once 'navbar.php';
                 '</div>' +
                 '</div>' +
 
+                (order.status === 'batal' ?
+                    '<div class="mt-5 border border-red-200 bg-red-50 p-4">' +
+                    '<p class="text-[9px] font-black uppercase tracking-widest text-red-700">Alasan Pembatalan</p>' +
+                    '<p class="text-xs text-red-800 mt-2 whitespace-pre-wrap">' + escapeHtml(order.alasan_pembatalan || 'Tidak ada keterangan (data pembatalan lama).') + '</p>' +
+                    '</div>' : '') +
+
                 (order.catatan ?
                     '<div class="mt-5 border border-amber-100 bg-amber-50 p-4">' +
                     '<p class="text-[9px] font-black uppercase tracking-widest text-amber-700">Catatan</p>' +
@@ -1982,6 +2039,7 @@ require_once 'navbar.php';
 
         document.addEventListener('keydown', function(event) {
             if (event.key === 'Escape') {
+                closeCancelModal();
                 closeOrderDetail();
             }
         });
